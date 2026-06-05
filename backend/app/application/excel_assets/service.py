@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from app.application.excel_assets.models import (
+    DeleteExcelFileResult,
     FileNameCheckResult,
     RowLookupResult,
     SheetPreviewResult,
@@ -13,6 +14,7 @@ from app.application.excel_assets.models import (
 from app.application.excel_assets.profile import WorkbookProfileBuilder
 from app.core.errors import (
     AssetNotFoundError,
+    FileDeleteConfirmationRequiredError,
     FileNameConflictError,
     VersionActivationError,
 )
@@ -126,6 +128,32 @@ class ExcelAssetService:
 
     def get_file(self, file_id: str) -> ExcelFile:
         return self._require_file(file_id)
+
+    def delete_file(
+        self,
+        file_id: str,
+        *,
+        confirm_delete: bool = False,
+    ) -> DeleteExcelFileResult:
+        file = self._require_file(file_id)
+        if not confirm_delete:
+            raise FileDeleteConfirmationRequiredError(
+                display_name=file.display_name,
+                file_id=file.file_id,
+            )
+
+        counts = self._repository.delete_file(file_id)
+        self._storage.delete_file_tree(file_id)
+        return DeleteExcelFileResult(
+            file_id=file.file_id,
+            display_name=file.display_name,
+            deleted_versions=counts["deleted_versions"],
+            deleted_sheets=counts["deleted_sheets"],
+            deleted_artifacts=counts["deleted_artifacts"],
+            deleted_row_mappings=counts["deleted_row_mappings"],
+            deleted_summaries=counts["deleted_summaries"],
+            deleted_chat_session_documents=counts["deleted_chat_session_documents"],
+        )
 
     def get_active_file_version(self, file_id: str) -> ExcelFileVersion:
         file = self._require_file(file_id)

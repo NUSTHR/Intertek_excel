@@ -30,6 +30,9 @@ class ExcelAssetRepository(Protocol):
     def list_files(self) -> list[ExcelFile]:
         ...
 
+    def delete_file(self, file_id: str) -> dict[str, int]:
+        ...
+
     def create_version(self, version: ExcelFileVersion) -> None:
         ...
 

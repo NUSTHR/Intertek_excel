@@ -58,6 +58,7 @@ def get_llm_client() -> LlmClient:
         SiliconFlowConfig(
             api_base_url=settings.llm_api_base_url,
             api_key=settings.llm_api_key,
+            summary_model=settings.llm_summary_model,
             router_model=settings.llm_router_model,
             answer_model=settings.llm_answer_model,
             timeout_seconds=settings.llm_request_timeout_seconds,

@@ -7,6 +7,7 @@ from app.api.schemas import (
     ActiveExcelFileResponse,
     CheckFileNameRequest,
     CheckFileNameResponse,
+    DeleteExcelFileResponse,
     ExcelArtifactResponse,
     ExcelFileResponse,
     ExcelFileVersionResponse,
@@ -95,6 +96,25 @@ def get_excel_file(
     service: ExcelAssetServiceDependency,
 ) -> ExcelFileResponse:
     return _to_file_response(service.get_file(file_id))
+
+
+@router.delete("/files/{file_id}", response_model=DeleteExcelFileResponse)
+def delete_excel_file(
+    file_id: str,
+    service: ExcelAssetServiceDependency,
+    confirm_delete: Annotated[bool, Query()] = False,
+) -> DeleteExcelFileResponse:
+    result = service.delete_file(file_id, confirm_delete=confirm_delete)
+    return DeleteExcelFileResponse(
+        file_id=result.file_id,
+        display_name=result.display_name,
+        deleted_versions=result.deleted_versions,
+        deleted_sheets=result.deleted_sheets,
+        deleted_artifacts=result.deleted_artifacts,
+        deleted_row_mappings=result.deleted_row_mappings,
+        deleted_summaries=result.deleted_summaries,
+        deleted_chat_session_documents=result.deleted_chat_session_documents,
+    )
 
 
 @router.get("/files/{file_id}/active", response_model=ActiveExcelFileResponse)

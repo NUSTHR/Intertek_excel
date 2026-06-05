@@ -125,6 +125,17 @@ class ActiveExcelFileResponse(BaseModel):
     version: ExcelFileVersionResponse
 
 
+class DeleteExcelFileResponse(BaseModel):
+    file_id: str
+    display_name: str
+    deleted_versions: int
+    deleted_sheets: int
+    deleted_artifacts: int
+    deleted_row_mappings: int
+    deleted_summaries: int
+    deleted_chat_session_documents: int
+
+
 class SheetPreviewResponse(BaseModel):
     sheet: ExcelSheetResponse
     rows: list[list[str]]
@@ -163,10 +174,24 @@ class SheetRowsResponse(BaseModel):
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None
+    router_model: str | None = None
+    answer_model: str | None = None
 
 
 class ChatAnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
+    answer_model: str | None = None
+    selected_version_ids: list[str] = Field(default_factory=list)
+
+
+class ChatRouteRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = None
+    router_model: str | None = None
+
+
+class GenerateDocumentSummaryRequest(BaseModel):
+    model: str | None = None
 
 
 class ChatSessionResponse(BaseModel):
@@ -236,3 +261,14 @@ class ChatRouteResponse(BaseModel):
     attached_documents: list[AttachedDocumentResponse] = Field(default_factory=list)
     timings: list[ChatStageTimingResponse] = Field(default_factory=list)
     created_at: str
+
+
+class LlmModelDefaultsResponse(BaseModel):
+    summary_model: str
+    router_model: str
+    answer_model: str
+
+
+class LlmModelOptionsResponse(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    defaults: LlmModelDefaultsResponse

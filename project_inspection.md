@@ -27,8 +27,8 @@ Business-level interpretation:
 
 - The chat product is a knowledge-base Q&A experience over uploaded Excel workbooks, not merely a "current spreadsheet tab" assistant.
 - The user may ask questions that naturally span multiple uploaded workbooks. The router exists to choose relevant document versions from document descriptions before the answer model sees rows.
-- A selected file/version in the UI is primarily a preview and inspection context. It must not be assumed to be the only valid answer scope unless the user/UI explicitly chooses "current file only" or a defined file subset.
-- File scope is still important, but it is a constraint mechanism for explicit user choice, testing isolation, permissions, or future multi-select workflows. It should not erase the default knowledge-base routing concept.
+- A selected file/version in the UI is primarily a preview and inspection context.
+- The current implementation still routes across active document summaries in the knowledge base. It should not be assumed that chat is restricted to only the workbook currently previewed in the UI.
 
 User workflow:
 
@@ -43,14 +43,6 @@ User workflow:
 9. Model returns answer blocks with row IDs.
 10. Backend verifies row IDs.
 11. Frontend shows the answer, citations, and highlights source rows in a web table.
-
-Scope modes to preserve in future design:
-
-- `all_active`: router can consider all active document summaries in the knowledge base.
-- `current_file`: router/answer is constrained to the currently selected version, or router can be skipped if the scope contains exactly one version.
-- `selected_versions`: router can consider only a user-selected subset of versions.
-
-The intended enterprise direction is to support all three, with the UI making the active scope obvious to the user.
 
 ## 3. Current Technical Stack
 
@@ -75,8 +67,15 @@ Frontend:
 LLM provider:
 
 - SiliconFlow-compatible chat completions endpoint
-- Router model: `inclusionAI/Ling-flash-2.0`
-- Answer/summary model: `deepseek-ai/DeepSeek-V4-Pro`
+- Supported selectable models:
+  - `deepseek-ai/DeepSeek-V4-Pro`
+  - `Pro/deepseek-ai/DeepSeek-V3.2`
+  - `Qwen/Qwen3.6-27B`
+  - `Qwen/Qwen3.6-35B-A3B`
+  - `inclusionAI/Ling-flash-2.0`
+- Default summary model: `deepseek-ai/DeepSeek-V4-Pro`
+- Default router model: `inclusionAI/Ling-flash-2.0`
+- Default answer model: `deepseek-ai/DeepSeek-V4-Pro`
 - Fake LLM adapter exists for local tests only
 
 Do not commit real API keys. Backend `.env` is ignored and must remain local.
@@ -333,6 +332,11 @@ POST /api/excel/versions/{version_id}/summary/generate
 GET  /api/excel/versions/{version_id}/summary
 ```
 
+Current behavior note:
+
+- Summary generation supports a per-request model override.
+- The frontend exposes separate model selectors for summary, router, and answer stages.
+
 The summary prompt instructs the model to return strict JSON with:
 
 - summary text
@@ -372,7 +376,7 @@ POST /api/excel/chat/sessions/{session_id}/answer
 `/route` and `/answer` split the process for better frontend progress indicators:
 
 - `/route` calls the router model, attaches new documents, and returns selected/attached documents.
-- `/answer` uses already attached documents and calls the answer model.
+- `/answer` uses the versions selected for the current turn when they are supplied and calls the answer model.
 
 The frontend currently uses the session-oriented flow through `chat-api.ts`.
 
@@ -386,12 +390,13 @@ The current multi-turn design:
 ```text
 current question
 all user questions in this session
+recent chat turns
 already attached documents
-active document summaries
+candidate new document summaries
 ```
 
 3. Router model must not receive Excel rows.
-4. Router model must not receive assistant answer text.
+4. Router model can see recent assistant answer text through previous turn records.
 5. If router selects a file version not yet attached to this session, backend records it in `chat_session_documents`.
 6. If router selects the same version again, backend does not attach a duplicate.
 7. Answer model receives:
@@ -399,8 +404,8 @@ active document summaries
 ```text
 current question
 previous chat turns
-attached documents
-rows for all attached documents
+selected documents for the current turn
+rows for those selected documents
 ```
 
 8. Backend verifies row IDs returned by the model against attached document rows.
@@ -409,14 +414,12 @@ Important nuance:
 
 The project uses stateless chat-completions APIs. Even though the backend tracks "already attached" files, rows still have to be included in later model calls if the model needs to see them. The current session state prevents duplicate attachment records and duplicate file-context construction in backend state, but it does not eliminate token cost unless the provider supports server-side sessions or prompt/context caching.
 
-Recent implementation note:
+Current implementation note:
 
-- Chat request schemas now accept optional `allowed_version_ids`.
-- Backend chat service filters active summaries, selected documents, attached documents, and answer rows against `allowed_version_ids` when the list is non-empty.
-- Frontend currently passes the selected `version_id` as `allowed_version_ids` from `ExcelWorkspaceApp.vue` into `ChatPanel.vue`.
-- This was added to prevent unintended active-file selection during focused testing and single-file inspection flows.
-- Product caution: this should not be confused with the final default behavior for knowledge-base chat. If the conversation is meant to search all uploaded files, the frontend should send no `allowed_version_ids` or should explicitly use an `all_active` scope mode.
-- A future UI should expose the scope choice clearly instead of silently treating the currently previewed workbook as the only searchable source.
+- Chat request schemas now also accept request-level router/answer model overrides.
+- Summary generation accepts a request-level summary model override.
+- The router currently considers active document summaries in the knowledge base.
+- The frontend does not currently pass any explicit chat file scope to the backend.
 
 ## 13. Current LLM Prompt Stages
 
@@ -430,7 +433,9 @@ Stages:
    - Generates structured metadata summary from deterministic workbook profile only.
 
 2. `DOCUMENT_ROUTER_SYSTEM_PROMPT`
-   - Selects relevant document versions from summaries.
+   - Uses a conservative routing strategy.
+   - Prefers reusing already attached documents before expanding to new ones.
+   - Selects relevant document versions from attached/candidate summaries.
    - Does not answer the user question.
    - Does not see Excel rows.
 
@@ -528,9 +533,15 @@ The frontend has been styled with native CSS in:
 
 No Tailwind runtime or external icon library is required.
 
+Recent frontend improvements:
+
+- Chat history is now preserved across turns instead of showing only the latest answer.
+- The UI now exposes per-stage model selection for summary, router, and answer.
+- File deletion is available from the UI with explicit confirmation before hard deletion.
+
 Known frontend issue:
 
-- The user previously observed that Data Chat citations/source trace can crowd the right column and make the second question input hard to reach. Some loading-state improvements were made, but the right-column layout still deserves a dedicated UI pass:
+- Data Chat citations/source trace can still crowd the right column and make the input area less comfortable than desired during long answer sessions:
   - keep input fixed at the bottom,
   - make chat history independently scrollable,
   - make citation/source panels collapsible or independently scrollable.
@@ -548,6 +559,7 @@ Excel assets:
 ```text
 POST /api/excel/files
 GET  /api/excel/files
+DELETE /api/excel/files/{file_id}
 GET  /api/excel/files/{file_id}/versions
 GET  /api/excel/files/{file_id}/active
 GET  /api/excel/versions/{version_id}/sheets
@@ -568,6 +580,7 @@ GET  /api/excel/versions/{version_id}/summary
 Chat:
 
 ```text
+GET  /api/excel/llm/options
 POST /api/excel/chat
 POST /api/excel/chat/sessions
 GET  /api/excel/chat/sessions/{session_id}
@@ -595,6 +608,7 @@ EXCEL_MAX_UPLOAD_BYTES
 LLM_PROVIDER
 LLM_API_BASE_URL
 LLM_API_KEY
+LLM_SUMMARY_MODEL
 LLM_ROUTER_MODEL
 LLM_ANSWER_MODEL
 LLM_REQUEST_TIMEOUT_SECONDS
@@ -665,7 +679,7 @@ Latest recorded status:
 
 ```text
 ruff: passed
-pytest: 17 passed
+pytest: 22 passed
 npm run build: passed
 ```
 
@@ -735,20 +749,7 @@ This is correct for general multi-file knowledge-base search, but unsafe for tes
 
 Recommended next fix:
 
-Add chat-session file scope:
-
-```text
-allowed_file_ids
-allowed_version_ids
-scope_mode: all_active | selected_files_only
-```
-
-Then the router should select only within the allowed scope. The frontend should expose this as:
-
-- "Ask current file only"
-- or "Use all knowledge-base files"
-
-This is also necessary for future enterprise access control.
+Add explicit chat file scope so the router can be limited when product or test flows require it. The frontend should expose the active scope clearly to the user. This is also necessary for future enterprise access control.
 
 ## 22. Known Technical Risks
 
@@ -777,11 +778,24 @@ Recorded sanitized tests showed:
 
 Frontend should show route/answer progress separately. Split route/answer APIs already exist to support this.
 
-4. Citation quality
+Recent local runtime observations:
+
+- route for `coffee maker用什么做lvd`: about `4.57s`
+- answer with `deepseek-ai/DeepSeek-V4-Pro`: about `85.2s`
+
+4. Model context limits
+
+Runtime debugging confirmed a real current limit: `Pro/deepseek-ai/DeepSeek-V3.2` can fail at the answer stage with a provider `400` when the selected-document rows are too large for that model's prompt-token limit. One reproduced failure showed:
+
+- selected documents: `2`
+- row count: `1559`
+- provider error: `number of input tokens (241964) has exceeded max_prompt_tokens (163840) limit`
+
+5. Citation quality
 
 The backend verifies that row IDs exist, but it does not yet prove that the cited row semantically supports the exact claim. This is acceptable for MVP, but future versions should add stricter claim/evidence validation.
 
-5. Excel complexity
+6. Excel complexity
 
 Real Excel files may have:
 
@@ -795,7 +809,7 @@ Real Excel files may have:
 
 Current raw grid handling is row-level and display-text oriented. It does not attempt visual Excel reconstruction.
 
-6. Frontend source panel layout
+7. Frontend source panel layout
 
 Citation/source panels can crowd the chat input area. Needs UI refinement.
 
@@ -807,40 +821,23 @@ Recommended order:
 
 This is the most important next backend feature. It prevents unintended file selection and is a foundation for permissioning.
 
-2. Improve frontend chat layout
+2. Add context-size guardrails
+
+If selected rows exceed a safe character/token budget for the chosen answer model, the backend should fail clearly or shrink context deterministically instead of relying on provider-side `400` errors.
+
+3. Improve frontend chat layout
 
 Make the input always reachable and make citations/source trace collapsible or independently scrollable.
-
-3. Use split route/answer flow in frontend
-
-The backend already exposes:
-
-```text
-POST /chat/sessions/{session_id}/route
-POST /chat/sessions/{session_id}/answer
-```
-
-Frontend should call them separately to show:
-
-```text
-Selecting documents...
-Attached N files...
-Analyzing Excel rows...
-```
 
 4. Remove or rename legacy `LLM_CHAT_ROWS_PER_SHEET`
 
 It is misleading now that all attached rows are loaded.
 
-5. Add integration tests for scoped routing
+5. Add integration tests if scoped routing is introduced
 
 Once file scope exists, add tests proving a relevant but out-of-scope file is not selected or sent.
 
-6. Add context-size guardrails
-
-If attached rows exceed a configurable token/character budget, return a clear error instead of silently truncating.
-
-7. Add better session inspection API
+6. Add better session inspection API
 
 Current `GET /chat/sessions/{session_id}` returns only session metadata. Future API should expose:
 
@@ -851,7 +848,7 @@ last citations
 timings
 ```
 
-8. Improve timing/observability
+7. Improve timing/observability
 
 `ChatStageTiming` exists and timings are returned. Next step is structured logging and perhaps a lightweight trace ID.
 
@@ -892,9 +889,9 @@ npm run build
 6. Upload or select a test workbook.
 7. Generate summary.
 8. Create a chat session.
-9. Ask a scoped test question.
+9. Ask a test question.
 10. Click citations and confirm row highlight.
 
 ## 26. Current Status In One Sentence
 
-The project has a real working Excel QA MVP with versioned uploads, deterministic row-level provenance, persistent summaries, session-aware multi-turn chat, real SiliconFlow summary/routing/answer calls, verified citations, and a Vue testing UI; the next critical backend task is adding explicit chat file scope so the router cannot unintentionally select unrelated active files.
+The project has a real working Excel QA MVP with versioned uploads, deterministic row-level provenance, persistent summaries, configurable SiliconFlow model selection, session-aware multi-turn chat, conservative router prompts, verified citations, document deletion, and a Vue testing UI; the next critical backend tasks are explicit chat file scope and answer-stage context guardrails.

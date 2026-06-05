@@ -206,6 +206,66 @@ def test_chat_route_returns_documents_before_answer_stage(
         )
 
 
+def test_llm_options_endpoint_and_request_level_models(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        options_response = client.get("/api/excel/llm/options")
+        assert options_response.status_code == 200
+        options_payload = options_response.json()
+        assert "deepseek-ai/DeepSeek-V4-Pro" in options_payload["models"]
+        assert "Qwen/Qwen3.6-27B" in options_payload["models"]
+
+        workbook_path = tmp_path / "standards.xlsx"
+        _write_large_xlsx_fixture(workbook_path, rows=5)
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "standards.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        version_id = upload_response.json()["version"]["version_id"]
+
+        summary_response = client.post(
+            f"/api/excel/versions/{version_id}/summary/generate",
+            json={"model": "Qwen/Qwen3.6-27B"},
+        )
+        assert summary_response.status_code == 200
+
+        session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+        route_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/route",
+            json={
+                "question": "route first",
+                "router_model": "inclusionAI/Ling-flash-2.0",
+            },
+        )
+        assert route_response.status_code == 200
+        selected_version_ids = [
+            document["version_id"] for document in route_response.json()["selected_documents"]
+        ]
+
+        answer_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/answer",
+            json={
+                "question": "route first",
+                "answer_model": "deepseek-ai/DeepSeek-V4-Pro",
+                "selected_version_ids": selected_version_ids,
+            },
+        )
+        assert answer_response.status_code == 200
+
+        assert llm_client.summary_models == ["Qwen/Qwen3.6-27B"]
+        assert llm_client.route_models == ["inclusionAI/Ling-flash-2.0"]
+        assert llm_client.answer_models == ["deepseek-ai/DeepSeek-V4-Pro"]
+
+
 def _write_xlsx_fixture(path: Path) -> None:
     workbook = Workbook()
     worksheet = workbook.active
@@ -227,8 +287,20 @@ def _write_large_xlsx_fixture(path: Path, rows: int) -> None:
 
 class CapturingLlmClient(FakeLlmClient):
     def __init__(self) -> None:
+        self.summary_models: list[str | None] = []
+        self.route_models: list[str | None] = []
+        self.answer_models: list[str | None] = []
         self.route_calls: list[dict] = []
         self.answer_calls: list[dict] = []
+
+    def generate_document_summary(
+        self,
+        profile,
+        *,
+        model: str | None = None,
+    ):
+        self.summary_models.append(model)
+        return super().generate_document_summary(profile, model=model)
 
     def route_documents(
         self,
@@ -237,12 +309,16 @@ class CapturingLlmClient(FakeLlmClient):
         max_documents: int,
         user_questions: list[str] | None = None,
         attached_documents: list[AttachedDocument] | None = None,
+        previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
     ) -> list[SelectedDocument]:
+        self.route_models.append(model)
         self.route_calls.append(
             {
                 "question": question,
                 "user_questions": user_questions or [],
                 "attached_documents": attached_documents or [],
+                "previous_turns": previous_turns or [],
             }
         )
         if not summaries:
@@ -263,7 +339,9 @@ class CapturingLlmClient(FakeLlmClient):
         documents: list[SelectedDocument],
         rows: list[dict],
         previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
     ) -> DraftChatAnswer:
+        self.answer_models.append(model)
         self.answer_calls.append(
             {
                 "question": question,

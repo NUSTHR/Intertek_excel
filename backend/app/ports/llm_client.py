@@ -11,7 +11,12 @@ from app.domain.models import (
 
 
 class LlmClient(Protocol):
-    def generate_document_summary(self, profile: WorkbookProfile) -> DocumentSummary:
+    def generate_document_summary(
+        self,
+        profile: WorkbookProfile,
+        *,
+        model: str | None = None,
+    ) -> DocumentSummary:
         ...
 
     def route_documents(
@@ -21,6 +26,8 @@ class LlmClient(Protocol):
         max_documents: int,
         user_questions: list[str] | None = None,
         attached_documents: list[AttachedDocument] | None = None,
+        previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
     ) -> list[SelectedDocument]:
         ...
 
@@ -30,5 +37,6 @@ class LlmClient(Protocol):
         documents: list[SelectedDocument],
         rows: list[dict],
         previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
     ) -> DraftChatAnswer:
         ...

@@ -11,9 +11,16 @@ async function requestSummary(path: string, init: RequestInit): Promise<Document
   return (await response.json()) as DocumentSummary
 }
 
-export async function generateDocumentSummary(versionId: string): Promise<DocumentSummary> {
+export async function generateDocumentSummary(
+  versionId: string,
+  model: string | null = null,
+): Promise<DocumentSummary> {
   return requestSummary(`/api/excel/versions/${versionId}/summary/generate`, {
     method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model }),
   })
 }
 

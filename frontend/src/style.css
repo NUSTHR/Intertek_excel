@@ -352,6 +352,15 @@ h3 {
   background: var(--surface-low);
 }
 
+.danger-text {
+  color: var(--danger);
+}
+
+.danger-text:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
 .danger-subtle {
   min-height: 34px;
   padding: 8px 12px;
@@ -619,6 +628,9 @@ h3 {
 }
 
 .row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
   text-align: right;
 }
 
@@ -765,6 +777,31 @@ label > span {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-top: 18px;
+}
+
+.model-config-card {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--surface-low);
+}
+
+.model-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.model-config-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.model-config-grid span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .evidence-strip {

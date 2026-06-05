@@ -1,9 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 
 from app.api.dependencies import get_document_summary_service
-from app.api.schemas import DocumentSummaryResponse, SheetSummaryResponse
+from app.api.schemas import (
+    DocumentSummaryResponse,
+    GenerateDocumentSummaryRequest,
+    SheetSummaryResponse,
+)
 from app.application.document_summaries.service import DocumentSummaryService
 from app.core.errors import AssetNotFoundError
 from app.domain.models import DocumentSummary
@@ -22,8 +26,11 @@ DocumentSummaryServiceDependency = Annotated[
 def generate_document_summary(
     version_id: str,
     service: DocumentSummaryServiceDependency,
+    request: GenerateDocumentSummaryRequest = Body(
+        default_factory=GenerateDocumentSummaryRequest
+    ),
 ) -> DocumentSummaryResponse:
-    return _to_summary_response(service.generate_summary(version_id))
+    return _to_summary_response(service.generate_summary(version_id, model=request.model))
 
 
 @router.get("/versions/{version_id}/summary", response_model=DocumentSummaryResponse)

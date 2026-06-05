@@ -167,6 +167,44 @@ def test_api_failed_replacement_keeps_previous_active_version(
     ]
 
 
+def test_api_delete_file_requires_confirmation_and_hard_deletes(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_xlsx_fixture(workbook_path)
+
+    with workbook_path.open("rb") as workbook_file:
+        upload_response = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "standards.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert upload_response.status_code == 200
+    file_id = upload_response.json()["file"]["file_id"]
+
+    confirmation_response = client.delete(f"/api/excel/files/{file_id}")
+    assert confirmation_response.status_code == 409
+    assert confirmation_response.json()["requires_confirmation"] is True
+
+    delete_response = client.delete(f"/api/excel/files/{file_id}?confirm_delete=true")
+    assert delete_response.status_code == 200
+    deleted = delete_response.json()
+    assert deleted["file_id"] == file_id
+    assert deleted["deleted_versions"] == 1
+    assert deleted["deleted_sheets"] == 1
+    assert deleted["deleted_artifacts"] == 4
+
+    missing_response = client.get(f"/api/excel/files/{file_id}")
+    assert missing_response.status_code == 404
+
+
 def _write_xlsx_fixture(path: Path) -> None:
     workbook = Workbook()
     worksheet = workbook.active

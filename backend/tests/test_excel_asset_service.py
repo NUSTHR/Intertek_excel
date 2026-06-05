@@ -5,7 +5,12 @@ import pytest
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.application.excel_assets.service import ExcelAssetService
-from app.core.errors import FileNameConflictError, InvalidExcelFileError
+from app.core.errors import (
+    AssetNotFoundError,
+    FileDeleteConfirmationRequiredError,
+    FileNameConflictError,
+    InvalidExcelFileError,
+)
 from app.domain.models import ExcelArtifactType, ExcelVersionStatus
 from app.ports.workbook_reader import WorkbookData, WorkbookSheet
 
@@ -134,3 +139,27 @@ def test_profile_artifacts_active_version_and_paginated_rows(
     assert rows.total_rows == 3
     assert rows.mappings[0].row_id == "S001_R2"
     assert rows.rows[0] == ["S001_R2", "Apex", "High"]
+
+
+def test_delete_file_requires_confirmation_and_removes_related_data(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+
+    with pytest.raises(FileDeleteConfirmationRequiredError):
+        service.delete_file(result.file.file_id)
+
+    deleted = service.delete_file(result.file.file_id, confirm_delete=True)
+
+    assert deleted.file_id == result.file.file_id
+    assert deleted.display_name == "risk.xlsx"
+    assert deleted.deleted_versions == 1
+    assert deleted.deleted_sheets == 2
+    assert deleted.deleted_artifacts == 5
+    assert deleted.deleted_row_mappings == 5
+    assert deleted.deleted_summaries == 0
+    assert deleted.deleted_chat_session_documents == 0
+    assert not (service._storage._storage_root / "files" / result.file.file_id).exists()
+
+    with pytest.raises(AssetNotFoundError):
+        service.get_file(result.file.file_id)

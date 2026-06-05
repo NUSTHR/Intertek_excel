@@ -71,8 +71,9 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
         SiliconFlowConfig(
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
-            router_model="router-model",
-            answer_model="answer-model",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
             timeout_seconds=1,
             summary_max_profile_rows=2,
         ),
@@ -130,10 +131,13 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     assert draft_answer.citations[0].row_id == "S001_R1"
     assert draft_answer.citations[0].quote == "Code DOW"
     assert [request["model"] for request in requests] == [
-        "answer-model",
-        "router-model",
-        "answer-model",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "inclusionAI/Ling-flash-2.0",
+        "Qwen/Qwen3.6-27B",
     ]
+    assert "enable_thinking" not in requests[0]
+    assert "enable_thinking" not in requests[1]
+    assert requests[2]["enable_thinking"] is False
 
 
 def test_siliconflow_router_filters_unknown_version() -> None:
@@ -166,8 +170,9 @@ def test_siliconflow_router_filters_unknown_version() -> None:
         SiliconFlowConfig(
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
-            router_model="router-model",
-            answer_model="answer-model",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
             timeout_seconds=1,
             summary_max_profile_rows=2,
         ),
@@ -207,8 +212,9 @@ def test_siliconflow_timeout_error_includes_stage_model_and_duration() -> None:
         SiliconFlowConfig(
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
-            router_model="router-model",
-            answer_model="answer-model",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
             timeout_seconds=1,
             summary_max_profile_rows=2,
         ),
@@ -237,8 +243,67 @@ def test_siliconflow_timeout_error_includes_stage_model_and_duration() -> None:
 
     error = exc_info.value
     assert error.stage == "route_model"
-    assert error.model == "router-model"
+    assert error.model == "inclusionAI/Ling-flash-2.0"
     assert error.duration_seconds >= 0
     assert "stage=route_model" in str(error)
-    assert "model=router-model" in str(error)
+    assert "model=inclusionAI/Ling-flash-2.0" in str(error)
     assert "duration_seconds=" in str(error)
+
+
+def test_siliconflow_uses_enable_thinking_false_for_supported_models() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "selected_documents": [],
+                                    "decision_reason": "reuse attached",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = SiliconFlowLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="deepseek-ai/DeepSeek-V4-Pro",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+    client.route_documents(
+        "question",
+        [
+            DocumentSummary(
+                summary_id="summary_1",
+                file_id="file_1",
+                version_id="version_1",
+                summary_text="summary",
+                business_domain="domain",
+                key_topics=[],
+                suitable_questions=[],
+                unsuitable_questions=[],
+                sheet_summaries=[],
+                created_at="now",
+            )
+        ],
+        max_documents=3,
+        model="Qwen/Qwen3.6-27B",
+    )
+
+    assert requests[0]["enable_thinking"] is False

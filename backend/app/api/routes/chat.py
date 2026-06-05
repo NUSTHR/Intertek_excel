@@ -8,14 +8,19 @@ from app.api.schemas import (
     ChatAnswerBlockResponse,
     ChatAnswerRequest,
     ChatAnswerResponse,
+    ChatRouteRequest,
     ChatRequest,
     ChatRouteResponse,
     ChatSessionResponse,
     ChatStageTimingResponse,
     ExcelCitationResponse,
+    LlmModelDefaultsResponse,
+    LlmModelOptionsResponse,
     SelectedDocumentResponse,
 )
 from app.application.chat.service import ChatService
+from app.core.config import get_settings
+from app.core.llm_catalog import list_supported_llm_models
 from app.core.errors import AssetNotFoundError
 from app.domain.models import ChatAnswer, ChatRouteResult, ChatSession
 
@@ -29,7 +34,12 @@ def answer_excel_question(
     service: ChatServiceDependency,
 ) -> ChatAnswerResponse:
     return _to_chat_answer_response(
-        service.answer_question(request.question, session_id=request.session_id)
+        service.answer_question(
+            request.question,
+            session_id=request.session_id,
+            router_model=request.router_model,
+            answer_model=request.answer_model,
+        )
     )
 
 
@@ -59,7 +69,12 @@ def answer_excel_session_question(
     service: ChatServiceDependency,
 ) -> ChatAnswerResponse:
     return _to_chat_answer_response(
-        service.answer_question(request.question, session_id=session_id)
+        service.answer_question(
+            request.question,
+            session_id=session_id,
+            router_model=request.router_model,
+            answer_model=request.answer_model,
+        )
     )
 
 
@@ -69,11 +84,15 @@ def answer_excel_session_question(
 )
 def route_excel_session_question(
     session_id: str,
-    request: ChatRequest,
+    request: ChatRouteRequest,
     service: ChatServiceDependency,
 ) -> ChatRouteResponse:
     return _to_chat_route_response(
-        service.route_question(request.question, session_id=session_id)
+        service.route_question(
+            request.question,
+            session_id=session_id,
+            router_model=request.router_model,
+        )
     )
 
 
@@ -87,7 +106,25 @@ def answer_excel_routed_session_question(
     service: ChatServiceDependency,
 ) -> ChatAnswerResponse:
     return _to_chat_answer_response(
-        service.answer_routed_question(request.question, session_id=session_id)
+        service.answer_routed_question(
+            request.question,
+            session_id=session_id,
+            answer_model=request.answer_model,
+            selected_version_ids=request.selected_version_ids,
+        )
+    )
+
+
+@router.get("/llm/options", response_model=LlmModelOptionsResponse)
+def get_llm_model_options() -> LlmModelOptionsResponse:
+    settings = get_settings()
+    return LlmModelOptionsResponse(
+        models=list_supported_llm_models(),
+        defaults=LlmModelDefaultsResponse(
+            summary_model=settings.llm_summary_model,
+            router_model=settings.llm_router_model,
+            answer_model=settings.llm_answer_model,
+        ),
     )
 
 

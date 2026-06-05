@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import {
   answerRoutedExcelQuestion,
@@ -10,6 +10,17 @@ import type { ChatAnswer, ChatRouteResult, ExcelCitation } from '../types/chat'
 import CitationPanel from './CitationPanel.vue'
 import SourceTracePanel from './SourceTracePanel.vue'
 
+interface ChatHistoryEntry {
+  question: string
+  route: ChatRouteResult | null
+  answer: ChatAnswer | null
+}
+
+const props = defineProps<{
+  routerModel: string | null
+  answerModel: string | null
+}>()
+
 const emit = defineEmits<{
   answerReceived: [answer: ChatAnswer]
   routeReceived: [route: ChatRouteResult]
@@ -18,11 +29,24 @@ const emit = defineEmits<{
 
 const question = ref<string>('')
 const sessionId = ref<string>('')
-const lastQuestion = ref<string>('')
-const answer = ref<ChatAnswer | null>(null)
+const history = ref<ChatHistoryEntry[]>([])
 const selectedCitation = ref<ExcelCitation | null>(null)
 const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
+
+const latestAnswer = computed<ChatAnswer | null>(() => {
+  for (let index = history.value.length - 1; index >= 0; index -= 1) {
+    const answer = history.value[index]?.answer
+    if (answer) {
+      return answer
+    }
+  }
+  return null
+})
+
+const latestEntry = computed<ChatHistoryEntry | null>(() => {
+  return history.value.at(-1) ?? null
+})
 
 async function submitQuestion(): Promise<void> {
   const trimmedQuestion = question.value.trim()
@@ -32,25 +56,39 @@ async function submitQuestion(): Promise<void> {
   }
   errorMessage.value = ''
   isAsking.value = true
-  lastQuestion.value = trimmedQuestion
-  answer.value = null
   selectedCitation.value = null
+  const entry: ChatHistoryEntry = {
+    question: trimmedQuestion,
+    route: null,
+    answer: null,
+  }
+  history.value = [...history.value, entry]
   try {
     if (!sessionId.value) {
       sessionId.value = (await createChatSession()).session_id
     }
-    const route = await routeExcelQuestion(trimmedQuestion, sessionId.value)
+    const route = await routeExcelQuestion(trimmedQuestion, sessionId.value, props.routerModel)
     sessionId.value = route.session_id
+    entry.route = route
+    history.value = [...history.value]
     emit('routeReceived', route)
-    answer.value = await answerRoutedExcelQuestion(trimmedQuestion, sessionId.value)
-    sessionId.value = answer.value.session_id
-    emit('answerReceived', answer.value)
-    selectedCitation.value = answer.value.citations[0] ?? null
+    const answer = await answerRoutedExcelQuestion(
+      trimmedQuestion,
+      sessionId.value,
+      props.answerModel,
+      route.selected_documents.map((document) => document.version_id),
+    )
+    entry.answer = answer
+    history.value = [...history.value]
+    sessionId.value = answer.session_id
+    emit('answerReceived', answer)
+    selectedCitation.value = answer.citations[0] ?? null
     if (selectedCitation.value) {
       emit('selectCitation', selectedCitation.value)
     }
     question.value = ''
   } catch (error: unknown) {
+    history.value = history.value.filter((item) => item !== entry)
     errorMessage.value = error instanceof Error ? error.message : 'Unexpected error.'
   } finally {
     isAsking.value = false
@@ -63,7 +101,7 @@ function selectCitation(citation: ExcelCitation): void {
 }
 
 function selectCitationById(citationId: string): void {
-  const citation = answer.value?.citations.find((item) => item.citation_id === citationId)
+  const citation = latestAnswer.value?.citations.find((item) => item.citation_id === citationId)
   if (citation) {
     selectCitation(citation)
   }
@@ -77,50 +115,60 @@ function selectCitationById(citationId: string): void {
         <p class="eyebrow">ExcelAI</p>
         <h3>Data Chat</h3>
       </div>
-      <span class="doc-count">{{ answer?.selected_documents.length ?? 0 }} docs</span>
+      <span class="doc-count">{{ latestAnswer?.selected_documents.length ?? latestEntry?.route?.selected_documents.length ?? 0 }} docs</span>
     </div>
 
     <div class="chat-history">
-      <div v-if="lastQuestion" class="message user-message">
-        <p>{{ lastQuestion }}</p>
-        <span>User</span>
-      </div>
+      <template v-if="history.length > 0">
+        <template v-for="(entry, entryIndex) in history" :key="`${entryIndex}-${entry.question}`">
+          <div class="message user-message">
+            <p>{{ entry.question }}</p>
+            <span>User</span>
+          </div>
 
-      <article v-if="isAsking" class="message assistant-message loading-message">
-        <div class="assistant-title">
-          <span>AI</span>
-          <strong>ExcelAI</strong>
-        </div>
-        <p>Waiting for model response.</p>
-      </article>
-
-      <article v-else-if="answer" class="message assistant-message">
-        <div class="assistant-title">
-          <span>AI</span>
-          <strong>ExcelAI</strong>
-        </div>
-        <p v-if="answer.insufficient_evidence" class="warning-text">Insufficient evidence.</p>
-        <div
-          v-for="(block, blockIndex) in answer.answer_blocks"
-          :key="`${answer.created_at}-${blockIndex}`"
-          class="answer-block"
-        >
-          <p>{{ block.text }}</p>
-          <button
-            v-for="citationId in block.citation_ids"
-            :key="`${blockIndex}-${citationId}`"
-            type="button"
-            class="citation-chip"
-            @click="selectCitationById(citationId)"
+          <article
+            v-if="entry.answer"
+            class="message assistant-message"
           >
-            [{{ citationId }}]
-          </button>
-        </div>
-        <p v-if="answer.answer_blocks.length === 0" class="empty-copy">No answer blocks returned.</p>
-        <div v-if="answer.warnings.length > 0" class="warning-list">
-          <p v-for="warning in answer.warnings" :key="warning">{{ warning }}</p>
-        </div>
-      </article>
+            <div class="assistant-title">
+              <span>AI</span>
+              <strong>ExcelAI</strong>
+            </div>
+            <p v-if="entry.answer.insufficient_evidence" class="warning-text">Insufficient evidence.</p>
+            <div
+              v-for="(block, blockIndex) in entry.answer.answer_blocks"
+              :key="`${entry.answer.created_at}-${blockIndex}`"
+              class="answer-block"
+            >
+              <p>{{ block.text }}</p>
+              <button
+                v-for="citationId in block.citation_ids"
+                :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
+                type="button"
+                class="citation-chip"
+                @click="selectCitationById(citationId)"
+              >
+                [{{ citationId }}]
+              </button>
+            </div>
+            <p v-if="entry.answer.answer_blocks.length === 0" class="empty-copy">No answer blocks returned.</p>
+            <div v-if="entry.answer.warnings.length > 0" class="warning-list">
+              <p v-for="warning in entry.answer.warnings" :key="warning">{{ warning }}</p>
+            </div>
+          </article>
+
+          <article
+            v-else-if="isAsking && entryIndex === history.length - 1"
+            class="message assistant-message loading-message"
+          >
+            <div class="assistant-title">
+              <span>AI</span>
+              <strong>ExcelAI</strong>
+            </div>
+            <p>Waiting for model response.</p>
+          </article>
+        </template>
+      </template>
 
       <div v-else class="message assistant-message quiet-message">
         <div class="assistant-title">
@@ -131,7 +179,7 @@ function selectCitationById(citationId: string): void {
       </div>
     </div>
 
-    <CitationPanel :citations="answer?.citations ?? []" @select-citation="selectCitation" />
+    <CitationPanel :citations="latestAnswer?.citations ?? []" @select-citation="selectCitation" />
     <SourceTracePanel :citation="selectedCitation" />
 
     <p v-if="errorMessage" class="error-note">{{ errorMessage }}</p>

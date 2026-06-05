@@ -82,6 +82,17 @@ export interface ActiveExcelFileResponse {
   version: ExcelFileVersion
 }
 
+export interface DeleteExcelFileResponse {
+  file_id: string
+  display_name: string
+  deleted_versions: number
+  deleted_sheets: number
+  deleted_artifacts: number
+  deleted_row_mappings: number
+  deleted_summaries: number
+  deleted_chat_session_documents: number
+}
+
 export interface SheetPreviewResponse {
   sheet: ExcelSheet
   rows: string[][]

@@ -10,7 +10,9 @@ from app.core.config import get_settings
 from app.core.errors import (
     AssetNotFoundError,
     ExcelWorkspaceError,
+    FileDeleteConfirmationRequiredError,
     FileNameConflictError,
+    InvalidLlmModelError,
     InvalidExcelFileError,
     UploadValidationError,
     VersionActivationError,
@@ -45,6 +47,37 @@ async def handle_file_name_conflict(
             "display_name": exc.display_name,
             "file_id": exc.file_id,
             "requires_confirmation": True,
+        },
+    )
+
+
+@app.exception_handler(FileDeleteConfirmationRequiredError)
+async def handle_file_delete_confirmation_required(
+    _request: Request,
+    exc: FileDeleteConfirmationRequiredError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": str(exc),
+            "display_name": exc.display_name,
+            "file_id": exc.file_id,
+            "requires_confirmation": True,
+        },
+    )
+
+
+@app.exception_handler(InvalidLlmModelError)
+async def handle_invalid_llm_model(
+    _request: Request,
+    exc: InvalidLlmModelError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": str(exc),
+            "stage": exc.stage,
+            "model": exc.model,
         },
     )
 

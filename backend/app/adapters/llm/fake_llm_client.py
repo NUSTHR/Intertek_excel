@@ -14,7 +14,13 @@ from app.domain.models import (
 
 
 class FakeLlmClient:
-    def generate_document_summary(self, profile: WorkbookProfile) -> DocumentSummary:
+    def generate_document_summary(
+        self,
+        profile: WorkbookProfile,
+        *,
+        model: str | None = None,
+    ) -> DocumentSummary:
+        _ = model
         sheet_names = [sheet.sheet_name for sheet in profile.sheets]
         key_topics = self._unique_values(
             [
@@ -67,8 +73,10 @@ class FakeLlmClient:
         max_documents: int,
         user_questions: list[str] | None = None,
         attached_documents: list[AttachedDocument] | None = None,
+        previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
     ) -> list[SelectedDocument]:
-        _ = user_questions, attached_documents
+        _ = user_questions, attached_documents, previous_turns, model
         scored = sorted(
             summaries,
             key=lambda summary: self._score(question, summary),
@@ -91,8 +99,9 @@ class FakeLlmClient:
         documents: list[SelectedDocument],
         rows: list[dict],
         previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
     ) -> DraftChatAnswer:
-        _ = previous_turns
+        _ = previous_turns, model
         cited_row_ids = [str(row["row_id"]) for row in rows[:3]]
         selected_count = len(documents)
         row_count = len(rows)

@@ -1,6 +1,8 @@
 export interface ChatRequest {
   question: string
   session_id?: string | null
+  router_model?: string | null
+  answer_model?: string | null
 }
 
 export interface ChatSession {
@@ -70,4 +72,9 @@ export interface ChatRouteResult {
   attached_documents: AttachedDocument[]
   timings: ChatStageTiming[]
   created_at: string
+}
+
+export interface ChatModelSelection {
+  routerModel: string
+  answerModel: string
 }

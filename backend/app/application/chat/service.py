@@ -54,18 +54,32 @@ class ChatService:
     def get_session(self, session_id: str) -> ChatSession | None:
         return self._sessions.get_session(session_id)
 
-    def answer_question(self, question: str, session_id: str | None = None) -> ChatAnswer:
-        route_result = self.route_question(question, session_id=session_id)
+    def answer_question(
+        self,
+        question: str,
+        session_id: str | None = None,
+        *,
+        router_model: str | None = None,
+        answer_model: str | None = None,
+    ) -> ChatAnswer:
+        route_result = self.route_question(
+            question,
+            session_id=session_id,
+            router_model=router_model,
+        )
         return self.answer_routed_question(
             question=question,
             session_id=route_result.session_id,
             route_result=route_result,
+            answer_model=answer_model,
         )
 
     def route_question(
         self,
         question: str,
         session_id: str | None = None,
+        *,
+        router_model: str | None = None,
     ) -> ChatRouteResult:
         total_timer = StageTimer()
         session = self._get_or_create_session(session_id)
@@ -79,6 +93,8 @@ class ChatService:
                 max_documents=self._max_documents,
                 user_questions=[turn.question for turn in existing_turns] + [question],
                 attached_documents=attached_before,
+                previous_turns=existing_turns,
+                model=router_model,
             )
 
         with total_timer.measure("attach_documents"):
@@ -113,19 +129,28 @@ class ChatService:
         question: str,
         session_id: str,
         route_result: ChatRouteResult | None = None,
+        *,
+        answer_model: str | None = None,
+        selected_version_ids: list[str] | None = None,
     ) -> ChatAnswer:
         total_timer = StageTimer()
         session = self._get_or_create_session(session_id)
         existing_turns = self._sessions.list_turns(session.session_id)
         attached_documents = self._sessions.list_attached_documents(session.session_id)
+        documents_for_answer = self._resolve_documents_for_answer(
+            attached_documents=attached_documents,
+            route_result=route_result,
+            selected_version_ids=selected_version_ids,
+        )
         with total_timer.measure("load_rows"):
-            rows, citation_index = self._load_rows_for_attached_documents(attached_documents)
+            rows, citation_index = self._load_rows_for_documents(documents_for_answer)
         with total_timer.measure("answer_model"):
             draft_answer = self._llm_client.answer_with_rows(
                 question=question,
-                documents=self._attached_to_selected_documents(attached_documents),
+                documents=documents_for_answer,
                 rows=rows,
                 previous_turns=existing_turns,
+                model=answer_model,
             )
         cited_row_ids = [
             row_id
@@ -152,11 +177,7 @@ class ChatService:
         created_at = utc_now_iso()
         answer_timings = [*total_timer.timings(), total_timer.total("answer_total")]
         timings = [*(route_result.timings if route_result else []), *answer_timings]
-        selected_documents = (
-            route_result.selected_documents
-            if route_result is not None
-            else self._attached_to_selected_documents(attached_documents)
-        )
+        selected_documents = documents_for_answer
         newly_attached_documents = (
             route_result.newly_attached_documents if route_result is not None else []
         )
@@ -198,6 +219,26 @@ class ChatService:
             newly_attached_count=0,
         )
         return answer
+
+    def _resolve_documents_for_answer(
+        self,
+        *,
+        attached_documents: list[AttachedDocument],
+        route_result: ChatRouteResult | None,
+        selected_version_ids: list[str] | None,
+    ) -> list[SelectedDocument]:
+        if route_result is not None:
+            return route_result.selected_documents or self._attached_to_selected_documents(
+                attached_documents
+            )
+        if selected_version_ids:
+            selected_version_id_set = set(selected_version_ids)
+            return [
+                document
+                for document in self._attached_to_selected_documents(attached_documents)
+                if document.version_id in selected_version_id_set
+            ]
+        return self._attached_to_selected_documents(attached_documents)
 
     def _get_or_create_session(self, session_id: str | None) -> ChatSession:
         if session_id is None:

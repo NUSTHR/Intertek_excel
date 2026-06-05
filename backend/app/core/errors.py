@@ -28,6 +28,20 @@ class FileNameConflictError(ExcelWorkspaceError):
         self.file_id = file_id
 
 
+class FileDeleteConfirmationRequiredError(ExcelWorkspaceError):
+    def __init__(self, display_name: str, file_id: str) -> None:
+        super().__init__(f"deleting '{display_name}' requires explicit confirmation")
+        self.display_name = display_name
+        self.file_id = file_id
+
+
+class InvalidLlmModelError(ExcelWorkspaceError):
+    def __init__(self, stage: str, model: str) -> None:
+        super().__init__(f"unsupported {stage} model '{model}'")
+        self.stage = stage
+        self.model = model
+
+
 class AssetNotFoundError(ExcelWorkspaceError):
     pass
 

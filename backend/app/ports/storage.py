@@ -37,3 +37,6 @@ class ExcelArtifactStorage(Protocol):
         rows: list[list[str]],
     ) -> Path:
         ...
+
+    def delete_file_tree(self, file_id: str) -> None:
+        ...

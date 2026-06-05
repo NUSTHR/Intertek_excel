@@ -193,6 +193,147 @@ class SQLiteExcelAssetRepository:
             ).fetchall()
         return [file for row in rows if (file := self._to_file(row)) is not None]
 
+    def delete_file(self, file_id: str) -> dict[str, int]:
+        with self._connect() as connection:
+            version_rows = connection.execute(
+                """
+                SELECT version_id FROM excel_file_versions
+                WHERE file_id = ?
+                """,
+                (file_id,),
+            ).fetchall()
+            version_ids = [str(row["version_id"]) for row in version_rows]
+
+            deleted_chat_session_documents = 0
+            deleted_summaries = 0
+            deleted_row_mappings = 0
+            deleted_artifacts = 0
+            deleted_sheets = 0
+            deleted_versions = 0
+
+            if version_ids:
+                placeholders = ",".join("?" for _ in version_ids)
+
+                deleted_chat_session_documents = connection.execute(
+                    f"""
+                    DELETE FROM chat_session_documents
+                    WHERE version_id IN ({placeholders})
+                    """,
+                    version_ids,
+                ).rowcount
+
+                summary_ids = connection.execute(
+                    f"""
+                    SELECT summary_id FROM document_summaries
+                    WHERE version_id IN ({placeholders})
+                    """,
+                    version_ids,
+                ).fetchall()
+                if summary_ids:
+                    summary_id_values = [str(row["summary_id"]) for row in summary_ids]
+                    summary_placeholders = ",".join("?" for _ in summary_id_values)
+                    connection.execute(
+                        f"""
+                        DELETE FROM document_sheet_summaries
+                        WHERE summary_id IN ({summary_placeholders})
+                        """,
+                        summary_id_values,
+                    )
+                deleted_summaries = connection.execute(
+                    f"""
+                    DELETE FROM document_summaries
+                    WHERE version_id IN ({placeholders})
+                    """,
+                    version_ids,
+                ).rowcount
+
+                sheet_rows = connection.execute(
+                    f"""
+                    SELECT sheet_id FROM excel_sheets
+                    WHERE version_id IN ({placeholders})
+                    """,
+                    version_ids,
+                ).fetchall()
+                sheet_ids = [str(row["sheet_id"]) for row in sheet_rows]
+                if sheet_ids:
+                    sheet_placeholders = ",".join("?" for _ in sheet_ids)
+                    deleted_row_mappings = connection.execute(
+                        f"""
+                        DELETE FROM excel_row_mappings
+                        WHERE sheet_id IN ({sheet_placeholders})
+                        """,
+                        sheet_ids,
+                    ).rowcount
+
+                deleted_artifacts = connection.execute(
+                    f"""
+                    DELETE FROM excel_artifacts
+                    WHERE version_id IN ({placeholders})
+                    """,
+                    version_ids,
+                ).rowcount
+                deleted_sheets = connection.execute(
+                    f"""
+                    DELETE FROM excel_sheets
+                    WHERE version_id IN ({placeholders})
+                    """,
+                    version_ids,
+                ).rowcount
+                deleted_versions = connection.execute(
+                    f"""
+                    DELETE FROM excel_file_versions
+                    WHERE file_id = ?
+                    """,
+                    (file_id,),
+                ).rowcount
+
+            connection.execute(
+                """
+                UPDATE excel_files
+                SET active_version_id = NULL
+                WHERE file_id = ?
+                """,
+                (file_id,),
+            )
+            connection.execute(
+                """
+                DELETE FROM chat_turns
+                WHERE session_id IN (
+                  SELECT session_id FROM chat_sessions
+                  WHERE session_id NOT IN (
+                    SELECT DISTINCT session_id FROM chat_session_documents
+                  )
+                )
+                """
+            )
+            connection.execute(
+                """
+                DELETE FROM chat_sessions
+                WHERE session_id NOT IN (
+                  SELECT DISTINCT session_id FROM chat_turns
+                )
+                AND session_id NOT IN (
+                  SELECT DISTINCT session_id FROM chat_session_documents
+                )
+                """
+            )
+            connection.execute(
+                """
+                DELETE FROM excel_files
+                WHERE file_id = ?
+                """,
+                (file_id,),
+            )
+
+        return {
+            "deleted_versions": deleted_versions,
+            "deleted_sheets": deleted_sheets,
+            "deleted_artifacts": deleted_artifacts,
+            "deleted_row_mappings": deleted_row_mappings,
+            "deleted_summaries": deleted_summaries,
+            "deleted_chat_session_documents": deleted_chat_session_documents,
+        }
+
     def create_version(self, version: ExcelFileVersion) -> None:
         with self._connect() as connection:
             connection.execute(

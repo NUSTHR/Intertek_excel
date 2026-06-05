@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 
 import {
+  deleteExcelFile,
   ExcelWorkspaceApiError,
   listExcelFiles,
   listExcelSheets,
@@ -11,9 +12,11 @@ import {
   uploadExcelFile,
 } from '../api/excel-assets-api'
 import { generateDocumentSummary, getDocumentSummary } from '../api/document-summaries-api'
+import { getLlmModelOptions } from '../api/llm-api'
 import ChatPanel from '../components/ChatPanel.vue'
 import type { ChatAnswer, ChatRouteResult, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary } from '../types/document-summary'
+import type { LlmModelDefaults } from '../types/llm'
 import type {
   ExcelFile,
   ExcelFileVersion,
@@ -41,6 +44,7 @@ const selectedVersionId = ref<string>('')
 const selectedSheetId = ref<string>('')
 const selectedUploadFile = ref<File | null>(null)
 const pendingReplaceFile = ref<File | null>(null)
+const pendingDeleteFile = ref<ExcelFile | null>(null)
 const lookupRowId = ref<string>('')
 const statusMessage = ref<string>('Ready')
 const errorMessage = ref<string>('')
@@ -50,6 +54,10 @@ const isSummaryLoading = ref<boolean>(false)
 const isLookupLoading = ref<boolean>(false)
 const isDraggingUpload = ref<boolean>(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+const availableLlmModels = ref<string[]>([])
+const summaryModel = ref<string>('')
+const routerModel = ref<string>('')
+const answerModel = ref<string>('')
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -107,8 +115,25 @@ const referencedDocuments = computed(() => {
 })
 
 onMounted(() => {
-  void refreshFiles()
+  void initializeWorkspace()
 })
+
+async function initializeWorkspace(): Promise<void> {
+  await loadLlmModelOptions()
+  await refreshFiles()
+}
+
+async function loadLlmModelOptions(): Promise<void> {
+  const options = await getLlmModelOptions()
+  availableLlmModels.value = options.models
+  applyModelDefaults(options.defaults)
+}
+
+function applyModelDefaults(defaults: LlmModelDefaults): void {
+  summaryModel.value = defaults.summary_model
+  routerModel.value = defaults.router_model
+  answerModel.value = defaults.answer_model
+}
 
 async function refreshFiles(): Promise<void> {
   errorMessage.value = ''
@@ -231,7 +256,10 @@ async function generateSummaryForSelectedVersion(): Promise<void> {
   errorMessage.value = ''
   isSummaryLoading.value = true
   try {
-    documentSummary.value = await generateDocumentSummary(selectedVersionId.value)
+    documentSummary.value = await generateDocumentSummary(
+      selectedVersionId.value,
+      summaryModel.value || null,
+    )
     statusMessage.value = 'Document description generated'
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
@@ -271,6 +299,49 @@ function setUploadFile(file: File | null): void {
   errorMessage.value = ''
   selectedUploadFile.value = file
   statusMessage.value = `${file.name} is ready to upload`
+}
+
+function requestDeleteFile(file: ExcelFile): void {
+  pendingDeleteFile.value = file
+  errorMessage.value = ''
+  statusMessage.value = `Confirm deletion for ${file.display_name}. This will permanently remove all related versions, artifacts, summaries, and chat attachments.`
+}
+
+function cancelDeleteFile(): void {
+  pendingDeleteFile.value = null
+  statusMessage.value = 'Deletion cancelled.'
+}
+
+async function confirmDeleteFile(): Promise<void> {
+  const file = pendingDeleteFile.value
+  if (!file) {
+    return
+  }
+
+  errorMessage.value = ''
+  isBusy.value = true
+  try {
+    const result = await deleteExcelFile(file.file_id, true)
+    pendingDeleteFile.value = null
+    if (selectedFileId.value === file.file_id) {
+      clearSelection()
+    }
+    files.value = await listExcelFiles()
+    if (!selectedFileId.value && files.value[0]) {
+      await selectFile(files.value[0])
+    }
+    statusMessage.value =
+      `${result.display_name} deleted. Removed ${result.deleted_versions} version(s), ${result.deleted_sheets} sheet(s), ${result.deleted_artifacts} artifact(s), ${result.deleted_summaries} summary record(s), and ${result.deleted_chat_session_documents} chat attachment(s).`
+  } catch (error: unknown) {
+    if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
+      pendingDeleteFile.value = file
+      statusMessage.value = `Confirm deletion for ${file.display_name}.`
+      return
+    }
+    errorMessage.value = toErrorMessage(error)
+  } finally {
+    isBusy.value = false
+  }
 }
 
 async function uploadSelectedFile(replaceExisting = false): Promise<void> {
@@ -637,6 +708,25 @@ function toErrorMessage(error: unknown): string {
           </button>
         </section>
 
+        <section v-if="pendingDeleteFile" class="upload-queue">
+          <div>
+            <p class="eyebrow">Pending Delete</p>
+            <h3>{{ pendingDeleteFile.display_name }}</h3>
+          </div>
+          <div class="replace-actions">
+            <p>
+              This will permanently delete the workbook and all related versions, artifacts,
+              profiles, summaries, row mappings, and chat document attachments.
+            </p>
+            <button type="button" class="danger-subtle" :disabled="isBusy" @click="confirmDeleteFile">
+              Confirm Delete
+            </button>
+            <button type="button" class="secondary-button" :disabled="isBusy" @click="cancelDeleteFile">
+              Cancel
+            </button>
+          </div>
+        </section>
+
         <section class="file-table-card">
           <div class="panel-heading">
             <div>
@@ -686,6 +776,9 @@ function toErrorMessage(error: unknown): string {
                     <button type="button" class="icon-text-button" @click.stop="chooseFile(file, 'chat')">
                       Open
                     </button>
+                    <button type="button" class="icon-text-button danger-text" @click.stop="requestDeleteFile(file)">
+                      Delete
+                    </button>
                   </td>
                 </tr>
                 <tr v-if="filteredFiles.length === 0">
@@ -711,6 +804,41 @@ function toErrorMessage(error: unknown): string {
               >
                 Analyze
               </button>
+            </div>
+
+            <div v-if="availableLlmModels.length > 0" class="model-config-card">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">LLM Settings</p>
+                  <h3>Stage Models</h3>
+                </div>
+              </div>
+              <div class="model-config-grid">
+                <label>
+                  <span>Summary</span>
+                  <select v-model="summaryModel">
+                    <option v-for="model in availableLlmModels" :key="`summary-${model}`" :value="model">
+                      {{ model }}
+                    </option>
+                  </select>
+                </label>
+                <label>
+                  <span>Router</span>
+                  <select v-model="routerModel">
+                    <option v-for="model in availableLlmModels" :key="`router-${model}`" :value="model">
+                      {{ model }}
+                    </option>
+                  </select>
+                </label>
+                <label>
+                  <span>Answer</span>
+                  <select v-model="answerModel">
+                    <option v-for="model in availableLlmModels" :key="`answer-${model}`" :value="model">
+                      {{ model }}
+                    </option>
+                  </select>
+                </label>
+              </div>
             </div>
 
             <div class="metric-grid">
@@ -941,6 +1069,8 @@ function toErrorMessage(error: unknown): string {
           </section>
 
           <ChatPanel
+            :router-model="routerModel || null"
+            :answer-model="answerModel || null"
             @answer-received="handleChatAnswer"
             @route-received="handleChatRoute"
             @select-citation="handleCitationSelected"

@@ -1,4 +1,4 @@
-import type { ChatAnswer, ChatRouteResult, ChatSession } from '../types/chat'
+import type { ChatAnswer, ChatModelSelection, ChatRouteResult, ChatSession } from '../types/chat'
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
 const requestTimeoutMs = Number(import.meta.env.VITE_EXCEL_WORKSPACE_CHAT_TIMEOUT_MS ?? 180000)
@@ -21,6 +21,7 @@ export async function createChatSession(): Promise<ChatSession> {
 export async function askExcelQuestion(
   question: string,
   sessionId: string | null = null,
+  modelSelection: ChatModelSelection | null = null,
 ): Promise<ChatAnswer> {
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs)
@@ -33,7 +34,12 @@ export async function askExcelQuestion(
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ question, session_id: sessionId }),
+      body: JSON.stringify({
+        question,
+        session_id: sessionId,
+        router_model: modelSelection?.routerModel ?? null,
+        answer_model: modelSelection?.answerModel ?? null,
+      }),
       signal: controller.signal,
     })
     if (!response.ok) {
@@ -57,6 +63,7 @@ export async function askExcelQuestion(
 export async function routeExcelQuestion(
   question: string,
   sessionId: string,
+  routerModel: string | null = null,
 ): Promise<ChatRouteResult> {
   const response = await fetch(
     `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/route`,
@@ -65,7 +72,11 @@ export async function routeExcelQuestion(
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ question, session_id: sessionId }),
+      body: JSON.stringify({
+        question,
+        session_id: sessionId,
+        router_model: routerModel,
+      }),
     },
   )
   if (!response.ok) {
@@ -78,6 +89,8 @@ export async function routeExcelQuestion(
 export async function answerRoutedExcelQuestion(
   question: string,
   sessionId: string,
+  answerModel: string | null = null,
+  selectedVersionIds: string[] = [],
 ): Promise<ChatAnswer> {
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs)
@@ -89,7 +102,11 @@ export async function answerRoutedExcelQuestion(
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({
+          question,
+          answer_model: answerModel,
+          selected_version_ids: selectedVersionIds,
+        }),
         signal: controller.signal,
       },
     )

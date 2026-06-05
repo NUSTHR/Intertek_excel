@@ -28,6 +28,18 @@ class UploadExcelResult:
 
 
 @dataclass(frozen=True)
+class DeleteExcelFileResult:
+    file_id: str
+    display_name: str
+    deleted_versions: int
+    deleted_sheets: int
+    deleted_artifacts: int
+    deleted_row_mappings: int
+    deleted_summaries: int
+    deleted_chat_session_documents: int
+
+
+@dataclass(frozen=True)
 class SheetPreviewResult:
     sheet: ExcelSheet
     rows: list[list[str]]

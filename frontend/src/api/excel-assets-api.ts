@@ -1,5 +1,6 @@
 import type {
   ActiveExcelFileResponse,
+  DeleteExcelFileResponse,
   ExcelFile,
   ExcelFileVersion,
   ExcelSheet,
@@ -111,6 +112,21 @@ export async function listExcelFiles(): Promise<ExcelFile[]> {
     method: 'GET',
   })
   return response.files
+}
+
+export async function deleteExcelFile(
+  fileId: string,
+  confirmDelete = false,
+): Promise<DeleteExcelFileResponse> {
+  const params = new URLSearchParams({
+    confirm_delete: String(confirmDelete),
+  })
+  return requestJson<DeleteExcelFileResponse>(
+    `/api/excel/files/${fileId}?${params.toString()}`,
+    {
+      method: 'DELETE',
+    },
+  )
 }
 
 export async function listExcelVersions(fileId: string): Promise<ExcelFileVersion[]> {
