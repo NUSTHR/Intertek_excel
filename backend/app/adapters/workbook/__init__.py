@@ -1,0 +1,1 @@
+"""Workbook reader adapter implementations."""

@@ -1,0 +1,55 @@
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parents[2] / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_name: str = "excel-workspace-backend"
+    app_env: str = "development"
+    app_host: str = "127.0.0.1"
+    app_port: int = 8090
+    app_cors_origins: str = "http://localhost:5174,http://127.0.0.1:5174"
+    excel_database_path: str = ""
+    excel_storage_root: str = ""
+    excel_preview_max_rows: int = 500
+    excel_max_upload_bytes: int = 50 * 1024 * 1024
+    llm_provider: str = "siliconflow"
+    llm_api_base_url: str = "https://api.siliconflow.cn/v1"
+    llm_api_key: str = ""
+    llm_router_model: str = "inclusionAI/Ling-flash-2.0"
+    llm_answer_model: str = "deepseek-ai/DeepSeek-V4-Pro"
+    llm_request_timeout_seconds: float = 60.0
+    llm_summary_max_profile_rows: int = 10
+    llm_chat_rows_per_sheet: int = 200
+
+    @property
+    def backend_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    @property
+    def workspace_root(self) -> Path:
+        return self.backend_root.parent
+
+    @property
+    def storage_root(self) -> Path:
+        if self.excel_storage_root.strip():
+            return Path(self.excel_storage_root).expanduser().resolve()
+        return (self.workspace_root / "storage").resolve()
+
+    @property
+    def database_path(self) -> Path:
+        if self.excel_database_path.strip():
+            return Path(self.excel_database_path).expanduser().resolve()
+        return (self.storage_root / "excel-workspace.sqlite3").resolve()
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

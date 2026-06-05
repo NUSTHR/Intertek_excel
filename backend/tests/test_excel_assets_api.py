@@ -1,0 +1,176 @@
+from collections.abc import Iterator
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from fastapi.testclient import TestClient
+from openpyxl import Workbook
+
+from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
+from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
+from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
+from app.api.dependencies import get_excel_asset_service
+from app.api.routes import excel_assets
+from app.application.excel_assets.service import ExcelAssetService
+from app.main import app
+
+
+@pytest.fixture
+def client(tmp_path: Path) -> Iterator[TestClient]:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    service = ExcelAssetService(
+        repository=repository,
+        storage=FilesystemExcelArtifactStorage(tmp_path / "storage"),
+        workbook_reader=OpenpyxlWorkbookReader(),
+    )
+    service.initialize()
+    app.dependency_overrides[get_excel_asset_service] = lambda: service
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+
+
+def test_api_rejects_unsupported_extension(client: TestClient) -> None:
+    response = client.post(
+        "/api/excel/files",
+        files={
+            "file": (
+                "notes.txt",
+                b"not a workbook",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert "unsupported Excel file extension" in response.json()["detail"]
+
+
+def test_api_rejects_oversized_upload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        excel_assets,
+        "get_settings",
+        lambda: SimpleNamespace(excel_max_upload_bytes=4),
+    )
+
+    response = client.post(
+        "/api/excel/files",
+        files={
+            "file": (
+                "standards.xlsx",
+                b"too large",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert "exceeds the 4 byte limit" in response.json()["detail"]
+
+
+def test_api_upload_and_near_term_read_endpoints(client: TestClient, tmp_path: Path) -> None:
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_xlsx_fixture(workbook_path)
+
+    with workbook_path.open("rb") as workbook_file:
+        upload_response = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "standards.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert upload_response.status_code == 200
+    upload = upload_response.json()
+    file_id = upload["file"]["file_id"]
+    version_id = upload["version"]["version_id"]
+    sheet_id = upload["sheets"][0]["sheet_id"]
+
+    active_response = client.get(f"/api/excel/files/{file_id}/active")
+    profile_response = client.get(f"/api/excel/versions/{version_id}/profile")
+    artifacts_response = client.get(f"/api/excel/versions/{version_id}/artifacts")
+    rows_response = client.get(f"/api/excel/sheets/{sheet_id}/rows?offset=1&limit=1")
+
+    assert active_response.status_code == 200
+    assert active_response.json()["version"]["version_id"] == version_id
+
+    assert profile_response.status_code == 200
+    assert profile_response.json()["sheets"][0]["candidate_header"] == [
+        "Code",
+        "日期",
+    ]
+
+    assert artifacts_response.status_code == 200
+    assert {
+        artifact["artifact_type"]
+        for artifact in artifacts_response.json()["artifacts"]
+    } == {"original", "raw_csv", "profile", "row_mapping"}
+
+    assert rows_response.status_code == 200
+    rows = rows_response.json()
+    assert rows["total_rows"] == 2
+    assert rows["rows"][0]["mapping"]["row_id"] == "S001_R2"
+    assert rows["rows"][0]["row"] == ["S001_R2", "EN 60335-1:2023", "2024-01-01"]
+
+
+def test_api_failed_replacement_keeps_previous_active_version(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_xlsx_fixture(workbook_path)
+
+    with workbook_path.open("rb") as workbook_file:
+        first_response = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "standards.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert first_response.status_code == 200
+    first = first_response.json()
+
+    failed_response = client.post(
+        "/api/excel/files",
+        data={"replace_existing": "true"},
+        files={
+            "file": (
+                "standards.xlsx",
+                b"not a real workbook",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert failed_response.status_code == 400
+
+    file_id = first["file"]["file_id"]
+    active_response = client.get(f"/api/excel/files/{file_id}/active")
+    versions_response = client.get(f"/api/excel/files/{file_id}/versions")
+
+    assert active_response.json()["version"]["version_id"] == first["version"]["version_id"]
+    assert sorted(version["status"] for version in versions_response.json()["versions"]) == [
+        "failed",
+        "ready",
+    ]
+
+
+def _write_xlsx_fixture(path: Path) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Standards"
+    worksheet.append(["Code", "日期"])
+    worksheet.append(["EN 60335-1:2023", "2024-01-01"])
+    workbook.save(path)

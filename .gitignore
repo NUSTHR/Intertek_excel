@@ -1,0 +1,22 @@
+# Runtime storage and user-uploaded workbooks
+storage/
+
+# Backend local environment and generated files
+backend/.env
+backend/.venv/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/*.egg-info/
+backend/build/
+backend/dist/
+
+# Frontend local environment and generated files
+frontend/.env
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
