@@ -16,6 +16,7 @@ class LlmClient(Protocol):
         profile: WorkbookProfile,
         *,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DocumentSummary:
         ...
 
@@ -28,6 +29,7 @@ class LlmClient(Protocol):
         attached_documents: list[AttachedDocument] | None = None,
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> list[SelectedDocument]:
         ...
 
@@ -38,5 +40,6 @@ class LlmClient(Protocol):
         rows: list[dict],
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DraftChatAnswer:
         ...

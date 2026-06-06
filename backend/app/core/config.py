@@ -5,8 +5,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.llm_catalog import (
     DEFAULT_ANSWER_MODEL,
+    DEFAULT_ANSWER_PROVIDER,
+    DEFAULT_DEEPSEEK_ANSWER_MODEL,
+    DEFAULT_DEEPSEEK_ROUTER_MODEL,
+    DEFAULT_DEEPSEEK_SUMMARY_MODEL,
     DEFAULT_ROUTER_MODEL,
+    DEFAULT_ROUTER_PROVIDER,
     DEFAULT_SUMMARY_MODEL,
+    DEFAULT_SUMMARY_PROVIDER,
 )
 
 
@@ -29,9 +35,17 @@ class Settings(BaseSettings):
     llm_provider: str = "siliconflow"
     llm_api_base_url: str = "https://api.siliconflow.cn/v1"
     llm_api_key: str = ""
+    llm_summary_provider: str = DEFAULT_SUMMARY_PROVIDER
     llm_summary_model: str = DEFAULT_SUMMARY_MODEL
+    llm_router_provider: str = DEFAULT_ROUTER_PROVIDER
     llm_router_model: str = DEFAULT_ROUTER_MODEL
+    llm_answer_provider: str = DEFAULT_ANSWER_PROVIDER
     llm_answer_model: str = DEFAULT_ANSWER_MODEL
+    deepseek_api_base_url: str = "https://api.deepseek.com"
+    deepseek_api_key: str = ""
+    deepseek_summary_model: str = DEFAULT_DEEPSEEK_SUMMARY_MODEL
+    deepseek_router_model: str = DEFAULT_DEEPSEEK_ROUTER_MODEL
+    deepseek_answer_model: str = DEFAULT_DEEPSEEK_ANSWER_MODEL
     llm_request_timeout_seconds: float = 60.0
     llm_summary_max_profile_rows: int = 10
     llm_chat_rows_per_sheet: int = 200

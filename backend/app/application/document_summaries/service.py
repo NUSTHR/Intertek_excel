@@ -20,9 +20,14 @@ class DocumentSummaryService:
         version_id: str,
         *,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DocumentSummary:
         profile = self._excel_assets.get_profile(version_id)
-        summary = self._llm_client.generate_document_summary(profile, model=model)
+        summary = self._llm_client.generate_document_summary(
+            profile,
+            model=model,
+            provider=provider,
+        )
         self._repository.save_summary(summary)
         return summary
 

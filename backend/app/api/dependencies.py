@@ -1,7 +1,11 @@
 from functools import lru_cache
 
 from app.adapters.llm.fake_llm_client import FakeLlmClient
-from app.adapters.llm.siliconflow_client import SiliconFlowConfig, SiliconFlowLlmClient
+from app.adapters.llm.siliconflow_client import (
+    LlmProviderConfig,
+    SiliconFlowConfig,
+    SiliconFlowLlmClient,
+)
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
@@ -9,6 +13,7 @@ from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.core.config import get_settings
+from app.core.llm_catalog import DEEPSEEK_PROVIDER, SILICONFLOW_PROVIDER
 from app.ports.llm_client import LlmClient
 
 
@@ -63,5 +68,21 @@ def get_llm_client() -> LlmClient:
             answer_model=settings.llm_answer_model,
             timeout_seconds=settings.llm_request_timeout_seconds,
             summary_max_profile_rows=settings.llm_summary_max_profile_rows,
-        )
+        ),
+        extra_providers={
+            DEEPSEEK_PROVIDER: LlmProviderConfig(
+                provider=DEEPSEEK_PROVIDER,
+                label="DeepSeek Official",
+                api_base_url=settings.deepseek_api_base_url,
+                api_key=settings.deepseek_api_key,
+                summary_model=settings.deepseek_summary_model,
+                router_model=settings.deepseek_router_model,
+                answer_model=settings.deepseek_answer_model,
+            )
+        },
+        default_providers={
+            "summary": settings.llm_summary_provider or SILICONFLOW_PROVIDER,
+            "router": settings.llm_router_provider or SILICONFLOW_PROVIDER,
+            "answer": settings.llm_answer_provider or SILICONFLOW_PROVIDER,
+        },
     )

@@ -280,7 +280,7 @@ class SQLiteExcelAssetRepository:
                     version_ids,
                 ).rowcount
                 deleted_versions = connection.execute(
-                    f"""
+                    """
                     DELETE FROM excel_file_versions
                     WHERE file_id = ?
                     """,

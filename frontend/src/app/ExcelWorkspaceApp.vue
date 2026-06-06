@@ -16,7 +16,7 @@ import { getLlmModelOptions } from '../api/llm-api'
 import ChatPanel from '../components/ChatPanel.vue'
 import type { ChatAnswer, ChatRouteResult, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary } from '../types/document-summary'
-import type { LlmModelDefaults } from '../types/llm'
+import type { LlmModelDefaults, LlmProviderOption } from '../types/llm'
 import type {
   ExcelFile,
   ExcelFileVersion,
@@ -55,8 +55,12 @@ const isLookupLoading = ref<boolean>(false)
 const isDraggingUpload = ref<boolean>(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const availableLlmModels = ref<string[]>([])
+const availableLlmProviders = ref<LlmProviderOption[]>([])
+const summaryProvider = ref<string>('siliconflow')
 const summaryModel = ref<string>('')
+const routerProvider = ref<string>('siliconflow')
 const routerModel = ref<string>('')
+const answerProvider = ref<string>('siliconflow')
 const answerModel = ref<string>('')
 
 const selectedFile = computed(() => {
@@ -126,13 +130,20 @@ async function initializeWorkspace(): Promise<void> {
 async function loadLlmModelOptions(): Promise<void> {
   const options = await getLlmModelOptions()
   availableLlmModels.value = options.models
+  availableLlmProviders.value = options.providers
   applyModelDefaults(options.defaults)
 }
 
 function applyModelDefaults(defaults: LlmModelDefaults): void {
+  summaryProvider.value = defaults.summary_provider
   summaryModel.value = defaults.summary_model
+  routerProvider.value = defaults.router_provider
   routerModel.value = defaults.router_model
+  answerProvider.value = defaults.answer_provider
   answerModel.value = defaults.answer_model
+  ensureStageModel('summary')
+  ensureStageModel('router')
+  ensureStageModel('answer')
 }
 
 async function refreshFiles(): Promise<void> {
@@ -259,6 +270,7 @@ async function generateSummaryForSelectedVersion(): Promise<void> {
     documentSummary.value = await generateDocumentSummary(
       selectedVersionId.value,
       summaryModel.value || null,
+      summaryProvider.value || null,
     )
     statusMessage.value = 'Document description generated'
   } catch (error: unknown) {
@@ -562,6 +574,29 @@ function confidenceLabel(value: number | null): string {
   return `${Math.round(value * 100)}%`
 }
 
+function modelsForProvider(provider: string): string[] {
+  return availableLlmProviders.value.find((item) => item.provider === provider)?.models ?? []
+}
+
+function ensureStageModel(stage: 'summary' | 'router' | 'answer'): void {
+  const provider =
+    stage === 'summary'
+      ? summaryProvider.value
+      : stage === 'router'
+        ? routerProvider.value
+        : answerProvider.value
+  const models = modelsForProvider(provider)
+  if (stage === 'summary' && !models.includes(summaryModel.value)) {
+    summaryModel.value = models[0] ?? ''
+  }
+  if (stage === 'router' && !models.includes(routerModel.value)) {
+    routerModel.value = models[0] ?? ''
+  }
+  if (stage === 'answer' && !models.includes(answerModel.value)) {
+    answerModel.value = models[0] ?? ''
+  }
+}
+
 function columnLabel(index: number): string {
   let value = index
   let label = ''
@@ -806,38 +841,80 @@ function toErrorMessage(error: unknown): string {
               </button>
             </div>
 
-            <div v-if="availableLlmModels.length > 0" class="model-config-card">
+            <div v-if="availableLlmProviders.length > 0" class="model-config-card">
               <div class="panel-heading">
                 <div>
                   <p class="eyebrow">LLM Settings</p>
-                  <h3>Stage Models</h3>
+                  <h3>Stage Providers</h3>
                 </div>
               </div>
               <div class="model-config-grid">
-                <label>
-                  <span>Summary</span>
-                  <select v-model="summaryModel">
-                    <option v-for="model in availableLlmModels" :key="`summary-${model}`" :value="model">
-                      {{ model }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  <span>Router</span>
-                  <select v-model="routerModel">
-                    <option v-for="model in availableLlmModels" :key="`router-${model}`" :value="model">
-                      {{ model }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  <span>Answer</span>
-                  <select v-model="answerModel">
-                    <option v-for="model in availableLlmModels" :key="`answer-${model}`" :value="model">
-                      {{ model }}
-                    </option>
-                  </select>
-                </label>
+                <div class="model-stage-control">
+                  <label>
+                    <span>Summary Provider</span>
+                    <select v-model="summaryProvider" @change="ensureStageModel('summary')">
+                      <option
+                        v-for="provider in availableLlmProviders"
+                        :key="`summary-provider-${provider.provider}`"
+                        :value="provider.provider"
+                      >
+                        {{ provider.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Summary Model</span>
+                    <select v-model="summaryModel">
+                      <option v-for="model in modelsForProvider(summaryProvider)" :key="`summary-${model}`" :value="model">
+                        {{ model }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
+                <div class="model-stage-control">
+                  <label>
+                    <span>Router Provider</span>
+                    <select v-model="routerProvider" @change="ensureStageModel('router')">
+                      <option
+                        v-for="provider in availableLlmProviders"
+                        :key="`router-provider-${provider.provider}`"
+                        :value="provider.provider"
+                      >
+                        {{ provider.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Router Model</span>
+                    <select v-model="routerModel">
+                      <option v-for="model in modelsForProvider(routerProvider)" :key="`router-${model}`" :value="model">
+                        {{ model }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
+                <div class="model-stage-control">
+                  <label>
+                    <span>Answer Provider</span>
+                    <select v-model="answerProvider" @change="ensureStageModel('answer')">
+                      <option
+                        v-for="provider in availableLlmProviders"
+                        :key="`answer-provider-${provider.provider}`"
+                        :value="provider.provider"
+                      >
+                        {{ provider.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Answer Model</span>
+                    <select v-model="answerModel">
+                      <option v-for="model in modelsForProvider(answerProvider)" :key="`answer-${model}`" :value="model">
+                        {{ model }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
               </div>
             </div>
 
@@ -1069,7 +1146,9 @@ function toErrorMessage(error: unknown): string {
           </section>
 
           <ChatPanel
+            :router-provider="routerProvider || null"
             :router-model="routerModel || null"
+            :answer-provider="answerProvider || null"
             :answer-model="answerModel || null"
             @answer-received="handleChatAnswer"
             @route-received="handleChatRoute"

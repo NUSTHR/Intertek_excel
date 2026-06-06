@@ -298,9 +298,11 @@ class CapturingLlmClient(FakeLlmClient):
         profile,
         *,
         model: str | None = None,
+        provider: str | None = None,
     ):
+        _ = provider
         self.summary_models.append(model)
-        return super().generate_document_summary(profile, model=model)
+        return super().generate_document_summary(profile, model=model, provider=provider)
 
     def route_documents(
         self,
@@ -311,7 +313,9 @@ class CapturingLlmClient(FakeLlmClient):
         attached_documents: list[AttachedDocument] | None = None,
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> list[SelectedDocument]:
+        _ = provider
         self.route_models.append(model)
         self.route_calls.append(
             {
@@ -340,7 +344,9 @@ class CapturingLlmClient(FakeLlmClient):
         rows: list[dict],
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DraftChatAnswer:
+        _ = provider
         self.answer_models.append(model)
         self.answer_calls.append(
             {

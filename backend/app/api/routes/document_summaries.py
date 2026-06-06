@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Depends
 
 from app.api.dependencies import get_document_summary_service
 from app.api.schemas import (
@@ -26,11 +26,13 @@ DocumentSummaryServiceDependency = Annotated[
 def generate_document_summary(
     version_id: str,
     service: DocumentSummaryServiceDependency,
-    request: GenerateDocumentSummaryRequest = Body(
-        default_factory=GenerateDocumentSummaryRequest
-    ),
+    request: GenerateDocumentSummaryRequest | None = None,
 ) -> DocumentSummaryResponse:
-    return _to_summary_response(service.generate_summary(version_id, model=request.model))
+    model = request.model if request is not None else None
+    provider = request.provider if request is not None else None
+    return _to_summary_response(
+        service.generate_summary(version_id, model=model, provider=provider)
+    )
 
 
 @router.get("/versions/{version_id}/summary", response_model=DocumentSummaryResponse)

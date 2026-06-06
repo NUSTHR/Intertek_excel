@@ -38,7 +38,9 @@ export async function askExcelQuestion(
         question,
         session_id: sessionId,
         router_model: modelSelection?.routerModel ?? null,
+        router_provider: modelSelection?.routerProvider ?? null,
         answer_model: modelSelection?.answerModel ?? null,
+        answer_provider: modelSelection?.answerProvider ?? null,
       }),
       signal: controller.signal,
     })
@@ -64,6 +66,7 @@ export async function routeExcelQuestion(
   question: string,
   sessionId: string,
   routerModel: string | null = null,
+  routerProvider: string | null = null,
 ): Promise<ChatRouteResult> {
   const response = await fetch(
     `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/route`,
@@ -76,6 +79,7 @@ export async function routeExcelQuestion(
         question,
         session_id: sessionId,
         router_model: routerModel,
+        router_provider: routerProvider,
       }),
     },
   )
@@ -90,6 +94,7 @@ export async function answerRoutedExcelQuestion(
   question: string,
   sessionId: string,
   answerModel: string | null = null,
+  answerProvider: string | null = null,
   selectedVersionIds: string[] = [],
 ): Promise<ChatAnswer> {
   const controller = new AbortController()
@@ -105,6 +110,7 @@ export async function answerRoutedExcelQuestion(
         body: JSON.stringify({
           question,
           answer_model: answerModel,
+          answer_provider: answerProvider,
           selected_version_ids: selectedVersionIds,
         }),
         signal: controller.signal,

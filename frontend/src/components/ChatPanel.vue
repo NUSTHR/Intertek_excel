@@ -17,7 +17,9 @@ interface ChatHistoryEntry {
 }
 
 const props = defineProps<{
+  routerProvider: string | null
   routerModel: string | null
+  answerProvider: string | null
   answerModel: string | null
 }>()
 
@@ -48,6 +50,19 @@ const latestEntry = computed<ChatHistoryEntry | null>(() => {
   return history.value.at(-1) ?? null
 })
 
+const latestTimings = computed(() => {
+  return latestEntry.value ? entryTimings(latestEntry.value) : []
+})
+
+const latestTotalSeconds = computed(() => {
+  const timings = latestTimings.value
+  return (
+    timingValue(timings, 'chat_total') ||
+    timingValue(timings, 'answer_total') ||
+    timingValue(timings, 'route_total')
+  )
+})
+
 async function submitQuestion(): Promise<void> {
   const trimmedQuestion = question.value.trim()
   if (!trimmedQuestion) {
@@ -67,7 +82,12 @@ async function submitQuestion(): Promise<void> {
     if (!sessionId.value) {
       sessionId.value = (await createChatSession()).session_id
     }
-    const route = await routeExcelQuestion(trimmedQuestion, sessionId.value, props.routerModel)
+    const route = await routeExcelQuestion(
+      trimmedQuestion,
+      sessionId.value,
+      props.routerModel,
+      props.routerProvider,
+    )
     sessionId.value = route.session_id
     entry.route = route
     history.value = [...history.value]
@@ -76,6 +96,7 @@ async function submitQuestion(): Promise<void> {
       trimmedQuestion,
       sessionId.value,
       props.answerModel,
+      props.answerProvider,
       route.selected_documents.map((document) => document.version_id),
     )
     entry.answer = answer
@@ -106,6 +127,54 @@ function selectCitationById(citationId: string): void {
     selectCitation(citation)
   }
 }
+
+function entryTimings(entry: ChatHistoryEntry): { stage: string; duration_seconds: number }[] {
+  const routeTimings = entry.route?.timings ?? []
+  const answerTimings = (entry.answer?.timings ?? []).filter(
+    (timing) => timing.stage !== 'chat_total',
+  )
+  if (!entry.answer) {
+    return routeTimings
+  }
+  const combinedTimings = [...routeTimings, ...answerTimings]
+  const fullChainSeconds =
+    timingValue(routeTimings, 'route_total') + timingValue(answerTimings, 'answer_total')
+  if (fullChainSeconds > 0) {
+    combinedTimings.push({
+      stage: 'chat_total',
+      duration_seconds: fullChainSeconds,
+    })
+  }
+  return combinedTimings
+}
+
+function stageLabel(stage: string): string {
+  const labels: Record<string, string> = {
+    route_model: 'Document selection',
+    attach_documents: 'Attach documents',
+    route_total: 'Selection total',
+    load_rows: 'Load rows',
+    answer_model: 'Model answer',
+    verify_citations: 'Verify citations',
+    answer_total: 'Answer total',
+    chat_total: 'Full chain',
+  }
+  return labels[stage] ?? stage.replace(/_/g, ' ')
+}
+
+function formatSeconds(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '-'
+  }
+  return `${value.toFixed(value < 10 ? 2 : 1)}s`
+}
+
+function timingValue(
+  timings: { stage: string; duration_seconds: number }[],
+  stage: string,
+): number {
+  return timings.find((timing) => timing.stage === stage)?.duration_seconds ?? 0
+}
 </script>
 
 <template>
@@ -117,6 +186,25 @@ function selectCitationById(citationId: string): void {
       </div>
       <span class="doc-count">{{ latestAnswer?.selected_documents.length ?? latestEntry?.route?.selected_documents.length ?? 0 }} docs</span>
     </div>
+
+    <section class="chain-timing-panel" aria-live="polite">
+      <div class="timing-summary">
+        <p class="eyebrow">Chain Timing</p>
+        <strong>{{ latestTotalSeconds ? formatSeconds(latestTotalSeconds) : 'No run yet' }}</strong>
+      </div>
+      <div v-if="latestTimings.length > 0" class="timing-strip compact">
+        <div
+          v-for="timing in latestTimings"
+          :key="`latest-${timing.stage}`"
+          class="timing-pill"
+          :class="{ total: timing.stage.endsWith('_total') }"
+        >
+          <span>{{ stageLabel(timing.stage) }}</span>
+          <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
+        </div>
+      </div>
+      <p v-else class="timing-placeholder">Timing appears after the next route or answer call.</p>
+    </section>
 
     <div class="chat-history">
       <template v-if="history.length > 0">
@@ -155,6 +243,17 @@ function selectCitationById(citationId: string): void {
             <div v-if="entry.answer.warnings.length > 0" class="warning-list">
               <p v-for="warning in entry.answer.warnings" :key="warning">{{ warning }}</p>
             </div>
+            <div v-if="entryTimings(entry).length > 0" class="timing-strip">
+              <div
+                v-for="timing in entryTimings(entry)"
+                :key="`${entry.answer.created_at}-${timing.stage}`"
+                class="timing-pill"
+                :class="{ total: timing.stage.endsWith('_total') }"
+              >
+                <span>{{ stageLabel(timing.stage) }}</span>
+                <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
+              </div>
+            </div>
           </article>
 
           <article
@@ -166,6 +265,17 @@ function selectCitationById(citationId: string): void {
               <strong>ExcelAI</strong>
             </div>
             <p>Waiting for model response.</p>
+            <div v-if="entryTimings(entry).length > 0" class="timing-strip">
+              <div
+                v-for="timing in entryTimings(entry)"
+                :key="`${entry.question}-${timing.stage}`"
+                class="timing-pill"
+                :class="{ total: timing.stage.endsWith('_total') }"
+              >
+                <span>{{ stageLabel(timing.stage) }}</span>
+                <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
+              </div>
+            </div>
           </article>
         </template>
       </template>
@@ -179,12 +289,14 @@ function selectCitationById(citationId: string): void {
       </div>
     </div>
 
-    <CitationPanel :citations="latestAnswer?.citations ?? []" @select-citation="selectCitation" />
-    <SourceTracePanel :citation="selectedCitation" />
+    <div v-if="latestAnswer?.citations.length || selectedCitation" class="evidence-panels">
+      <CitationPanel :citations="latestAnswer?.citations ?? []" @select-citation="selectCitation" />
+      <SourceTracePanel :citation="selectedCitation" />
+    </div>
 
     <p v-if="errorMessage" class="error-note">{{ errorMessage }}</p>
 
-    <div class="chat-input-card">
+    <form class="chat-input-card" @submit.prevent="submitQuestion">
       <textarea
         v-model="question"
         rows="3"
@@ -194,10 +306,10 @@ function selectCitationById(citationId: string): void {
       />
       <div class="chat-input-actions">
         <span>Backend-verified citations</span>
-        <button type="button" :disabled="isAsking" @click="submitQuestion">
+        <button type="submit" :disabled="isAsking">
           {{ isAsking ? 'Asking...' : 'Send' }}
         </button>
       </div>
-    </div>
+    </form>
   </section>
 </template>

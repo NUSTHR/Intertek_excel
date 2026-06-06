@@ -11,7 +11,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section class="citation-panel">
+  <section v-if="citations.length > 0" class="citation-panel">
     <div class="panel-heading">
       <h3>Citations</h3>
       <span>{{ citations.length }}</span>
@@ -26,6 +26,5 @@ const emit = defineEmits<{
       <strong>{{ citation.citation_id }}</strong>
       <span>{{ citation.sheet_name }}</span>
     </button>
-    <p v-if="citations.length === 0" class="muted">No citations yet.</p>
   </section>
 </template>

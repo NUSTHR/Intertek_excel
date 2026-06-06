@@ -175,12 +175,15 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None
     router_model: str | None = None
+    router_provider: str | None = None
     answer_model: str | None = None
+    answer_provider: str | None = None
 
 
 class ChatAnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     answer_model: str | None = None
+    answer_provider: str | None = None
     selected_version_ids: list[str] = Field(default_factory=list)
 
 
@@ -188,10 +191,12 @@ class ChatRouteRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None
     router_model: str | None = None
+    router_provider: str | None = None
 
 
 class GenerateDocumentSummaryRequest(BaseModel):
     model: str | None = None
+    provider: str | None = None
 
 
 class ChatSessionResponse(BaseModel):
@@ -264,11 +269,21 @@ class ChatRouteResponse(BaseModel):
 
 
 class LlmModelDefaultsResponse(BaseModel):
+    summary_provider: str
     summary_model: str
+    router_provider: str
     router_model: str
+    answer_provider: str
     answer_model: str
+
+
+class LlmProviderOptionResponse(BaseModel):
+    provider: str
+    label: str
+    models: list[str] = Field(default_factory=list)
 
 
 class LlmModelOptionsResponse(BaseModel):
     models: list[str] = Field(default_factory=list)
+    providers: list[LlmProviderOptionResponse] = Field(default_factory=list)
     defaults: LlmModelDefaultsResponse

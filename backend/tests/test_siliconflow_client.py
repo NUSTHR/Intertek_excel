@@ -4,7 +4,11 @@ from typing import Any
 import httpx2
 import pytest
 
-from app.adapters.llm.siliconflow_client import SiliconFlowConfig, SiliconFlowLlmClient
+from app.adapters.llm.siliconflow_client import (
+    LlmProviderConfig,
+    SiliconFlowConfig,
+    SiliconFlowLlmClient,
+)
 from app.core.errors import LlmRequestError
 from app.domain.models import DocumentSummary, SheetProfile, SheetSummary, WorkbookProfile
 
@@ -307,3 +311,80 @@ def test_siliconflow_uses_enable_thinking_false_for_supported_models() -> None:
     )
 
     assert requests[0]["enable_thinking"] is False
+
+
+def test_deepseek_official_provider_uses_official_url_and_json_mode() -> None:
+    requests: list[dict[str, Any]] = []
+    urls: list[str] = []
+
+    def post(url: str, **kwargs: Any) -> httpx2.Response:
+        urls.append(url)
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", url),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "selected_documents": [],
+                                    "decision_reason": "no match",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = SiliconFlowLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.siliconflow.test/v1",
+            api_key="siliconflow-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="deepseek-ai/DeepSeek-V4-Pro",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+        extra_providers={
+            "deepseek": LlmProviderConfig(
+                provider="deepseek",
+                label="DeepSeek Official",
+                api_base_url="https://api.deepseek.test",
+                api_key="deepseek-key",
+                summary_model="deepseek-v4-pro",
+                router_model="deepseek-v4-flash",
+                answer_model="deepseek-v4-pro",
+            )
+        },
+    )
+
+    client.route_documents(
+        "question",
+        [
+            DocumentSummary(
+                summary_id="summary_1",
+                file_id="file_1",
+                version_id="version_1",
+                summary_text="summary",
+                business_domain="domain",
+                key_topics=[],
+                suitable_questions=[],
+                unsuitable_questions=[],
+                sheet_summaries=[],
+                created_at="now",
+            )
+        ],
+        max_documents=3,
+        model="deepseek-v4-flash",
+        provider="deepseek",
+    )
+
+    assert urls == ["https://api.deepseek.test/chat/completions"]
+    assert requests[0]["model"] == "deepseek-v4-flash"
+    assert requests[0]["response_format"] == {"type": "json_object"}
+    assert requests[0]["thinking"] == {"type": "disabled"}

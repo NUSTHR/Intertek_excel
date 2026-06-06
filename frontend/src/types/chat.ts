@@ -2,7 +2,9 @@ export interface ChatRequest {
   question: string
   session_id?: string | null
   router_model?: string | null
+  router_provider?: string | null
   answer_model?: string | null
+  answer_provider?: string | null
 }
 
 export interface ChatSession {
@@ -75,6 +77,8 @@ export interface ChatRouteResult {
 }
 
 export interface ChatModelSelection {
+  routerProvider: string
   routerModel: string
+  answerProvider: string
   answerModel: string
 }

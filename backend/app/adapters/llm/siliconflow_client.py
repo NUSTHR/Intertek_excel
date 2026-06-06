@@ -10,7 +10,14 @@ import httpx2
 
 from app.core.errors import ExcelWorkspaceError, InvalidLlmModelError, LlmRequestError
 from app.core.ids import new_id
-from app.core.llm_catalog import is_supported_llm_model, supports_enable_thinking_false
+from app.core.llm_catalog import (
+    DEEPSEEK_PROVIDER,
+    SILICONFLOW_PROVIDER,
+    is_supported_llm_model_for_provider,
+    is_supported_llm_provider,
+    normalize_llm_provider,
+    supports_enable_thinking_false,
+)
 from app.core.time import utc_now_iso
 from app.domain.models import (
     AttachedDocument,
@@ -110,26 +117,62 @@ class SiliconFlowConfig:
     summary_max_profile_rows: int
 
 
+@dataclass(frozen=True)
+class LlmProviderConfig:
+    provider: str
+    label: str
+    api_base_url: str
+    api_key: str
+    summary_model: str
+    router_model: str
+    answer_model: str
+
+
 class SiliconFlowLlmClient:
     def __init__(
         self,
         config: SiliconFlowConfig,
         post: Callable[..., httpx2.Response] = httpx2.post,
+        extra_providers: dict[str, LlmProviderConfig] | None = None,
+        default_providers: dict[str, str] | None = None,
     ) -> None:
-        if not config.api_key.strip():
-            raise ExcelWorkspaceError("LLM_API_KEY is required for SiliconFlow LLM calls")
         self._config = config
         self._post = post
+        self._providers = {
+            SILICONFLOW_PROVIDER: LlmProviderConfig(
+                provider=SILICONFLOW_PROVIDER,
+                label="SiliconFlow",
+                api_base_url=config.api_base_url,
+                api_key=config.api_key,
+                summary_model=config.summary_model,
+                router_model=config.router_model,
+                answer_model=config.answer_model,
+            ),
+            **(extra_providers or {}),
+        }
+        self._default_providers = {
+            "summary": SILICONFLOW_PROVIDER,
+            "router": SILICONFLOW_PROVIDER,
+            "answer": SILICONFLOW_PROVIDER,
+            **(default_providers or {}),
+        }
 
     def generate_document_summary(
         self,
         profile: WorkbookProfile,
         *,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DocumentSummary:
+        provider_config, resolved_model = self._resolve_request(
+            provider=provider,
+            model=model,
+            stage="summary",
+        )
         payload = self._chat_json(
             stage="document_summary_model",
-            model=self._resolve_model(model, self._config.summary_model, stage="summary"),
+            provider_config=provider_config,
+            model=resolved_model,
             system_prompt=DOCUMENT_SUMMARY_SYSTEM_PROMPT,
             user_prompt=(
                 "Generate a structured document summary for this Excel workbook profile.\n\n"
@@ -189,9 +232,15 @@ class SiliconFlowLlmClient:
         attached_documents: list[AttachedDocument] | None = None,
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> list[SelectedDocument]:
         if not summaries:
             return []
+        provider_config, resolved_model = self._resolve_request(
+            provider=provider,
+            model=model,
+            stage="router",
+        )
         _ = max_documents
         user_questions_json = json.dumps(user_questions or [question], ensure_ascii=False)
         recent_turns_json = json.dumps(
@@ -215,7 +264,8 @@ class SiliconFlowLlmClient:
         )
         payload = self._chat_json(
             stage="route_model",
-            model=self._resolve_model(model, self._config.router_model, stage="router"),
+            provider_config=provider_config,
+            model=resolved_model,
             system_prompt=DOCUMENT_ROUTER_SYSTEM_PROMPT,
             user_prompt=(
                 "Route the current user turn.\n\n"
@@ -273,7 +323,13 @@ class SiliconFlowLlmClient:
         rows: list[dict],
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DraftChatAnswer:
+        provider_config, resolved_model = self._resolve_request(
+            provider=provider,
+            model=model,
+            stage="answer",
+        )
         documents_json = json.dumps(
             [document.__dict__ for document in documents],
             ensure_ascii=False,
@@ -299,7 +355,8 @@ class SiliconFlowLlmClient:
         # #endregion
         payload = self._chat_json(
             stage="answer_model",
-            model=self._resolve_model(model, self._config.answer_model, stage="answer"),
+            provider_config=provider_config,
+            model=resolved_model,
             system_prompt=ANSWER_SYSTEM_PROMPT,
             user_prompt=(
                 "Answer the question using the provided Excel rows.\n\n"
@@ -358,12 +415,14 @@ class SiliconFlowLlmClient:
         self,
         *,
         stage: str,
+        provider_config: LlmProviderConfig,
         model: str,
         system_prompt: str,
         user_prompt: str,
     ) -> dict[str, Any]:
         content = self._chat_text(
             stage=stage,
+            provider_config=provider_config,
             model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -374,11 +433,15 @@ class SiliconFlowLlmClient:
         self,
         *,
         stage: str,
+        provider_config: LlmProviderConfig,
         model: str,
         system_prompt: str,
         user_prompt: str,
     ) -> str:
-        url = f"{self._config.api_base_url.rstrip('/')}/chat/completions"
+        if not provider_config.api_key.strip():
+            raise ExcelWorkspaceError(f"{provider_config.label} API key is required for LLM calls")
+
+        url = f"{provider_config.api_base_url.rstrip('/')}/chat/completions"
         request_payload = {
             "model": model,
             "messages": [
@@ -387,7 +450,7 @@ class SiliconFlowLlmClient:
             ],
             "temperature": 0.2,
         }
-        request_payload.update(self._thinking_controls(model))
+        request_payload.update(self._provider_request_options(provider_config.provider, model))
         # #region debug-point A:request-shape
         self._debug_report(
             hypothesis_id="A",
@@ -395,13 +458,17 @@ class SiliconFlowLlmClient:
             msg="[DEBUG] sending llm request",
             data={
                 "stage": stage,
+                "provider": provider_config.provider,
                 "model": model,
                 "url": url,
                 "request_keys": sorted(request_payload.keys()),
                 "message_count": len(request_payload["messages"]),
                 "system_prompt_chars": len(system_prompt),
                 "user_prompt_chars": len(user_prompt),
-                "thinking_controls": self._thinking_controls(model),
+                "provider_options": self._provider_request_options(
+                    provider_config.provider,
+                    model,
+                ),
             },
         )
         # #endregion
@@ -410,7 +477,7 @@ class SiliconFlowLlmClient:
             response = self._post(
                 url,
                 headers={
-                    "Authorization": f"Bearer {self._config.api_key}",
+                    "Authorization": f"Bearer {provider_config.api_key}",
                     "Content-Type": "application/json",
                 },
                 json=request_payload,
@@ -434,11 +501,15 @@ class SiliconFlowLlmClient:
                 msg="[DEBUG] llm request failed",
                 data={
                     "stage": stage,
+                    "provider": provider_config.provider,
                     "model": model,
                     "duration_seconds": round(perf_counter() - started_at, 6),
                     "status_code": status_code,
                     "request_keys": sorted(request_payload.keys()),
-                    "thinking_controls": self._thinking_controls(model),
+                    "provider_options": self._provider_request_options(
+                        provider_config.provider,
+                        model,
+                    ),
                     "response_text_preview": response_text[:2000],
                 },
             )
@@ -456,6 +527,7 @@ class SiliconFlowLlmClient:
             msg="[DEBUG] llm request succeeded",
             data={
                 "stage": stage,
+                "provider": provider_config.provider,
                 "model": model,
                 "status_code": response.status_code,
                 "duration_seconds": round(perf_counter() - started_at, 6),
@@ -618,15 +690,40 @@ class SiliconFlowLlmClient:
                 entry["selected_in_last_turn"] = turn_index == last_turn_index
         return stats
 
-    def _resolve_model(self, requested_model: str | None, default_model: str, *, stage: str) -> str:
-        model = (requested_model or default_model).strip()
-        if not is_supported_llm_model(model):
-            raise InvalidLlmModelError(stage=stage, model=model)
-        return model
+    def _resolve_request(
+        self,
+        *,
+        provider: str | None,
+        model: str | None,
+        stage: str,
+    ) -> tuple[LlmProviderConfig, str]:
+        provider_id = normalize_llm_provider(provider or self._default_providers[stage])
+        if not is_supported_llm_provider(provider_id) or provider_id not in self._providers:
+            raise ExcelWorkspaceError(f"unsupported {stage} provider '{provider_id}'")
+        provider_config = self._providers[provider_id]
+        default_model = self._default_model(provider_config, stage)
+        resolved_model = (model or default_model).strip()
+        if not is_supported_llm_model_for_provider(provider_id, resolved_model):
+            raise InvalidLlmModelError(stage=stage, model=f"{provider_id}:{resolved_model}")
+        return provider_config, resolved_model
 
-    def _thinking_controls(self, model: str) -> dict[str, Any]:
-        if supports_enable_thinking_false(model):
+    def _default_model(self, provider_config: LlmProviderConfig, stage: str) -> str:
+        if stage == "summary":
+            return provider_config.summary_model
+        if stage == "router":
+            return provider_config.router_model
+        if stage == "answer":
+            return provider_config.answer_model
+        raise ExcelWorkspaceError(f"unknown LLM stage '{stage}'")
+
+    def _provider_request_options(self, provider: str, model: str) -> dict[str, Any]:
+        if provider == SILICONFLOW_PROVIDER and supports_enable_thinking_false(model):
             return {"enable_thinking": False}
+        if provider == DEEPSEEK_PROVIDER:
+            return {
+                "response_format": {"type": "json_object"},
+                "thinking": {"type": "disabled"},
+            }
         return {}
 
     def _debug_report(

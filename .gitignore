@@ -1,5 +1,5 @@
 # Runtime storage and user-uploaded workbooks
-storage/
+/storage/
 
 # Backend local environment and generated files
 backend/.env
@@ -9,11 +9,14 @@ backend/.ruff_cache/
 backend/*.egg-info/
 backend/build/
 backend/dist/
+__pycache__/
+*.py[cod]
 
 # Frontend local environment and generated files
 frontend/.env
 frontend/node_modules/
 frontend/dist/
+frontend/.npm-cache/
 frontend/.vite/
 frontend/coverage/
 

@@ -60,18 +60,22 @@ class ChatService:
         session_id: str | None = None,
         *,
         router_model: str | None = None,
+        router_provider: str | None = None,
         answer_model: str | None = None,
+        answer_provider: str | None = None,
     ) -> ChatAnswer:
         route_result = self.route_question(
             question,
             session_id=session_id,
             router_model=router_model,
+            router_provider=router_provider,
         )
         return self.answer_routed_question(
             question=question,
             session_id=route_result.session_id,
             route_result=route_result,
             answer_model=answer_model,
+            answer_provider=answer_provider,
         )
 
     def route_question(
@@ -80,6 +84,7 @@ class ChatService:
         session_id: str | None = None,
         *,
         router_model: str | None = None,
+        router_provider: str | None = None,
     ) -> ChatRouteResult:
         total_timer = StageTimer()
         session = self._get_or_create_session(session_id)
@@ -95,6 +100,7 @@ class ChatService:
                 attached_documents=attached_before,
                 previous_turns=existing_turns,
                 model=router_model,
+                provider=router_provider,
             )
 
         with total_timer.measure("attach_documents"):
@@ -131,6 +137,7 @@ class ChatService:
         route_result: ChatRouteResult | None = None,
         *,
         answer_model: str | None = None,
+        answer_provider: str | None = None,
         selected_version_ids: list[str] | None = None,
     ) -> ChatAnswer:
         total_timer = StageTimer()
@@ -151,6 +158,7 @@ class ChatService:
                 rows=rows,
                 previous_turns=existing_turns,
                 model=answer_model,
+                provider=answer_provider,
             )
         cited_row_ids = [
             row_id
@@ -177,6 +185,12 @@ class ChatService:
         created_at = utc_now_iso()
         answer_timings = [*total_timer.timings(), total_timer.total("answer_total")]
         timings = [*(route_result.timings if route_result else []), *answer_timings]
+        timings.append(
+            ChatStageTiming(
+                stage="chat_total",
+                duration_seconds=self._chat_total(timings),
+            )
+        )
         selected_documents = documents_for_answer
         newly_attached_documents = (
             route_result.newly_attached_documents if route_result is not None else []
@@ -385,6 +399,25 @@ class ChatService:
             digest.update(str(sheet.row_count).encode())
             digest.update(str(sheet.column_count).encode())
         return digest.hexdigest()
+
+    def _chat_total(self, timings: list[ChatStageTiming]) -> float:
+        answer_total = next(
+            (
+                timing.duration_seconds
+                for timing in timings
+                if timing.stage == "answer_total"
+            ),
+            0.0,
+        )
+        route_total = next(
+            (
+                timing.duration_seconds
+                for timing in timings
+                if timing.stage == "route_total"
+            ),
+            0.0,
+        )
+        return route_total + answer_total
 
     def _log_timings(
         self,

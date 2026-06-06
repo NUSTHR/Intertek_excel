@@ -8,8 +8,8 @@ from app.api.schemas import (
     ChatAnswerBlockResponse,
     ChatAnswerRequest,
     ChatAnswerResponse,
-    ChatRouteRequest,
     ChatRequest,
+    ChatRouteRequest,
     ChatRouteResponse,
     ChatSessionResponse,
     ChatStageTimingResponse,
@@ -20,8 +20,11 @@ from app.api.schemas import (
 )
 from app.application.chat.service import ChatService
 from app.core.config import get_settings
-from app.core.llm_catalog import list_supported_llm_models
 from app.core.errors import AssetNotFoundError
+from app.core.llm_catalog import (
+    list_supported_llm_models,
+    list_supported_llm_provider_options,
+)
 from app.domain.models import ChatAnswer, ChatRouteResult, ChatSession
 
 router = APIRouter(prefix="/api/excel", tags=["chat"])
@@ -38,7 +41,9 @@ def answer_excel_question(
             request.question,
             session_id=request.session_id,
             router_model=request.router_model,
+            router_provider=request.router_provider,
             answer_model=request.answer_model,
+            answer_provider=request.answer_provider,
         )
     )
 
@@ -73,7 +78,9 @@ def answer_excel_session_question(
             request.question,
             session_id=session_id,
             router_model=request.router_model,
+            router_provider=request.router_provider,
             answer_model=request.answer_model,
+            answer_provider=request.answer_provider,
         )
     )
 
@@ -92,6 +99,7 @@ def route_excel_session_question(
             request.question,
             session_id=session_id,
             router_model=request.router_model,
+            router_provider=request.router_provider,
         )
     )
 
@@ -110,6 +118,7 @@ def answer_excel_routed_session_question(
             request.question,
             session_id=session_id,
             answer_model=request.answer_model,
+            answer_provider=request.answer_provider,
             selected_version_ids=request.selected_version_ids,
         )
     )
@@ -120,9 +129,13 @@ def get_llm_model_options() -> LlmModelOptionsResponse:
     settings = get_settings()
     return LlmModelOptionsResponse(
         models=list_supported_llm_models(),
+        providers=list_supported_llm_provider_options(),
         defaults=LlmModelDefaultsResponse(
+            summary_provider=settings.llm_summary_provider,
             summary_model=settings.llm_summary_model,
+            router_provider=settings.llm_router_provider,
             router_model=settings.llm_router_model,
+            answer_provider=settings.llm_answer_provider,
             answer_model=settings.llm_answer_model,
         ),
     )

@@ -14,13 +14,14 @@ async function requestSummary(path: string, init: RequestInit): Promise<Document
 export async function generateDocumentSummary(
   versionId: string,
   model: string | null = null,
+  provider: string | null = null,
 ): Promise<DocumentSummary> {
   return requestSummary(`/api/excel/versions/${versionId}/summary/generate`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ model }),
+    body: JSON.stringify({ model, provider }),
   })
 }
 

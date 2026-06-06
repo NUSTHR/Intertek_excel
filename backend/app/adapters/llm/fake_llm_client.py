@@ -19,8 +19,9 @@ class FakeLlmClient:
         profile: WorkbookProfile,
         *,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DocumentSummary:
-        _ = model
+        _ = model, provider
         sheet_names = [sheet.sheet_name for sheet in profile.sheets]
         key_topics = self._unique_values(
             [
@@ -75,8 +76,9 @@ class FakeLlmClient:
         attached_documents: list[AttachedDocument] | None = None,
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> list[SelectedDocument]:
-        _ = user_questions, attached_documents, previous_turns, model
+        _ = user_questions, attached_documents, previous_turns, model, provider
         scored = sorted(
             summaries,
             key=lambda summary: self._score(question, summary),
@@ -100,8 +102,9 @@ class FakeLlmClient:
         rows: list[dict],
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
+        provider: str | None = None,
     ) -> DraftChatAnswer:
-        _ = previous_turns, model
+        _ = previous_turns, model, provider
         cited_row_ids = [str(row["row_id"]) for row in rows[:3]]
         selected_count = len(documents)
         row_count = len(rows)
