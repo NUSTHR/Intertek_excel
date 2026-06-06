@@ -14,7 +14,7 @@ import {
 import { generateDocumentSummary, getDocumentSummary } from '../api/document-summaries-api'
 import { getLlmModelOptions } from '../api/llm-api'
 import ChatPanel from '../components/ChatPanel.vue'
-import type { ChatAnswer, ChatRouteResult, ExcelCitation, SelectedDocument } from '../types/chat'
+import type { ChatAnswer, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary } from '../types/document-summary'
 import type { LlmModelDefaults, LlmProviderOption } from '../types/llm'
 import type {
@@ -37,7 +37,6 @@ const sheets = ref<ExcelSheet[]>([])
 const preview = ref<SheetPreviewResponse | null>(null)
 const rowLookup = ref<RowLookupResponse | null>(null)
 const documentSummary = ref<DocumentSummary | null>(null)
-const latestRoute = ref<ChatRouteResult | null>(null)
 const latestAnswer = ref<ChatAnswer | null>(null)
 const selectedFileId = ref<string>('')
 const selectedVersionId = ref<string>('')
@@ -115,7 +114,7 @@ const previewRangeLabel = computed(() => {
 })
 
 const referencedDocuments = computed(() => {
-  return latestAnswer.value?.selected_documents ?? latestRoute.value?.selected_documents ?? []
+  return latestAnswer.value?.selected_documents ?? []
 })
 
 onMounted(() => {
@@ -467,11 +466,6 @@ async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
 
 function handleChatAnswer(answer: ChatAnswer): void {
   latestAnswer.value = answer
-}
-
-function handleChatRoute(route: ChatRouteResult): void {
-  latestRoute.value = route
-  latestAnswer.value = null
 }
 
 async function openReferencedDocument(document: SelectedDocument): Promise<void> {
@@ -1048,7 +1042,7 @@ function toErrorMessage(error: unknown): string {
               <h3>{{ rowLookup.mapping.row_id }}</h3>
             </div>
             <p>
-              {{ rowLookup.sheet.sheet_name }} · original row
+              {{ rowLookup.sheet.sheet_name }} / original row
               {{ rowLookup.mapping.original_row_number }}
             </p>
           </section>
@@ -1138,7 +1132,7 @@ function toErrorMessage(error: unknown): string {
               @click="openReferencedDocument(document)"
             >
               <strong>{{ selectedDocumentTitle(document) }}</strong>
-              <span>{{ confidenceLabel(document.confidence) }} · {{ document.reason }}</span>
+              <span>{{ confidenceLabel(document.confidence) }} / {{ document.reason }}</span>
             </button>
             <p v-if="referencedDocuments.length === 0" class="empty-copy">
               No routed documents yet.
@@ -1151,7 +1145,6 @@ function toErrorMessage(error: unknown): string {
             :answer-provider="answerProvider || null"
             :answer-model="answerModel || null"
             @answer-received="handleChatAnswer"
-            @route-received="handleChatRoute"
             @select-citation="handleCitationSelected"
           />
         </aside>

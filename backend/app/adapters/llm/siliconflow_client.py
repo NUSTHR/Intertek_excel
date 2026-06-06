@@ -1,6 +1,5 @@
 import json
-import os
-import urllib.request
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from time import perf_counter
@@ -30,6 +29,8 @@ from app.domain.models import (
     SheetSummary,
     WorkbookProfile,
 )
+
+logger = logging.getLogger(__name__)
 
 DOCUMENT_SUMMARY_SYSTEM_PROMPT = "\n".join(
     [
@@ -339,20 +340,14 @@ class SiliconFlowLlmClient:
             [self._turn_payload(turn) for turn in previous_turns or []],
             ensure_ascii=False,
         )
-        # #region debug-point C:answer-payload-shape
-        self._debug_report(
-            hypothesis_id="C",
-            location="siliconflow_client.py:answer_with_rows",
-            msg="[DEBUG] preparing answer_model payload",
-            data={
-                "question": question,
-                "document_count": len(documents),
-                "row_count": len(rows),
-                "previous_turn_count": len(previous_turns or []),
-                "selected_version_ids": [document.version_id for document in documents],
-            },
+        logger.debug(
+            "preparing answer model payload document_count=%s row_count=%s "
+            "previous_turn_count=%s selected_version_ids=%s",
+            len(documents),
+            len(rows),
+            len(previous_turns or []),
+            [document.version_id for document in documents],
         )
-        # #endregion
         payload = self._chat_json(
             stage="answer_model",
             provider_config=provider_config,
@@ -450,28 +445,16 @@ class SiliconFlowLlmClient:
             ],
             "temperature": 0.2,
         }
-        request_payload.update(self._provider_request_options(provider_config.provider, model))
-        # #region debug-point A:request-shape
-        self._debug_report(
-            hypothesis_id="A",
-            location="siliconflow_client.py:_chat_text",
-            msg="[DEBUG] sending llm request",
-            data={
-                "stage": stage,
-                "provider": provider_config.provider,
-                "model": model,
-                "url": url,
-                "request_keys": sorted(request_payload.keys()),
-                "message_count": len(request_payload["messages"]),
-                "system_prompt_chars": len(system_prompt),
-                "user_prompt_chars": len(user_prompt),
-                "provider_options": self._provider_request_options(
-                    provider_config.provider,
-                    model,
-                ),
-            },
+        provider_options = self._provider_request_options(provider_config.provider, model)
+        request_payload.update(provider_options)
+        logger.debug(
+            "sending llm request stage=%s provider=%s model=%s url=%s request_keys=%s",
+            stage,
+            provider_config.provider,
+            model,
+            url,
+            sorted(request_payload.keys()),
         )
-        # #endregion
         started_at = perf_counter()
         try:
             response = self._post(
@@ -494,46 +477,32 @@ class SiliconFlowLlmClient:
                     response_text = response.text
                 except Exception:
                     response_text = "<unavailable>"
-            # #region debug-point B:http-error
-            self._debug_report(
-                hypothesis_id="B",
-                location="siliconflow_client.py:_chat_text",
-                msg="[DEBUG] llm request failed",
-                data={
-                    "stage": stage,
-                    "provider": provider_config.provider,
-                    "model": model,
-                    "duration_seconds": round(perf_counter() - started_at, 6),
-                    "status_code": status_code,
-                    "request_keys": sorted(request_payload.keys()),
-                    "provider_options": self._provider_request_options(
-                        provider_config.provider,
-                        model,
-                    ),
-                    "response_text_preview": response_text[:2000],
-                },
+            logger.debug(
+                "llm request failed stage=%s provider=%s model=%s status_code=%s "
+                "duration_seconds=%.6f response_text_preview=%s provider_options=%s",
+                stage,
+                provider_config.provider,
+                model,
+                status_code,
+                perf_counter() - started_at,
+                response_text[:2000],
+                provider_options,
             )
-            # #endregion
             raise LlmRequestError(
                 stage=stage,
                 model=model,
                 duration_seconds=perf_counter() - started_at,
                 cause=exc,
             ) from exc
-        # #region debug-point D:http-success
-        self._debug_report(
-            hypothesis_id="D",
-            location="siliconflow_client.py:_chat_text",
-            msg="[DEBUG] llm request succeeded",
-            data={
-                "stage": stage,
-                "provider": provider_config.provider,
-                "model": model,
-                "status_code": response.status_code,
-                "duration_seconds": round(perf_counter() - started_at, 6),
-            },
+        logger.debug(
+            "llm request succeeded stage=%s provider=%s model=%s status_code=%s "
+            "duration_seconds=%.6f",
+            stage,
+            provider_config.provider,
+            model,
+            response.status_code,
+            perf_counter() - started_at,
         )
-        # #endregion
         payload = response.json()
         try:
             return str(payload["choices"][0]["message"]["content"])
@@ -725,56 +694,6 @@ class SiliconFlowLlmClient:
                 "thinking": {"type": "disabled"},
             }
         return {}
-
-    def _debug_report(
-        self,
-        *,
-        hypothesis_id: str,
-        location: str,
-        msg: str,
-        data: dict[str, Any],
-    ) -> None:
-        debug_server_url = "http://127.0.0.1:7777/event"
-        debug_session_id = "deepseek-v32-400"
-        env_paths = [
-            os.path.join(".dbg", "deepseek-v32-400.env"),
-            os.path.join("..", ".dbg", "deepseek-v32-400.env"),
-        ]
-        env_loaded = False
-        for env_path in env_paths:
-            try:
-                with open(env_path, encoding="utf-8") as env_file:
-                    for line in env_file:
-                        if line.startswith("DEBUG_SERVER_URL="):
-                            debug_server_url = line.split("=", 1)[1].strip()
-                        elif line.startswith("DEBUG_SESSION_ID="):
-                            debug_session_id = line.split("=", 1)[1].strip()
-                env_loaded = True
-                break
-            except OSError:
-                continue
-        if not env_loaded:
-            return
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    debug_server_url,
-                    data=json.dumps(
-                        {
-                            "sessionId": debug_session_id,
-                            "runId": "pre-fix",
-                            "hypothesisId": hypothesis_id,
-                            "location": location,
-                            "msg": msg,
-                            "data": data,
-                        }
-                    ).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                ),
-                timeout=1,
-            ).read()
-        except Exception:
-            return
 
     def _string_list(self, value: Any) -> list[str]:
         if not isinstance(value, list):

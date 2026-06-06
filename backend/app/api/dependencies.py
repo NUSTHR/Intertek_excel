@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from app.adapters.dialogue import LangGraphChatWorkflow
 from app.adapters.llm.fake_llm_client import FakeLlmClient
 from app.adapters.llm.siliconflow_client import (
     LlmProviderConfig,
@@ -14,6 +15,7 @@ from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.core.config import get_settings
 from app.core.llm_catalog import DEEPSEEK_PROVIDER, SILICONFLOW_PROVIDER
+from app.ports.chat_workflow import ChatWorkflow
 from app.ports.llm_client import LlmClient
 
 
@@ -51,7 +53,13 @@ def get_chat_service() -> ChatService:
         summaries=get_document_summary_service(),
         llm_client=get_llm_client(),
         sessions=get_excel_repository(),
+        workflow=get_chat_workflow(),
     )
+
+
+@lru_cache(maxsize=1)
+def get_chat_workflow() -> ChatWorkflow:
+    return LangGraphChatWorkflow()
 
 
 @lru_cache(maxsize=1)

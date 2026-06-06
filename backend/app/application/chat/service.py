@@ -18,6 +18,7 @@ from app.domain.models import (
     ExcelSheet,
     SelectedDocument,
 )
+from app.ports.chat_workflow import ChatWorkflow, ChatWorkflowRequest
 from app.ports.llm_client import LlmClient
 from app.ports.repository import ChatSessionRepository
 
@@ -33,6 +34,7 @@ class ChatService:
         sessions: ChatSessionRepository,
         max_documents: int = 3,
         page_size: int = 5000,
+        workflow: ChatWorkflow | None = None,
     ) -> None:
         self._excel_assets = excel_assets
         self._summaries = summaries
@@ -40,6 +42,7 @@ class ChatService:
         self._sessions = sessions
         self._max_documents = max_documents
         self._page_size = page_size
+        self._workflow = workflow
 
     def create_session(self) -> ChatSession:
         now = utc_now_iso()
@@ -64,6 +67,18 @@ class ChatService:
         answer_model: str | None = None,
         answer_provider: str | None = None,
     ) -> ChatAnswer:
+        if self._workflow is not None:
+            return self._workflow.answer_question(
+                ChatWorkflowRequest(
+                    question=question,
+                    session_id=session_id,
+                    router_model=router_model,
+                    router_provider=router_provider,
+                    answer_model=answer_model,
+                    answer_provider=answer_provider,
+                ),
+                actions=self,
+            )
         route_result = self.route_question(
             question,
             session_id=session_id,

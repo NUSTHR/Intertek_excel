@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from app.adapters.dialogue import LangGraphChatWorkflow
 from app.adapters.llm.fake_llm_client import FakeLlmClient
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
@@ -28,6 +29,7 @@ from app.domain.models import (
     SelectedDocument,
 )
 from app.main import app
+from app.ports.chat_workflow import ChatWorkflow
 
 
 @pytest.fixture
@@ -206,6 +208,46 @@ def test_chat_route_returns_documents_before_answer_stage(
         )
 
 
+def test_langgraph_workflow_runs_full_chat_chain(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(
+        tmp_path,
+        llm_client,
+        workflow=LangGraphChatWorkflow(),
+    ) as client:
+        workbook_path = tmp_path / "standards.xlsx"
+        _write_large_xlsx_fixture(workbook_path, rows=5)
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "standards.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        version_id = upload_response.json()["version"]["version_id"]
+        client.post(f"/api/excel/versions/{version_id}/summary/generate")
+
+        chat_response = client.post(
+            "/api/excel/chat",
+            json={"question": "What standards are listed?"},
+        )
+
+        assert chat_response.status_code == 200
+        answer_payload = chat_response.json()
+        assert llm_client.route_calls[0]["question"] == "What standards are listed?"
+        assert llm_client.answer_calls[0]["question"] == "What standards are listed?"
+        assert answer_payload["selected_documents"][0]["version_id"] == version_id
+        assert {"route_total", "answer_total", "chat_total"}.issubset(
+            {timing["stage"] for timing in answer_payload["timings"]}
+        )
+
+
 def test_llm_options_endpoint_and_request_level_models(
     tmp_path: Path,
 ) -> None:
@@ -216,6 +258,7 @@ def test_llm_options_endpoint_and_request_level_models(
         options_payload = options_response.json()
         assert "deepseek-ai/DeepSeek-V4-Pro" in options_payload["models"]
         assert "Qwen/Qwen3.6-27B" in options_payload["models"]
+        assert options_payload["models"][0] == "inclusionAI/Ling-flash-2.0"
 
         workbook_path = tmp_path / "standards.xlsx"
         _write_large_xlsx_fixture(workbook_path, rows=5)
@@ -372,7 +415,11 @@ class CapturingLlmClient(FakeLlmClient):
 
 
 @contextmanager
-def _client_with_llm(tmp_path: Path, llm_client: FakeLlmClient) -> Iterator[TestClient]:
+def _client_with_llm(
+    tmp_path: Path,
+    llm_client: FakeLlmClient,
+    workflow: ChatWorkflow | None = None,
+) -> Iterator[TestClient]:
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
     excel_assets = ExcelAssetService(
         repository=repository,
@@ -390,6 +437,7 @@ def _client_with_llm(tmp_path: Path, llm_client: FakeLlmClient) -> Iterator[Test
         summaries=summaries,
         llm_client=llm_client,
         sessions=repository,
+        workflow=workflow,
     )
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
     app.dependency_overrides[get_document_summary_service] = lambda: summaries

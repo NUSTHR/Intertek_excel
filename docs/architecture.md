@@ -26,6 +26,17 @@ core/         configuration, IDs, errors, time helpers
 `application/` depends on `ports/`, not on concrete infrastructure. This keeps
 storage, database, and workbook parsing replaceable.
 
+## Dialogue Workflow
+
+Chat orchestration is isolated behind `ports/chat_workflow.py`. The production
+dependency graph injects `adapters/dialogue/langgraph_chat_workflow.py`, which
+uses LangGraph to run the full `route -> answer` chain while preserving the
+existing HTTP API and the standalone route/answer endpoints.
+
+The workflow layer coordinates stages only. Excel loading, document attachment,
+LLM calls, citation verification, and session persistence remain in the
+application service and existing adapters.
+
 ## Frontend Boundary
 
 The frontend is a separate Vue/Vite app. It owns its API client, types, and UI

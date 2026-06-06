@@ -2,17 +2,14 @@
 import { computed, ref } from 'vue'
 
 import {
-  answerRoutedExcelQuestion,
-  createChatSession,
-  routeExcelQuestion,
+  askExcelQuestion,
 } from '../api/chat-api'
-import type { ChatAnswer, ChatRouteResult, ExcelCitation } from '../types/chat'
+import type { ChatAnswer, ExcelCitation } from '../types/chat'
 import CitationPanel from './CitationPanel.vue'
 import SourceTracePanel from './SourceTracePanel.vue'
 
 interface ChatHistoryEntry {
   question: string
-  route: ChatRouteResult | null
   answer: ChatAnswer | null
 }
 
@@ -25,7 +22,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   answerReceived: [answer: ChatAnswer]
-  routeReceived: [route: ChatRouteResult]
   selectCitation: [citation: ExcelCitation]
 }>()
 
@@ -74,30 +70,19 @@ async function submitQuestion(): Promise<void> {
   selectedCitation.value = null
   const entry: ChatHistoryEntry = {
     question: trimmedQuestion,
-    route: null,
     answer: null,
   }
   history.value = [...history.value, entry]
   try {
-    if (!sessionId.value) {
-      sessionId.value = (await createChatSession()).session_id
-    }
-    const route = await routeExcelQuestion(
+    const answer = await askExcelQuestion(
       trimmedQuestion,
-      sessionId.value,
-      props.routerModel,
-      props.routerProvider,
-    )
-    sessionId.value = route.session_id
-    entry.route = route
-    history.value = [...history.value]
-    emit('routeReceived', route)
-    const answer = await answerRoutedExcelQuestion(
-      trimmedQuestion,
-      sessionId.value,
-      props.answerModel,
-      props.answerProvider,
-      route.selected_documents.map((document) => document.version_id),
+      sessionId.value || null,
+      {
+        routerProvider: props.routerProvider ?? '',
+        routerModel: props.routerModel ?? '',
+        answerProvider: props.answerProvider ?? '',
+        answerModel: props.answerModel ?? '',
+      },
     )
     entry.answer = answer
     history.value = [...history.value]
@@ -129,23 +114,7 @@ function selectCitationById(citationId: string): void {
 }
 
 function entryTimings(entry: ChatHistoryEntry): { stage: string; duration_seconds: number }[] {
-  const routeTimings = entry.route?.timings ?? []
-  const answerTimings = (entry.answer?.timings ?? []).filter(
-    (timing) => timing.stage !== 'chat_total',
-  )
-  if (!entry.answer) {
-    return routeTimings
-  }
-  const combinedTimings = [...routeTimings, ...answerTimings]
-  const fullChainSeconds =
-    timingValue(routeTimings, 'route_total') + timingValue(answerTimings, 'answer_total')
-  if (fullChainSeconds > 0) {
-    combinedTimings.push({
-      stage: 'chat_total',
-      duration_seconds: fullChainSeconds,
-    })
-  }
-  return combinedTimings
+  return entry.answer?.timings ?? []
 }
 
 function stageLabel(stage: string): string {
@@ -184,7 +153,7 @@ function timingValue(
         <p class="eyebrow">ExcelAI</p>
         <h3>Data Chat</h3>
       </div>
-      <span class="doc-count">{{ latestAnswer?.selected_documents.length ?? latestEntry?.route?.selected_documents.length ?? 0 }} docs</span>
+      <span class="doc-count">{{ latestAnswer?.selected_documents.length ?? 0 }} docs</span>
     </div>
 
     <section class="chain-timing-panel" aria-live="polite">

@@ -14,11 +14,11 @@ LLM_PROVIDER_LABELS: dict[str, str] = {
 }
 
 SILICONFLOW_LLM_MODELS: tuple[str, ...] = (
+    "inclusionAI/Ling-flash-2.0",
     "deepseek-ai/DeepSeek-V4-Pro",
     "Pro/deepseek-ai/DeepSeek-V3.2",
     "Qwen/Qwen3.6-27B",
     "Qwen/Qwen3.6-35B-A3B",
-    "inclusionAI/Ling-flash-2.0",
 )
 
 DEEPSEEK_OFFICIAL_LLM_MODELS: tuple[str, ...] = (
@@ -43,9 +43,9 @@ SUPPORTED_LLM_MODELS: tuple[str, ...] = tuple(
 DEFAULT_SUMMARY_PROVIDER = SILICONFLOW_PROVIDER
 DEFAULT_ROUTER_PROVIDER = SILICONFLOW_PROVIDER
 DEFAULT_ANSWER_PROVIDER = SILICONFLOW_PROVIDER
-DEFAULT_SUMMARY_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+DEFAULT_SUMMARY_MODEL = "inclusionAI/Ling-flash-2.0"
 DEFAULT_ROUTER_MODEL = "inclusionAI/Ling-flash-2.0"
-DEFAULT_ANSWER_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+DEFAULT_ANSWER_MODEL = "inclusionAI/Ling-flash-2.0"
 DEFAULT_DEEPSEEK_SUMMARY_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_ROUTER_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_ANSWER_MODEL = "deepseek-v4-pro"
