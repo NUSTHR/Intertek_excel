@@ -159,8 +159,8 @@ const previewRangeLabel = computed(() => {
   return `${start}-${end} of ${preview.value.total_rows}`
 })
 
-const referencedDocuments = computed(() => {
-  return latestAnswer.value?.selected_documents ?? []
+const documentTitleMap = computed<Record<string, string>>(() => {
+  return Object.fromEntries(files.value.map((file) => [file.file_id, file.display_name]))
 })
 
 const visibleSummaryTopics = computed(() => {
@@ -846,14 +846,6 @@ function fileIcon(file: ExcelFile): string {
   return 'description'
 }
 
-function fileDisplayName(fileId: string): string {
-  return files.value.find((file) => file.file_id === fileId)?.display_name ?? shortId(fileId)
-}
-
-function selectedDocumentTitle(document: SelectedDocument): string {
-  return fileDisplayName(document.file_id)
-}
-
 function formatDate(value: string | null | undefined): string {
   if (!value) {
     return '-'
@@ -876,13 +868,6 @@ function shortId(value: string | null | undefined): string {
     return '-'
   }
   return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value
-}
-
-function confidenceLabel(value: number | null): string {
-  if (value === null || Number.isNaN(value)) {
-    return '-'
-  }
-  return `${Math.round(value * 100)}%`
 }
 
 function modelsForProvider(provider: string): string[] {
@@ -1832,28 +1817,6 @@ function toErrorMessage(error: unknown): string {
         </section>
 
         <aside class="assistant-column">
-          <section class="referenced-docs">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Referenced Documents</p>
-                <h3>{{ referencedDocuments.length }} routed</h3>
-              </div>
-            </div>
-            <button
-              v-for="document in referencedDocuments"
-              :key="`${document.file_id}-${document.version_id}`"
-              type="button"
-              class="doc-chip"
-              @click="openReferencedDocument(document)"
-            >
-              <strong>{{ selectedDocumentTitle(document) }}</strong>
-              <span>{{ confidenceLabel(document.confidence) }} / {{ document.reason }}</span>
-            </button>
-            <p v-if="referencedDocuments.length === 0" class="empty-copy">
-              No routed documents yet.
-            </p>
-          </section>
-
           <ChatPanel
             :session-id="activeChatSessionId"
             :session-title="activeChatSession?.title ?? ''"
@@ -1861,8 +1824,10 @@ function toErrorMessage(error: unknown): string {
             :router-model="routerModel || null"
             :answer-provider="answerProvider || null"
             :answer-model="answerModel || null"
+            :document-titles="documentTitleMap"
             @answer-received="handleChatAnswer"
             @select-citation="handleCitationSelected"
+            @select-document="openReferencedDocument"
             @session-created="handleChatSessionCreated"
             @session-title-suggested="handleChatSessionTitleSuggested"
           />

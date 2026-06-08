@@ -5,13 +5,13 @@ import {
   askExcelQuestion,
   createChatSession,
 } from '../api/chat-api'
-import type { ChatAnswer, ChatSession, ExcelCitation } from '../types/chat'
-import SourceTracePanel from './SourceTracePanel.vue'
+import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 
 interface ChatHistoryEntry {
   id: string
   question: string
   answer: ChatAnswer | null
+  createdAt: string
 }
 
 const draftSessionKey = '__draft__'
@@ -23,32 +23,29 @@ const props = defineProps<{
   answerModel: string | null
   sessionId: string
   sessionTitle: string
+  documentTitles: Record<string, string>
 }>()
 
 const emit = defineEmits<{
   answerReceived: [answer: ChatAnswer]
   selectCitation: [citation: ExcelCitation]
+  selectDocument: [document: SelectedDocument]
   sessionCreated: [session: ChatSession]
   sessionTitleSuggested: [sessionId: string, title: string]
 }>()
 
 const question = ref<string>('')
 const historiesBySession = ref<Record<string, ChatHistoryEntry[]>>({})
-const selectedCitation = ref<ExcelCitation | null>(null)
 const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
-const isTimingExpanded = ref<boolean>(false)
 const chatScrollRegion = ref<HTMLElement | null>(null)
+const chatInput = ref<HTMLTextAreaElement | null>(null)
 let nextHistoryEntryId = 0
 
 const currentSessionKey = computed(() => props.sessionId || draftSessionKey)
 
 const history = computed<ChatHistoryEntry[]>(() => {
   return historiesBySession.value[currentSessionKey.value] ?? []
-})
-
-const currentSessionLabel = computed(() => {
-  return props.sessionTitle || 'New chat'
 })
 
 const latestAnswer = computed<ChatAnswer | null>(() => {
@@ -61,39 +58,30 @@ const latestAnswer = computed<ChatAnswer | null>(() => {
   return null
 })
 
-const latestEntry = computed<ChatHistoryEntry | null>(() => {
-  return history.value.at(-1) ?? null
+const activeSourceDocuments = computed<SelectedDocument[]>(() => {
+  return latestAnswer.value?.selected_documents ?? []
 })
 
-const latestTimings = computed(() => {
-  return latestEntry.value ? entryTimings(latestEntry.value) : []
-})
-
-const latestTotalSeconds = computed(() => {
-  const timings = latestTimings.value
-  return (
-    timingValue(timings, 'chat_total') ||
-    timingValue(timings, 'answer_total') ||
-    timingValue(timings, 'route_total')
-  )
-})
-
-const timingToggleLabel = computed(() => {
-  return isTimingExpanded.value ? 'Hide' : 'Show'
+const sourceCountLabel = computed(() => {
+  const count = activeSourceDocuments.value.length
+  return `${count} ${count === 1 ? 'File' : 'Files'}`
 })
 
 watch(currentSessionKey, () => {
-  selectedCitation.value = latestAnswer.value?.citations[0] ?? null
   void scrollChatToBottom()
 })
 
 watch(
-  () => [history.value.length, latestEntry.value?.answer?.created_at, errorMessage.value],
+  () => [history.value.length, history.value.at(-1)?.answer?.created_at, errorMessage.value],
   () => {
     void scrollChatToBottom()
   },
   { flush: 'post' },
 )
+
+watch(question, () => {
+  void nextTick(resizeChatInput)
+})
 
 async function scrollChatToBottom(): Promise<void> {
   await nextTick()
@@ -112,7 +100,6 @@ async function submitQuestion(): Promise<void> {
 
   errorMessage.value = ''
   isAsking.value = true
-  selectedCitation.value = null
 
   let targetSessionId = props.sessionId
   let targetSessionKey = props.sessionId || draftSessionKey
@@ -133,6 +120,7 @@ async function submitQuestion(): Promise<void> {
       id: entryId,
       question: trimmedQuestion,
       answer: null,
+      createdAt: new Date().toISOString(),
     }
     setHistory(targetSessionKey, [...historyForSession(targetSessionKey), entry])
     await scrollChatToBottom()
@@ -156,16 +144,13 @@ async function submitQuestion(): Promise<void> {
     emit('answerReceived', answer)
     await scrollChatToBottom()
 
-    selectedCitation.value = answer.citations[0] ?? null
-    if (selectedCitation.value) {
-      emit('selectCitation', selectedCitation.value)
-    }
-
     if (createdSession || !props.sessionTitle || props.sessionTitle === 'New chat') {
       emit('sessionTitleSuggested', answer.session_id, titleFromQuestion(trimmedQuestion))
     }
 
     question.value = ''
+    await nextTick()
+    resizeChatInput()
   } catch (error: unknown) {
     if (entry) {
       const failedEntry = entry
@@ -192,20 +177,15 @@ function setHistory(sessionKey: string, entries: ChatHistoryEntry[]): void {
   }
 }
 
-function selectCitation(citation: ExcelCitation): void {
-  selectedCitation.value = citation
-  emit('selectCitation', citation)
-}
-
-function selectCitationById(citationId: string): void {
-  const citation = latestAnswer.value?.citations.find((item) => item.citation_id === citationId)
+function selectCitationById(answer: ChatAnswer, citationId: string): void {
+  const citation = answer.citations.find((item) => item.citation_id === citationId)
   if (citation) {
-    selectCitation(citation)
+    emit('selectCitation', citation)
   }
 }
 
-function entryTimings(entry: ChatHistoryEntry): { stage: string; duration_seconds: number }[] {
-  return entry.answer?.timings ?? []
+function selectDocument(document: SelectedDocument): void {
+  emit('selectDocument', document)
 }
 
 function titleFromQuestion(value: string): string {
@@ -213,170 +193,196 @@ function titleFromQuestion(value: string): string {
   return normalized.length > 56 ? `${normalized.slice(0, 53)}...` : normalized
 }
 
-function stageLabel(stage: string): string {
-  const labels: Record<string, string> = {
-    route_model: 'Document selection',
-    attach_documents: 'Attach documents',
-    route_total: 'Selection total',
-    load_rows: 'Load rows',
-    answer_model: 'Model answer',
-    verify_citations: 'Verify citations',
-    answer_total: 'Answer total',
-    chat_total: 'Full chain',
-  }
-  return labels[stage] ?? stage.replace(/_/g, ' ')
+function documentKey(document: SelectedDocument): string {
+  return `${document.file_id}-${document.version_id}`
 }
 
-function formatSeconds(value: number): string {
-  if (!Number.isFinite(value)) {
+function documentTitle(document: SelectedDocument): string {
+  return props.documentTitles[document.file_id] ?? shortId(document.file_id)
+}
+
+function shortId(value: string | null | undefined): string {
+  if (!value) {
     return '-'
   }
-  return `${value.toFixed(value < 10 ? 2 : 1)}s`
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value
 }
 
-function timingValue(
-  timings: { stage: string; duration_seconds: number }[],
-  stage: string,
-): number {
-  return timings.find((timing) => timing.stage === stage)?.duration_seconds ?? 0
+function formatMessageTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+  return new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date).toUpperCase()
+}
+
+function handleDraftInput(): void {
+  resizeChatInput()
+}
+
+function resizeChatInput(): void {
+  const element = chatInput.value
+  if (!element) {
+    return
+  }
+  element.style.height = '0px'
+  element.style.height = `${Math.min(element.scrollHeight, 140)}px`
 }
 </script>
 
 <template>
-  <section class="chat-panel">
-    <div class="chat-panel-head">
-      <div>
-        <p class="eyebrow">Chat</p>
-        <h3>{{ currentSessionLabel }}</h3>
-      </div>
-      <span class="doc-count">{{ latestAnswer?.selected_documents.length ?? 0 }} docs</span>
-    </div>
+  <section class="chat-panel" aria-label="Chat and citations">
+    <header class="chat-panel-head">
+      <h3>Chat &amp; Citations</h3>
+      <button type="button" class="chat-icon-button" aria-label="Collapse chat panel">
+        <span class="material-symbols-outlined" data-icon="close_fullscreen">close_fullscreen</span>
+      </button>
+    </header>
 
-    <section class="chain-timing-panel" :class="{ collapsed: !isTimingExpanded }" aria-live="polite">
-      <div class="timing-summary">
-        <div>
-          <p class="eyebrow">Chain Timing</p>
-          <strong>{{ latestTotalSeconds ? formatSeconds(latestTotalSeconds) : 'No run yet' }}</strong>
+    <div ref="chatScrollRegion" class="chat-scroll-region custom-scrollbar">
+      <section class="chat-data-sources-card" aria-label="Data sources for current turn">
+        <div class="chat-data-sources-head">
+          <div>
+            <span>Data Sources</span>
+            <strong>{{ sourceCountLabel }}</strong>
+          </div>
+          <button type="button" class="chat-source-menu" aria-label="Data source options">
+            <span class="material-symbols-outlined" data-icon="more_vert">more_vert</span>
+          </button>
         </div>
-        <button
-          type="button"
-          class="timing-toggle"
-          :aria-expanded="isTimingExpanded"
-          @click="isTimingExpanded = !isTimingExpanded"
-        >
-          {{ timingToggleLabel }}
-        </button>
-      </div>
-      <div v-if="isTimingExpanded && latestTimings.length > 0" class="timing-strip compact">
-        <div
-          v-for="timing in latestTimings"
-          :key="`latest-${timing.stage}`"
-          class="timing-pill"
-          :class="{ total: timing.stage.endsWith('_total') }"
-        >
-          <span>{{ stageLabel(timing.stage) }}</span>
-          <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
+        <div class="chat-data-source-list">
+          <button
+            v-for="document in activeSourceDocuments"
+            :key="documentKey(document)"
+            type="button"
+            class="chat-data-source-row"
+            @click="selectDocument(document)"
+          >
+            <span class="chat-source-file-icon">
+              <span class="material-symbols-outlined" data-icon="description">description</span>
+            </span>
+            <span class="chat-source-copy">
+              <strong>{{ documentTitle(document) }}</strong>
+              <span>Active Source</span>
+            </span>
+            <span class="chat-source-status" aria-hidden="true">
+              <span></span>
+            </span>
+            <span class="material-symbols-outlined chat-source-expand" data-icon="expand_more">
+              expand_more
+            </span>
+          </button>
         </div>
-      </div>
-      <p v-else-if="isTimingExpanded" class="timing-placeholder">
-        Timing appears after the next route or answer call.
-      </p>
-    </section>
+      </section>
 
-    <div ref="chatScrollRegion" class="chat-scroll-region">
       <div class="chat-history">
-        <template v-if="history.length > 0">
-          <template v-for="(entry, entryIndex) in history" :key="entry.id">
-            <div class="message user-message">
-              <p>{{ entry.question }}</p>
-              <span>User</span>
-            </div>
+        <template v-for="(entry, entryIndex) in history" :key="entry.id">
+          <div class="chat-message user">
+            <div class="user-bubble">{{ entry.question }}</div>
+            <span class="chat-message-time">{{ formatMessageTime(entry.createdAt) }}</span>
+          </div>
 
-            <article
-              v-if="entry.answer"
-              class="message assistant-message"
-            >
+          <article v-if="entry.answer" class="chat-message assistant">
+            <div class="assistant-message-stack">
               <div class="assistant-title">
-                <span>AI</span>
+                <span class="assistant-bot-icon">
+                  <span class="material-symbols-outlined" data-icon="smart_toy">smart_toy</span>
+                </span>
                 <strong>ExcelAI</strong>
               </div>
-              <p v-if="entry.answer.insufficient_evidence" class="warning-text">Insufficient evidence.</p>
-              <div
-                v-for="(block, blockIndex) in entry.answer.answer_blocks"
-                :key="`${entry.answer.created_at}-${blockIndex}`"
-                class="answer-block"
-              >
-                <p>{{ block.text }}</p>
-                <button
-                  v-for="citationId in block.citation_ids"
-                  :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
-                  type="button"
-                  class="citation-chip"
-                  @click="selectCitationById(citationId)"
-                >
-                  [{{ citationId }}]
-                </button>
-              </div>
-              <p v-if="entry.answer.answer_blocks.length === 0" class="empty-copy">No answer blocks returned.</p>
-              <div v-if="entry.answer.warnings.length > 0" class="warning-list">
-                <p v-for="warning in entry.answer.warnings" :key="warning">{{ warning }}</p>
-              </div>
-              <div v-if="entryTimings(entry).length > 0" class="timing-strip">
+              <div class="assistant-bubble">
+                <p v-if="entry.answer.insufficient_evidence" class="warning-text">
+                  Insufficient evidence.
+                </p>
                 <div
-                  v-for="timing in entryTimings(entry)"
-                  :key="`${entry.answer.created_at}-${timing.stage}`"
-                  class="timing-pill"
-                  :class="{ total: timing.stage.endsWith('_total') }"
+                  v-for="(block, blockIndex) in entry.answer.answer_blocks"
+                  :key="`${entry.answer.created_at}-${blockIndex}`"
+                  class="answer-block"
                 >
-                  <span>{{ stageLabel(timing.stage) }}</span>
-                  <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
+                  <p>{{ block.text }}</p>
+                  <button
+                    v-for="citationId in block.citation_ids"
+                    :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
+                    type="button"
+                    class="citation-chip"
+                    @click="selectCitationById(entry.answer, citationId)"
+                  >
+                    [{{ citationId }}]
+                  </button>
+                </div>
+                <p v-if="entry.answer.answer_blocks.length === 0" class="empty-copy">
+                  No answer blocks returned.
+                </p>
+                <div v-if="entry.answer.warnings.length > 0" class="warning-list">
+                  <p v-for="warning in entry.answer.warnings" :key="warning">{{ warning }}</p>
                 </div>
               </div>
-            </article>
+            </div>
+            <span class="chat-message-time">
+              {{ formatMessageTime(entry.answer.created_at || entry.createdAt) }}
+            </span>
+          </article>
 
-            <article
-              v-else-if="isAsking && entryIndex === history.length - 1"
-              class="message assistant-message loading-message"
-            >
+          <article
+            v-else-if="isAsking && entryIndex === history.length - 1"
+            class="chat-message assistant"
+          >
+            <div class="assistant-message-stack">
               <div class="assistant-title">
-                <span>AI</span>
+                <span class="assistant-bot-icon">
+                  <span class="material-symbols-outlined" data-icon="smart_toy">smart_toy</span>
+                </span>
                 <strong>ExcelAI</strong>
               </div>
-              <p>Waiting for model response.</p>
-            </article>
-          </template>
+              <div class="assistant-bubble loading-message">
+                Waiting for model response.
+              </div>
+            </div>
+          </article>
         </template>
 
-        <div v-else class="message assistant-message quiet-message">
-          <div class="assistant-title">
-            <span>AI</span>
-            <strong>ExcelAI</strong>
-          </div>
-          <p>No messages in this session.</p>
-        </div>
+        <p v-if="errorMessage" class="chat-error-note">{{ errorMessage }}</p>
       </div>
-
-      <div v-if="selectedCitation" class="evidence-panels">
-        <SourceTracePanel :citation="selectedCitation" />
-      </div>
-
-      <p v-if="errorMessage" class="error-note chat-error-note">{{ errorMessage }}</p>
     </div>
 
     <form class="chat-input-card" @submit.prevent="submitQuestion">
-      <textarea
-        v-model="question"
-        rows="3"
-        placeholder="Ask about your Excel data..."
-        @keydown.meta.enter="submitQuestion"
-        @keydown.ctrl.enter="submitQuestion"
-      />
-      <div class="chat-input-actions">
-        <span>Backend-verified citations</span>
-        <button type="submit" :disabled="isAsking">
-          {{ isAsking ? 'Asking...' : 'Send' }}
-        </button>
+      <div class="chat-input-shell">
+        <textarea
+          ref="chatInput"
+          v-model="question"
+          rows="1"
+          placeholder="Ask about your data..."
+          @input="handleDraftInput"
+          @keydown.meta.enter="submitQuestion"
+          @keydown.ctrl.enter="submitQuestion"
+        />
+        <div class="chat-input-actions">
+          <div class="chat-tools">
+            <button type="button" class="chat-tool-button" aria-label="Attach file">
+              <span class="material-symbols-outlined" data-icon="attach_file">attach_file</span>
+            </button>
+            <button type="button" class="chat-tool-button" aria-label="Add chart">
+              <span class="material-symbols-outlined" data-icon="add_chart">add_chart</span>
+            </button>
+          </div>
+          <button
+            type="submit"
+            class="chat-send-button"
+            :disabled="isAsking || !question.trim()"
+            aria-label="Send message"
+          >
+            <span class="material-symbols-outlined" data-icon="arrow_upward">
+              {{ isAsking ? 'hourglass_empty' : 'arrow_upward' }}
+            </span>
+          </button>
+        </div>
       </div>
+      <p class="chat-disclaimer">
+        AI may produce inaccurate financial results. Always verify.
+      </p>
     </form>
   </section>
 </template>

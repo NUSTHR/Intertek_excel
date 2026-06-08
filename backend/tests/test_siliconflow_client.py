@@ -11,6 +11,7 @@ from app.adapters.llm.siliconflow_client import (
 )
 from app.core.errors import LlmRequestError
 from app.domain.models import (
+    AttachedDocument,
     ChatTurn,
     DocumentSummary,
     SelectedDocument,
@@ -40,7 +41,7 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
             ],
         },
         {
-            "selected_documents": [
+            "document_for_this_turn": [
                 {
                     "file_id": "file_1",
                     "version_id": "version_1",
@@ -209,6 +210,139 @@ def test_siliconflow_router_filters_unknown_version() -> None:
     )
 
     assert selected == []
+
+
+def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "document_for_this_turn": [
+                                        {
+                                            "file_id": "file_2",
+                                            "version_id": "version_2",
+                                            "reason": "Current question matches catalog.",
+                                            "confidence": 0.8,
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+    selected = client.route_documents(
+        "What applies to the same product in another region?",
+        [
+            DocumentSummary(
+                summary_id="summary_1",
+                file_id="file_1",
+                version_id="version_1",
+                summary_text="Attached household appliance standards.",
+                business_domain="standards",
+                key_topics=["household appliances"],
+                suitable_questions=[],
+                unsuitable_questions=[],
+                sheet_summaries=[
+                    SheetSummary(
+                        sheet_id="sheet_1",
+                        sheet_name="IEC",
+                        summary="IEC appliance standards.",
+                        important_columns=[],
+                        likely_question_types=[],
+                    )
+                ],
+                created_at="now",
+            ),
+            DocumentSummary(
+                summary_id="summary_2",
+                file_id="file_2",
+                version_id="version_2",
+                summary_text="Candidate regional standards.",
+                business_domain="standards",
+                key_topics=["regional standards"],
+                suitable_questions=[],
+                unsuitable_questions=[],
+                sheet_summaries=[],
+                created_at="now",
+            ),
+        ],
+        max_documents=2,
+        attached_documents=[
+            AttachedDocument(
+                session_id="session_1",
+                file_id="file_1",
+                version_id="version_1",
+                attached_at="now",
+                row_count=10,
+                context_hash="hash",
+            )
+        ],
+        previous_turns=[
+            ChatTurn(
+                turn_id="turn_1",
+                session_id="session_1",
+                question="What applies to household appliances?",
+                answer_text="not sent to router",
+                citation_ids=["C1"],
+                selected_documents=[
+                    SelectedDocument(
+                        file_id="file_1",
+                        version_id="version_1",
+                        reason="Previous turn.",
+                    )
+                ],
+                created_at="now",
+            )
+        ],
+    )
+
+    assert selected[0].version_id == "version_2"
+
+    messages = requests[0]["messages"]
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert "Document catalog for routing" in messages[1]["content"]
+    assert "not sent to router" not in json.dumps(messages, ensure_ascii=False)
+    assert "document_for_this_turn_ids" in messages[3]["content"]
+    assert "Maximum documents for this turn: 2" in messages[-1]["content"]
+    assert "document_for_this_turn" in messages[-1]["content"]
+
+    catalog = json.loads(messages[1]["content"].split("\n\n", 1)[1])
+    assert catalog[0]["version_id"] == "version_1"
+    assert catalog[0]["attachment_state"] == "attached"
+    assert catalog[0]["selected_turn_count"] == 1
+    assert catalog[0]["selected_in_last_turn"] is True
+    assert catalog[1]["version_id"] == "version_2"
+    assert catalog[1]["attachment_state"] == "candidate"
 
 
 def test_siliconflow_answer_sends_history_as_role_messages() -> None:

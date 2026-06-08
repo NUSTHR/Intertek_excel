@@ -59,35 +59,42 @@ DOCUMENT_SUMMARY_SYSTEM_PROMPT = "\n".join(
 
 DOCUMENT_ROUTER_SYSTEM_PROMPT = "\n".join(
     [
-        "You are a conservative document router for an Excel question answering system.",
+        "You are a document router for an enterprise Excel question answering system.",
         "",
-        "Your goal is to keep the active document set as small as possible while still "
-        "sufficient for the current user turn.",
+        "Your job is to choose the Excel workbook versions that should be used as "
+        "evidence sources for the current user turn.",
         "",
-        "You are not trying to find every possibly related document.",
-        "You are trying to determine whether the already attached documents are enough "
-        "or whether a small number of additional documents must be added.",
+        "The field document_for_this_turn means exactly this: the documents that should "
+        "be used to answer the current user turn. It is not the full session history, "
+        "not every attached document, and not every broadly related document.",
         "",
         "Rules:",
         "1. Do not answer the user's question.",
-        "2. Select only from the provided already attached documents and candidate new documents.",
+        "2. Select only from the provided document catalog.",
         "3. Use version_id as the primary selection id.",
-        "4. Prefer reusing already attached documents whenever they are still sufficient.",
-        "5. Do not add new documents just because they are broadly related, adjacent, "
-        "or potentially useful.",
-        "6. Add new documents only when the current turn clearly introduces information "
-        "needs that are not covered by the already attached documents.",
-        "7. If already attached documents are sufficient, selected_documents should include "
-        "only the documents that should remain active for this turn and should not add "
-        "unrelated candidate documents.",
-        "8. Keeping the entire active document list empty is risky. Return an empty selected_documents array "
-        "only when no document is even minimally relevant to the user's question.",
-        "9. Prefer precision over recall.",
-        "10. A document should be selected only if omitting it would likely miss necessary "
-        "evidence for the current turn.",
-        "11. The reason should be short and based on provided metadata or recent chat turns.",
+        "4. Use routing memory only to resolve conversational context, such as follow-up "
+        "questions, pronouns, abbreviations, refinements, repeated product context, "
+        "or references to previous turns.",
+        "5. If the current turn continues the same product, domain, region, regulation type, "
+        "standard family, document family, or business topic as recent turns, prefer "
+        "recently used attached documents when their catalog metadata remains likely "
+        "to contain evidence.",
+        "6. If the current turn introduces a new product, domain, region, regulation type, "
+        "standard family, document family, or business topic, choose additional candidate "
+        "documents only when their catalog metadata indicates likely evidence.",
+        "7. Do not keep old attached documents for the current turn just because they were "
+        "used earlier. Include them only when they are useful for the current turn.",
+        "8. Do not add documents that are merely adjacent, generic, or weakly related.",
+        "9. If no catalog document is likely to contain evidence for the current turn, "
+        "return an empty document_for_this_turn array.",
+        "10. Keep document_for_this_turn as small as possible; only increase it via "
+        "controlled recall when a likely evidence source would otherwise be missed.",
+        "11. The reason should be short and based on catalog metadata or routing memory.",
         "12. Return strict JSON only. Do not return markdown, explanation, comments, "
         "or code fences.",
+        "13. Respond as quickly and concisely as possible while fully satisfying the above "
+        "requirements. Avoid any unnecessary elaboration, extra reasoning steps, or verbose "
+        "output. Output only the minimal JSON required.",
     ]
 )
 
@@ -243,24 +250,12 @@ class MultiProviderLlmClient:
             model=model,
             stage="router",
         )
-        _ = max_documents
-        user_questions_json = json.dumps(user_questions or [question], ensure_ascii=False)
-        recent_turns_json = json.dumps(
-            [self._turn_payload(turn) for turn in (previous_turns or [])[-3:]],
-            ensure_ascii=False,
-        )
-        attached_documents_json = json.dumps(
-            self._attached_routing_payload(
+        _ = user_questions
+        document_catalog_json = json.dumps(
+            self._routing_document_catalog(
                 summaries=summaries,
                 attached_documents=attached_documents or [],
                 previous_turns=previous_turns or [],
-            ),
-            ensure_ascii=False,
-        )
-        candidate_documents_json = json.dumps(
-            self._candidate_routing_payload(
-                summaries=summaries,
-                attached_documents=attached_documents or [],
             ),
             ensure_ascii=False,
         )
@@ -268,34 +263,42 @@ class MultiProviderLlmClient:
             stage="route_model",
             provider_config=provider_config,
             model=resolved_model,
-            system_prompt=DOCUMENT_ROUTER_SYSTEM_PROMPT,
-            user_prompt=(
-                "Route the current user turn.\n\n"
-                "Current question:\n"
-                f"{question}\n\n"
-                "All session questions:\n"
-                f"{user_questions_json}\n\n"
-                "Recent chat turns:\n"
-                f"{recent_turns_json}\n\n"
-                "Already attached documents:\n"
-                f"{attached_documents_json}\n\n"
-                "Candidate new documents:\n"
-                f"{candidate_documents_json}\n\n"
-                "Return JSON in exactly this shape:\n\n"
-                "{\n"
-                '  "routing_decision": "reuse_attached | attach_incrementally | no_match",\n'
-                '  "selected_documents": [\n'
-                "    {\n"
-                '      "file_id": "string",\n'
-                '      "version_id": "string",\n'
-                '      "reason": "string",\n'
-                '      "confidence": 0.0\n'
-                "    }\n"
-                "  ],\n"
-                '  "decision_reason": "string",\n'
-                '  "no_match_reason": "string"\n'
-                "}"
-            ),
+            messages=[
+                {"role": "system", "content": DOCUMENT_ROUTER_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Document catalog for routing. Each item is one selectable "
+                        "workbook version.\n\n"
+                        f"{document_catalog_json}"
+                    ),
+                },
+                *self._routing_memory_messages(previous_turns or []),
+                {
+                    "role": "user",
+                    "content": (
+                        "Route the current user turn.\n\n"
+                        f"Maximum documents for this turn: {max_documents}\n\n"
+                        "Current question:\n"
+                        f"{question}\n\n"
+                        "Return JSON in exactly this shape:\n\n"
+                        "{\n"
+                        '  "routing_decision": '
+                        '"reuse_attached | attach_incrementally | no_match",\n'
+                        '  "document_for_this_turn": [\n'
+                        "    {\n"
+                        '      "file_id": "string",\n'
+                        '      "version_id": "string",\n'
+                        '      "reason": "string",\n'
+                        '      "confidence": 0.0\n'
+                        "    }\n"
+                        "  ],\n"
+                        '  "decision_reason": "string",\n'
+                        '  "no_match_reason": "string"\n'
+                        "}"
+                    ),
+                },
+            ],
         )
         selected = [
             SelectedDocument(
@@ -304,7 +307,9 @@ class MultiProviderLlmClient:
                 reason=str(item.get("reason", "")),
                 confidence=self._optional_float(item.get("confidence")),
             )
-            for item in self._object_list(payload.get("selected_documents"))
+            for item in self._object_list(
+                payload.get("document_for_this_turn", payload.get("selected_documents"))
+            )
         ]
         allowed = {summary.version_id: summary.file_id for summary in summaries}
         unique_selected: list[SelectedDocument] = []
@@ -562,81 +567,91 @@ class MultiProviderLlmClient:
             "sheet_summaries": [sheet.__dict__ for sheet in summary.sheet_summaries],
         }
 
-    def _attached_routing_payload(
+    def _routing_document_catalog(
         self,
         *,
         summaries: list[DocumentSummary],
         attached_documents: list[AttachedDocument],
         previous_turns: list[ChatTurn],
     ) -> list[dict[str, Any]]:
-        summary_by_version = {summary.version_id: summary for summary in summaries}
+        attached_version_ids = {document.version_id for document in attached_documents}
         selected_turn_stats = self._selected_turn_stats(previous_turns)
         return [
-            self._attached_document_payload(
-                document=document,
-                summary=summary_by_version.get(document.version_id),
-                selected_turn_count=selected_turn_stats.get(document.version_id, {}).get(
+            self._routing_catalog_document_payload(
+                summary=summary,
+                attachment_state=(
+                    "attached" if summary.version_id in attached_version_ids else "candidate"
+                ),
+                selected_turn_count=selected_turn_stats.get(summary.version_id, {}).get(
                     "selected_turn_count", 0
                 ),
                 last_selected_turn_index=selected_turn_stats.get(
-                    document.version_id, {}
+                    summary.version_id, {}
                 ).get("last_selected_turn_index"),
-                selected_in_last_turn=selected_turn_stats.get(document.version_id, {}).get(
+                selected_in_last_turn=selected_turn_stats.get(summary.version_id, {}).get(
                     "selected_in_last_turn", False
                 ),
             )
-            for document in attached_documents
-            if document.version_id in summary_by_version
-        ]
-
-    def _candidate_routing_payload(
-        self,
-        *,
-        summaries: list[DocumentSummary],
-        attached_documents: list[AttachedDocument],
-    ) -> list[dict[str, Any]]:
-        attached_version_ids = {document.version_id for document in attached_documents}
-        return [
-            self._summary_payload(summary)
             for summary in summaries
-            if summary.version_id not in attached_version_ids
         ]
 
-    def _attached_document_payload(
+    def _routing_catalog_document_payload(
         self,
         *,
-        document: AttachedDocument,
-        summary: DocumentSummary | None,
+        summary: DocumentSummary,
+        attachment_state: str,
         selected_turn_count: int,
         last_selected_turn_index: int | None,
         selected_in_last_turn: bool,
     ) -> dict[str, Any]:
-        payload = {
-            "file_id": document.file_id,
-            "version_id": document.version_id,
-            "attached_at": document.attached_at,
-            "row_count": document.row_count,
-            "status": document.status,
+        return {
+            "file_id": summary.file_id,
+            "version_id": summary.version_id,
+            "attachment_state": attachment_state,
             "selected_turn_count": selected_turn_count,
             "last_selected_turn_index": last_selected_turn_index,
             "selected_in_last_turn": selected_in_last_turn,
-        }
-        if summary is not None:
-            payload.update(
+            "summary_text": summary.summary_text,
+            "business_domain": summary.business_domain,
+            "key_topics": summary.key_topics,
+            "sheet_summaries": [
                 {
-                    "summary_text": summary.summary_text,
-                    "business_domain": summary.business_domain,
-                    "key_topics": summary.key_topics,
-                    "sheet_summaries": [
-                        {
-                            "sheet_name": sheet.sheet_name,
-                            "summary": sheet.summary,
-                        }
-                        for sheet in summary.sheet_summaries
-                    ],
+                    "sheet_name": sheet.sheet_name,
+                    "summary": sheet.summary,
                 }
+                for sheet in summary.sheet_summaries
+            ],
+        }
+
+    def _routing_memory_messages(self, turns: list[ChatTurn]) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for turn in turns:
+            document_ids = [
+                document.version_id for document in self._unique_documents(turn.selected_documents)
+            ]
+            messages.extend(
+                [
+                    {"role": "user", "content": turn.question},
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {"document_for_this_turn_ids": document_ids},
+                            ensure_ascii=False,
+                        ),
+                    },
+                ]
             )
-        return payload
+        return messages
+
+    def _unique_documents(self, documents: list[SelectedDocument]) -> list[SelectedDocument]:
+        unique_documents: list[SelectedDocument] = []
+        seen_version_ids: set[str] = set()
+        for document in documents:
+            if document.version_id in seen_version_ids:
+                continue
+            seen_version_ids.add(document.version_id)
+            unique_documents.append(document)
+        return unique_documents
 
     def _turn_payload(self, turn: ChatTurn) -> dict[str, Any]:
         return {
