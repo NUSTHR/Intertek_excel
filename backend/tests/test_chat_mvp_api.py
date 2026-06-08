@@ -310,6 +310,14 @@ def test_llm_options_endpoint_and_request_level_models(
         assert "deepseek-ai/DeepSeek-V4-Pro" in options_payload["models"]
         assert "Qwen/Qwen3.6-27B" in options_payload["models"]
         assert options_payload["models"][0] == "inclusionAI/Ling-flash-2.0"
+        assert options_payload["defaults"] == {
+            "summary_provider": "deepseek",
+            "summary_model": "deepseek-v4-pro",
+            "router_provider": "siliconflow",
+            "router_model": "Qwen/Qwen3.6-35B-A3B",
+            "answer_provider": "deepseek",
+            "answer_model": "deepseek-v4-pro",
+        }
 
         workbook_path = tmp_path / "standards.xlsx"
         _write_large_xlsx_fixture(workbook_path, rows=5)

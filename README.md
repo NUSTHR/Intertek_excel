@@ -139,9 +139,9 @@ The UI and backend currently support these SiliconFlow model IDs:
 
 Default stage models:
 
-- summary: `inclusionAI/Ling-flash-2.0`
-- router: `inclusionAI/Ling-flash-2.0`
-- answer: `inclusionAI/Ling-flash-2.0`
+- summary: DeepSeek Official `deepseek-v4-pro`
+- router: SiliconFlow `Qwen/Qwen3.6-35B-A3B`
+- answer: DeepSeek Official `deepseek-v4-pro`
 
 The backend applies a conservative compatibility strategy for "disable
 thinking": it sends `enable_thinking=false` only for model families whose

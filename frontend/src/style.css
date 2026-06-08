@@ -226,8 +226,7 @@ h3 {
 .secondary-button:active,
 .view-switch:active,
 .icon-text-button:active,
-.doc-chip:active,
-.citation-row:active {
+.doc-chip:active {
   transform: scale(0.98);
 }
 
@@ -1112,6 +1111,7 @@ label > span {
   height: 100%;
   border-left: 1px solid var(--border);
   background: var(--surface);
+  overflow: hidden;
 }
 
 .sheet-toolbar {
@@ -1371,16 +1371,21 @@ label > span {
 
 .chat-panel {
   display: flex;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   flex-direction: column;
-  min-height: 0;
+  min-height: 360px;
   max-height: 100%;
   margin: 0 16px 16px;
   overflow: hidden;
   box-shadow: none;
 }
 
+.chat-panel > * {
+  min-width: 0;
+}
+
 .chat-panel-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1407,11 +1412,15 @@ label > span {
 
 .chain-timing-panel {
   flex: 0 0 auto;
-  margin: 0 16px 12px;
+  margin: 0 16px 8px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  padding: 10px;
+  padding: 8px;
   background: var(--surface-low);
+}
+
+.chain-timing-panel.collapsed {
+  padding-bottom: 8px;
 }
 
 .timing-summary {
@@ -1419,13 +1428,30 @@ label > span {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 0;
 }
 
 .timing-summary strong {
+  display: block;
   color: var(--secondary);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 16px;
+}
+
+.timing-toggle {
+  flex: 0 0 auto;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.timing-toggle:hover {
+  color: var(--text);
+  background: var(--surface-low);
 }
 
 .timing-placeholder {
@@ -1439,9 +1465,17 @@ label > span {
   flex: 1 1 auto;
   flex-direction: column;
   gap: 12px;
-  min-height: 0;
-  overflow-y: auto;
+  min-height: 220px;
   padding: 0 16px 14px;
+}
+
+.chat-scroll-region {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 240px;
+  max-height: 100%;
+  overflow-y: auto;
   overscroll-behavior: contain;
 }
 
@@ -1551,7 +1585,7 @@ label > span {
 
 .timing-strip.compact {
   margin-top: 0;
-  max-height: 86px;
+  max-height: 44px;
   overflow-y: auto;
 }
 
@@ -1585,7 +1619,6 @@ label > span {
   background: var(--secondary-soft);
 }
 
-.citation-panel,
 .source-trace-panel {
   border: 1px solid var(--border-soft);
   border-radius: 8px;
@@ -1595,48 +1628,20 @@ label > span {
 
 .evidence-panels {
   display: grid;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   gap: 10px;
-  max-height: 150px;
+  max-height: 160px;
   margin: 0 16px 12px;
   overflow-y: auto;
 }
 
-.citation-panel .panel-heading,
+.chat-error-note {
+  flex: 0 0 auto;
+  margin: 0 16px 12px;
+}
+
 .source-trace-panel .panel-heading {
   padding: 0 0 8px;
-}
-
-.citation-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  width: 100%;
-  margin-top: 7px;
-  padding: 8px 9px;
-  color: var(--text);
-  border: 1px solid var(--border-soft);
-  background: var(--surface);
-  text-align: left;
-}
-
-.citation-row:hover {
-  background: var(--secondary-soft);
-}
-
-.citation-row strong {
-  color: var(--secondary);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-}
-
-.citation-row span {
-  overflow: hidden;
-  color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
 }
 
 .source-trace-panel h3 {
@@ -2164,6 +2169,7 @@ label > span {
 .sheet-stage,
 .assistant-column,
 .referenced-docs,
+.chat-scroll-region,
 .chat-history,
 .evidence-panels,
 .timing-strip.compact,
@@ -2186,12 +2192,8 @@ label > span {
   overflow-y: auto;
 }
 
-.assistant-column {
-  overflow: hidden;
-}
-
 .referenced-docs {
-  max-height: 160px;
+  max-height: 120px;
   overflow-y: auto;
 }
 

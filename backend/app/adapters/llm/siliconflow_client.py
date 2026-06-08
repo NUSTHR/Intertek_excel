@@ -80,7 +80,8 @@ DOCUMENT_ROUTER_SYSTEM_PROMPT = "\n".join(
         "7. If already attached documents are sufficient, selected_documents should include "
         "only the documents that should remain active for this turn and should not add "
         "unrelated candidate documents.",
-        "8. If no document is clearly relevant, return an empty selected_documents array.",
+        "8. Keeping the entire active document list empty is risky. Return an empty selected_documents array "
+        "only when no document is even minimally relevant to the user's question.",
         "9. Prefer precision over recall.",
         "10. A document should be selected only if omitting it would likely miss necessary "
         "evidence for the current turn.",
@@ -129,7 +130,7 @@ class LlmProviderConfig:
     answer_model: str
 
 
-class SiliconFlowLlmClient:
+class MultiProviderLlmClient:
     def __init__(
         self,
         config: SiliconFlowConfig,
@@ -336,10 +337,6 @@ class SiliconFlowLlmClient:
             ensure_ascii=False,
         )
         rows_json = json.dumps(rows, ensure_ascii=False)
-        turns_json = json.dumps(
-            [self._turn_payload(turn) for turn in previous_turns or []],
-            ensure_ascii=False,
-        )
         logger.debug(
             "preparing answer model payload document_count=%s row_count=%s "
             "previous_turn_count=%s selected_version_ids=%s",
@@ -352,38 +349,45 @@ class SiliconFlowLlmClient:
             stage="answer_model",
             provider_config=provider_config,
             model=resolved_model,
-            system_prompt=ANSWER_SYSTEM_PROMPT,
-            user_prompt=(
-                "Answer the question using the provided Excel rows.\n\n"
-                f"Question:\n{question}\n\n"
-                f"Previous chat turns:\n{turns_json}\n\n"
-                f"Selected documents:\n{documents_json}\n\n"
-                f"Rows:\n{rows_json}\n\n"
-                "Each row object has file_id, version_id, sheet_id, sheet_name, row_id, cells.\n\n"
-                "Return JSON in exactly this shape:\n\n"
-                "{\n"
-                '  "answer_blocks": [\n'
-                "    {\n"
-                '      "text": "string",\n'
-                '      "evidence_row_ids": ["string"]\n'
-                "    }\n"
-                "  ],\n"
-                '  "citations": [\n'
-                "    {\n"
-                '      "row_id": "string",\n'
-                '      "quote": "string"\n'
-                "    }\n"
-                "  ],\n"
-                '  "insufficient_evidence": false,\n'
-                '  "follow_up_suggestions": ["string"]\n'
-                "}\n\n"
-                "Important:\n"
-                "- evidence_row_ids must contain only row_id values from Rows.\n"
-                "- citations must contain only row_id values from Rows.\n"
-                "- quote should be a short snippet copied or summarized from the cited row.\n"
-                "- If no provided row supports an answer, set insufficient_evidence to true "
-                "and return empty citations."
-            ),
+            messages=[
+                {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+                *self._history_messages(previous_turns or []),
+                {
+                    "role": "user",
+                    "content": (
+                        "Answer the question using the provided Excel rows.\n\n"
+                        f"Question:\n{question}\n\n"
+                        f"Selected documents:\n{documents_json}\n\n"
+                        f"Rows:\n{rows_json}\n\n"
+                        "Each row object has file_id, version_id, sheet_id, sheet_name, "
+                        "row_id, cells.\n\n"
+                        "Return JSON in exactly this shape:\n\n"
+                        "{\n"
+                        '  "answer_blocks": [\n'
+                        "    {\n"
+                        '      "text": "string",\n'
+                        '      "evidence_row_ids": ["string"]\n'
+                        "    }\n"
+                        "  ],\n"
+                        '  "citations": [\n'
+                        "    {\n"
+                        '      "row_id": "string",\n'
+                        '      "quote": "string"\n'
+                        "    }\n"
+                        "  ],\n"
+                        '  "insufficient_evidence": false,\n'
+                        '  "follow_up_suggestions": ["string"]\n'
+                        "}\n\n"
+                        "Important:\n"
+                        "- evidence_row_ids must contain only row_id values from Rows.\n"
+                        "- citations must contain only row_id values from Rows.\n"
+                        "- quote should be a short snippet copied or summarized from the "
+                        "cited row.\n"
+                        "- If no provided row supports an answer, set insufficient_evidence "
+                        "to true and return empty citations."
+                    ),
+                },
+            ],
         )
         return DraftChatAnswer(
             answer_blocks=[
@@ -412,8 +416,9 @@ class SiliconFlowLlmClient:
         stage: str,
         provider_config: LlmProviderConfig,
         model: str,
-        system_prompt: str,
-        user_prompt: str,
+        system_prompt: str | None = None,
+        user_prompt: str | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         content = self._chat_text(
             stage=stage,
@@ -421,6 +426,7 @@ class SiliconFlowLlmClient:
             model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            messages=messages,
         )
         return self._parse_json_object(content)
 
@@ -430,8 +436,9 @@ class SiliconFlowLlmClient:
         stage: str,
         provider_config: LlmProviderConfig,
         model: str,
-        system_prompt: str,
-        user_prompt: str,
+        system_prompt: str | None = None,
+        user_prompt: str | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> str:
         if not provider_config.api_key.strip():
             raise ExcelWorkspaceError(f"{provider_config.label} API key is required for LLM calls")
@@ -439,10 +446,11 @@ class SiliconFlowLlmClient:
         url = f"{provider_config.api_base_url.rstrip('/')}/chat/completions"
         request_payload = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            "messages": self._request_messages(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                messages=messages,
+            ),
             "temperature": 0.2,
         }
         provider_options = self._provider_request_options(provider_config.provider, model)
@@ -638,6 +646,46 @@ class SiliconFlowLlmClient:
             "selected_documents": [document.__dict__ for document in turn.selected_documents],
         }
 
+    def _history_messages(self, turns: list[ChatTurn]) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for turn in turns:
+            metadata = {
+                "citation_ids": turn.citation_ids,
+                "selected_documents": [
+                    document.__dict__ for document in turn.selected_documents
+                ],
+            }
+            messages.extend(
+                [
+                    {"role": "user", "content": turn.question},
+                    {
+                        "role": "assistant",
+                        "content": (
+                            f"{turn.answer_text}\n\n"
+                            "Previous answer metadata:\n"
+                            f"{json.dumps(metadata, ensure_ascii=False)}"
+                        ).strip(),
+                    },
+                ]
+            )
+        return messages
+
+    def _request_messages(
+        self,
+        *,
+        system_prompt: str | None,
+        user_prompt: str | None,
+        messages: list[dict[str, str]] | None,
+    ) -> list[dict[str, str]]:
+        if messages is not None:
+            return messages
+        if system_prompt is None or user_prompt is None:
+            raise ExcelWorkspaceError("LLM request messages were not provided")
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
     def _selected_turn_stats(
         self,
         previous_turns: list[ChatTurn],
@@ -710,3 +758,6 @@ class SiliconFlowLlmClient:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+
+SiliconFlowLlmClient = MultiProviderLlmClient

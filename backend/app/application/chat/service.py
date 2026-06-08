@@ -32,16 +32,16 @@ class ChatService:
         summaries: DocumentSummaryService,
         llm_client: LlmClient,
         sessions: ChatSessionRepository,
-        max_documents: int = 3,
-        page_size: int = 5000,
+        max_routed_documents: int = 3,
+        row_page_size: int = 5000,
         workflow: ChatWorkflow | None = None,
     ) -> None:
         self._excel_assets = excel_assets
         self._summaries = summaries
         self._llm_client = llm_client
         self._sessions = sessions
-        self._max_documents = max_documents
-        self._page_size = page_size
+        self._max_routed_documents = max_routed_documents
+        self._row_page_size = row_page_size
         self._workflow = workflow
 
     def create_session(self) -> ChatSession:
@@ -132,7 +132,7 @@ class ChatService:
             selected_documents = self._llm_client.route_documents(
                 question=question,
                 summaries=summaries,
-                max_documents=self._max_documents,
+                max_documents=self._max_routed_documents,
                 user_questions=[turn.question for turn in existing_turns] + [question],
                 attached_documents=attached_before,
                 previous_turns=existing_turns,
@@ -355,7 +355,7 @@ class ChatService:
                     result = self._excel_assets.list_sheet_rows(
                         sheet_id=sheet.sheet_id,
                         offset=offset,
-                        limit=self._page_size,
+                        limit=self._row_page_size,
                     )
                     for row_response in result.rows:
                         if not row_response:

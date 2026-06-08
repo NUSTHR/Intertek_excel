@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 import {
   askExcelQuestion,
   createChatSession,
 } from '../api/chat-api'
 import type { ChatAnswer, ChatSession, ExcelCitation } from '../types/chat'
-import CitationPanel from './CitationPanel.vue'
 import SourceTracePanel from './SourceTracePanel.vue'
 
 interface ChatHistoryEntry {
+  id: string
   question: string
   answer: ChatAnswer | null
 }
@@ -37,6 +37,9 @@ const historiesBySession = ref<Record<string, ChatHistoryEntry[]>>({})
 const selectedCitation = ref<ExcelCitation | null>(null)
 const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
+const isTimingExpanded = ref<boolean>(false)
+const chatScrollRegion = ref<HTMLElement | null>(null)
+let nextHistoryEntryId = 0
 
 const currentSessionKey = computed(() => props.sessionId || draftSessionKey)
 
@@ -75,9 +78,30 @@ const latestTotalSeconds = computed(() => {
   )
 })
 
+const timingToggleLabel = computed(() => {
+  return isTimingExpanded.value ? 'Hide' : 'Show'
+})
+
 watch(currentSessionKey, () => {
   selectedCitation.value = latestAnswer.value?.citations[0] ?? null
+  void scrollChatToBottom()
 })
+
+watch(
+  () => [history.value.length, latestEntry.value?.answer?.created_at, errorMessage.value],
+  () => {
+    void scrollChatToBottom()
+  },
+  { flush: 'post' },
+)
+
+async function scrollChatToBottom(): Promise<void> {
+  await nextTick()
+  const element = chatScrollRegion.value
+  if (element) {
+    element.scrollTop = element.scrollHeight
+  }
+}
 
 async function submitQuestion(): Promise<void> {
   const trimmedQuestion = question.value.trim()
@@ -104,11 +128,14 @@ async function submitQuestion(): Promise<void> {
       emit('sessionCreated', session)
     }
 
+    const entryId = `entry-${++nextHistoryEntryId}`
     entry = {
+      id: entryId,
       question: trimmedQuestion,
       answer: null,
     }
     setHistory(targetSessionKey, [...historyForSession(targetSessionKey), entry])
+    await scrollChatToBottom()
 
     const answer = await askExcelQuestion(
       trimmedQuestion,
@@ -123,10 +150,11 @@ async function submitQuestion(): Promise<void> {
     setHistory(
       targetSessionKey,
       historyForSession(targetSessionKey).map((item) => (
-        item === entry ? { ...item, answer } : item
+        item.id === entryId ? { ...item, answer } : item
       )),
     )
     emit('answerReceived', answer)
+    await scrollChatToBottom()
 
     selectedCitation.value = answer.citations[0] ?? null
     if (selectedCitation.value) {
@@ -140,12 +168,14 @@ async function submitQuestion(): Promise<void> {
     question.value = ''
   } catch (error: unknown) {
     if (entry) {
+      const failedEntry = entry
       setHistory(
         targetSessionKey,
-        historyForSession(targetSessionKey).filter((item) => item !== entry),
+        historyForSession(targetSessionKey).filter((item) => item.id !== failedEntry.id),
       )
     }
     errorMessage.value = error instanceof Error ? error.message : 'Unexpected error.'
+    await scrollChatToBottom()
   } finally {
     isAsking.value = false
   }
@@ -216,18 +246,28 @@ function timingValue(
   <section class="chat-panel">
     <div class="chat-panel-head">
       <div>
-        <p class="eyebrow">Chat & Citations</p>
+        <p class="eyebrow">Chat</p>
         <h3>{{ currentSessionLabel }}</h3>
       </div>
       <span class="doc-count">{{ latestAnswer?.selected_documents.length ?? 0 }} docs</span>
     </div>
 
-    <section class="chain-timing-panel" aria-live="polite">
+    <section class="chain-timing-panel" :class="{ collapsed: !isTimingExpanded }" aria-live="polite">
       <div class="timing-summary">
-        <p class="eyebrow">Chain Timing</p>
-        <strong>{{ latestTotalSeconds ? formatSeconds(latestTotalSeconds) : 'No run yet' }}</strong>
+        <div>
+          <p class="eyebrow">Chain Timing</p>
+          <strong>{{ latestTotalSeconds ? formatSeconds(latestTotalSeconds) : 'No run yet' }}</strong>
+        </div>
+        <button
+          type="button"
+          class="timing-toggle"
+          :aria-expanded="isTimingExpanded"
+          @click="isTimingExpanded = !isTimingExpanded"
+        >
+          {{ timingToggleLabel }}
+        </button>
       </div>
-      <div v-if="latestTimings.length > 0" class="timing-strip compact">
+      <div v-if="isTimingExpanded && latestTimings.length > 0" class="timing-strip compact">
         <div
           v-for="timing in latestTimings"
           :key="`latest-${timing.stage}`"
@@ -238,87 +278,90 @@ function timingValue(
           <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
         </div>
       </div>
-      <p v-else class="timing-placeholder">Timing appears after the next route or answer call.</p>
+      <p v-else-if="isTimingExpanded" class="timing-placeholder">
+        Timing appears after the next route or answer call.
+      </p>
     </section>
 
-    <div class="chat-history">
-      <template v-if="history.length > 0">
-        <template v-for="(entry, entryIndex) in history" :key="`${entryIndex}-${entry.question}`">
-          <div class="message user-message">
-            <p>{{ entry.question }}</p>
-            <span>User</span>
-          </div>
-
-          <article
-            v-if="entry.answer"
-            class="message assistant-message"
-          >
-            <div class="assistant-title">
-              <span>AI</span>
-              <strong>ExcelAI</strong>
+    <div ref="chatScrollRegion" class="chat-scroll-region">
+      <div class="chat-history">
+        <template v-if="history.length > 0">
+          <template v-for="(entry, entryIndex) in history" :key="entry.id">
+            <div class="message user-message">
+              <p>{{ entry.question }}</p>
+              <span>User</span>
             </div>
-            <p v-if="entry.answer.insufficient_evidence" class="warning-text">Insufficient evidence.</p>
-            <div
-              v-for="(block, blockIndex) in entry.answer.answer_blocks"
-              :key="`${entry.answer.created_at}-${blockIndex}`"
-              class="answer-block"
+
+            <article
+              v-if="entry.answer"
+              class="message assistant-message"
             >
-              <p>{{ block.text }}</p>
-              <button
-                v-for="citationId in block.citation_ids"
-                :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
-                type="button"
-                class="citation-chip"
-                @click="selectCitationById(citationId)"
-              >
-                [{{ citationId }}]
-              </button>
-            </div>
-            <p v-if="entry.answer.answer_blocks.length === 0" class="empty-copy">No answer blocks returned.</p>
-            <div v-if="entry.answer.warnings.length > 0" class="warning-list">
-              <p v-for="warning in entry.answer.warnings" :key="warning">{{ warning }}</p>
-            </div>
-            <div v-if="entryTimings(entry).length > 0" class="timing-strip">
-              <div
-                v-for="timing in entryTimings(entry)"
-                :key="`${entry.answer.created_at}-${timing.stage}`"
-                class="timing-pill"
-                :class="{ total: timing.stage.endsWith('_total') }"
-              >
-                <span>{{ stageLabel(timing.stage) }}</span>
-                <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
+              <div class="assistant-title">
+                <span>AI</span>
+                <strong>ExcelAI</strong>
               </div>
-            </div>
-          </article>
+              <p v-if="entry.answer.insufficient_evidence" class="warning-text">Insufficient evidence.</p>
+              <div
+                v-for="(block, blockIndex) in entry.answer.answer_blocks"
+                :key="`${entry.answer.created_at}-${blockIndex}`"
+                class="answer-block"
+              >
+                <p>{{ block.text }}</p>
+                <button
+                  v-for="citationId in block.citation_ids"
+                  :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
+                  type="button"
+                  class="citation-chip"
+                  @click="selectCitationById(citationId)"
+                >
+                  [{{ citationId }}]
+                </button>
+              </div>
+              <p v-if="entry.answer.answer_blocks.length === 0" class="empty-copy">No answer blocks returned.</p>
+              <div v-if="entry.answer.warnings.length > 0" class="warning-list">
+                <p v-for="warning in entry.answer.warnings" :key="warning">{{ warning }}</p>
+              </div>
+              <div v-if="entryTimings(entry).length > 0" class="timing-strip">
+                <div
+                  v-for="timing in entryTimings(entry)"
+                  :key="`${entry.answer.created_at}-${timing.stage}`"
+                  class="timing-pill"
+                  :class="{ total: timing.stage.endsWith('_total') }"
+                >
+                  <span>{{ stageLabel(timing.stage) }}</span>
+                  <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
+                </div>
+              </div>
+            </article>
 
-          <article
-            v-else-if="isAsking && entryIndex === history.length - 1"
-            class="message assistant-message loading-message"
-          >
-            <div class="assistant-title">
-              <span>AI</span>
-              <strong>ExcelAI</strong>
-            </div>
-            <p>Waiting for model response.</p>
-          </article>
+            <article
+              v-else-if="isAsking && entryIndex === history.length - 1"
+              class="message assistant-message loading-message"
+            >
+              <div class="assistant-title">
+                <span>AI</span>
+                <strong>ExcelAI</strong>
+              </div>
+              <p>Waiting for model response.</p>
+            </article>
+          </template>
         </template>
-      </template>
 
-      <div v-else class="message assistant-message quiet-message">
-        <div class="assistant-title">
-          <span>AI</span>
-          <strong>ExcelAI</strong>
+        <div v-else class="message assistant-message quiet-message">
+          <div class="assistant-title">
+            <span>AI</span>
+            <strong>ExcelAI</strong>
+          </div>
+          <p>No messages in this session.</p>
         </div>
-        <p>No messages in this session.</p>
       </div>
-    </div>
 
-    <div v-if="latestAnswer?.citations.length || selectedCitation" class="evidence-panels">
-      <CitationPanel :citations="latestAnswer?.citations ?? []" @select-citation="selectCitation" />
-      <SourceTracePanel :citation="selectedCitation" />
-    </div>
+      <div v-if="selectedCitation" class="evidence-panels">
+        <SourceTracePanel :citation="selectedCitation" />
+      </div>
 
-    <p v-if="errorMessage" class="error-note">{{ errorMessage }}</p>
+      <p v-if="errorMessage" class="error-note chat-error-note">{{ errorMessage }}</p>
+    </div>
 
     <form class="chat-input-card" @submit.prevent="submitQuestion">
       <textarea

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import {
   deleteExcelFile,
@@ -74,14 +74,14 @@ const renameDialog = ref<RenameDialog | null>(null)
 const renameDraft = ref<string>('')
 const confirmDialog = ref<ConfirmDialog | null>(null)
 const dialogError = ref<string>('')
-const toastMessage = ref<string>('')
+const transientToastMessage = ref<string>('')
 const openFileActionMenuId = ref<string>('')
 const openChatSessionActionMenuId = ref<string>('')
 const lookupRowId = ref<string>('')
-const statusMessage = ref<string>('Ready')
+const operationNotice = ref<string>('')
 const errorMessage = ref<string>('')
 const searchTerm = ref<string>('')
-const isBusy = ref<boolean>(false)
+const isWorkspaceBusy = ref<boolean>(false)
 const isSummaryLoading = ref<boolean>(false)
 const isLookupLoading = ref<boolean>(false)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -93,7 +93,8 @@ const routerProvider = ref<string>('siliconflow')
 const routerModel = ref<string>('')
 const answerProvider = ref<string>('siliconflow')
 const answerModel = ref<string>('')
-let toastTimer: number | null = null
+let transientToastTimer: number | null = null
+let operationNoticeTimer: number | null = null
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -183,6 +184,11 @@ onMounted(() => {
   void initializeWorkspace()
 })
 
+onBeforeUnmount(() => {
+  clearOperationNotice()
+  clearTransientToast()
+})
+
 async function initializeWorkspace(): Promise<void> {
   await loadLlmModelOptions()
   await loadChatSessions()
@@ -226,7 +232,7 @@ function setFileInsightTab(tab: FileInsightTab): void {
 
 function toggleFileInsightFullscreen(): void {
   isFileInsightFullscreen.value = !isFileInsightFullscreen.value
-  showToast(isFileInsightFullscreen.value ? 'Expanded detail view.' : 'Restored split view.')
+  showTransientToast(isFileInsightFullscreen.value ? 'Expanded detail view.' : 'Restored split view.')
 }
 
 function toggleFileActionMenu(fileId: string): void {
@@ -315,7 +321,7 @@ async function confirmDeleteChatSession(session: ChatSession): Promise<void> {
   try {
     await deleteChatSession(session.session_id)
     confirmDialog.value = null
-    showToast('Chat session deleted.')
+    showTransientToast('Chat session deleted.')
     chatSessions.value = chatSessions.value.filter(
       (item) => item.session_id !== session.session_id,
     )
@@ -377,7 +383,7 @@ function sortChatSessions(sessions: ChatSession[]): ChatSession[] {
 
 async function refreshFiles(): Promise<void> {
   errorMessage.value = ''
-  isBusy.value = true
+  isWorkspaceBusy.value = true
   try {
     files.value = await listExcelFiles()
     const selectedStillExists = files.value.some((file) => file.file_id === selectedFileId.value)
@@ -387,18 +393,20 @@ async function refreshFiles(): Promise<void> {
     if (!selectedFileId.value && files.value[0]) {
       await selectFile(files.value[0])
     }
-    statusMessage.value = `${files.value.length} workbook${files.value.length === 1 ? '' : 's'} loaded`
+    showOperationNotice(
+      `${files.value.length} workbook${files.value.length === 1 ? '' : 's'} loaded`,
+    )
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
   } finally {
-    isBusy.value = false
+    isWorkspaceBusy.value = false
   }
 }
 
 async function chooseFile(file: ExcelFile, view: ActiveView | null = null): Promise<void> {
   closeActionMenus()
   errorMessage.value = ''
-  isBusy.value = true
+  isWorkspaceBusy.value = true
   try {
     await selectFile(file)
     if (view) {
@@ -407,7 +415,7 @@ async function chooseFile(file: ExcelFile, view: ActiveView | null = null): Prom
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
   } finally {
-    isBusy.value = false
+    isWorkspaceBusy.value = false
   }
 }
 
@@ -450,14 +458,14 @@ async function selectVersion(versionId: string): Promise<void> {
 
 async function selectCurrentVersion(): Promise<void> {
   if (selectedVersionId.value) {
-    await runInteraction(() => selectVersion(selectedVersionId.value))
+    await runWorkspaceAction(() => selectVersion(selectedVersionId.value))
   }
 }
 
 async function selectCurrentSheet(): Promise<void> {
   const sheet = sheets.value.find((item) => item.sheet_id === selectedSheetId.value)
   if (sheet) {
-    await runInteraction(() => selectSheet(sheet))
+    await runWorkspaceAction(() => selectSheet(sheet))
   }
 }
 
@@ -502,7 +510,7 @@ async function generateSummaryForSelectedVersion(): Promise<void> {
       summaryModel.value || null,
       summaryProvider.value || null,
     )
-    statusMessage.value = 'Document description generated'
+    showOperationNotice('Document description generated')
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
   } finally {
@@ -535,7 +543,7 @@ function setUploadFile(file: File | null): void {
   }
   errorMessage.value = ''
   selectedUploadFile.value = file
-  statusMessage.value = `${file.name} is ready to upload`
+  showOperationNotice(`${file.name} is ready to upload`)
 }
 
 function requestDeleteFile(file: ExcelFile): void {
@@ -563,7 +571,7 @@ function exportPreviewCsv(): void {
   link.click()
   link.remove()
   URL.revokeObjectURL(objectUrl)
-  showToast('Preview downloaded.')
+  showTransientToast('Preview downloaded.')
 }
 
 async function renameFilePrompt(file: ExcelFile): Promise<void> {
@@ -597,22 +605,22 @@ async function submitRenameDialog(): Promise<void> {
   try {
     if (dialog.kind === 'file') {
       errorMessage.value = ''
-      isBusy.value = true
+      isWorkspaceBusy.value = true
       const renamedFile = await renameExcelFile(dialog.file.file_id, trimmedValue)
       files.value = files.value.map((item) => (
         item.file_id === renamedFile.file_id ? renamedFile : item
       ))
-      statusMessage.value = `${renamedFile.display_name} renamed`
-      showToast('Workbook renamed.')
+      showOperationNotice(`${renamedFile.display_name} renamed`)
+      showTransientToast('Workbook renamed.')
     } else {
       await updateChatSession(() => renameChatSession(dialog.session.session_id, trimmedValue))
-      showToast('Chat session renamed.')
+      showTransientToast('Chat session renamed.')
     }
     cancelDialog()
   } catch (error: unknown) {
     dialogError.value = toErrorMessage(error)
   } finally {
-    isBusy.value = false
+    isWorkspaceBusy.value = false
   }
 }
 
@@ -624,7 +632,7 @@ async function confirmDeleteFile(): Promise<void> {
   }
 
   errorMessage.value = ''
-  isBusy.value = true
+  isWorkspaceBusy.value = true
   try {
     const result = await deleteExcelFile(file.file_id, true)
     pendingDeleteFile.value = null
@@ -636,19 +644,20 @@ async function confirmDeleteFile(): Promise<void> {
     if (!selectedFileId.value && files.value[0]) {
       await selectFile(files.value[0])
     }
-    statusMessage.value =
+    showOperationNotice(
       `${result.display_name} deleted. Removed ${result.deleted_versions} version(s), ${result.deleted_sheets} sheet(s), ${result.deleted_artifacts} artifact(s), ${result.deleted_summaries} summary record(s), and ${result.deleted_chat_session_documents} chat attachment(s).`
-    showToast('Workbook deleted.')
+    )
+    showTransientToast('Workbook deleted.')
   } catch (error: unknown) {
     if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
       pendingDeleteFile.value = file
       confirmDialog.value = { kind: 'file', file }
-      statusMessage.value = `Confirm deletion for ${file.display_name}.`
+      showOperationNotice(`Confirm deletion for ${file.display_name}.`, 5000)
       return
     }
     dialogError.value = toErrorMessage(error)
   } finally {
-    isBusy.value = false
+    isWorkspaceBusy.value = false
   }
 }
 
@@ -660,7 +669,7 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
   }
 
   errorMessage.value = ''
-  isBusy.value = true
+  isWorkspaceBusy.value = true
   try {
     const result = await uploadExcelFile(file, replaceExisting)
     pendingReplaceFile.value = null
@@ -668,7 +677,7 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
     if (fileInput.value) {
       fileInput.value.value = ''
     }
-    statusMessage.value = `${result.file.display_name} uploaded and parsed`
+    showOperationNotice(`${result.file.display_name} uploaded and parsed`)
     files.value = await listExcelFiles()
     const uploadedFile = files.value.find((item) => item.file_id === result.file.file_id)
     if (uploadedFile) {
@@ -679,12 +688,15 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
       pendingReplaceFile.value = file
       selectedUploadFile.value = null
       errorMessage.value = ''
-      statusMessage.value = 'A workbook with this name exists. Confirm replacement to create a new version.'
+      showOperationNotice(
+        'A workbook with this name exists. Confirm replacement to create a new version.',
+        5000,
+      )
       return
     }
     errorMessage.value = toErrorMessage(error)
   } finally {
-    isBusy.value = false
+    isWorkspaceBusy.value = false
   }
 }
 
@@ -772,19 +784,19 @@ async function openReferencedDocument(document: SelectedDocument): Promise<void>
     await chooseFile(file, 'chat')
   }
   if (selectedVersionId.value !== document.version_id) {
-    await runInteraction(() => selectVersion(document.version_id))
+    await runWorkspaceAction(() => selectVersion(document.version_id))
   }
 }
 
-async function runInteraction(action: () => Promise<void>): Promise<void> {
+async function runWorkspaceAction(action: () => Promise<void>): Promise<void> {
   errorMessage.value = ''
-  isBusy.value = true
+  isWorkspaceBusy.value = true
   try {
     await action()
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
   } finally {
-    isBusy.value = false
+    isWorkspaceBusy.value = false
   }
 }
 
@@ -914,15 +926,42 @@ function csvEscape(value: string): string {
   return value
 }
 
-function showToast(message: string): void {
-  toastMessage.value = message
-  if (toastTimer !== null) {
-    window.clearTimeout(toastTimer)
+function showOperationNotice(message: string, durationMs = 3200): void {
+  operationNotice.value = message
+  if (operationNoticeTimer !== null) {
+    window.clearTimeout(operationNoticeTimer)
   }
-  toastTimer = window.setTimeout(() => {
-    toastMessage.value = ''
-    toastTimer = null
+  operationNoticeTimer = window.setTimeout(() => {
+    operationNotice.value = ''
+    operationNoticeTimer = null
+  }, durationMs)
+}
+
+function clearOperationNotice(): void {
+  if (operationNoticeTimer !== null) {
+    window.clearTimeout(operationNoticeTimer)
+    operationNoticeTimer = null
+  }
+  operationNotice.value = ''
+}
+
+function showTransientToast(message: string): void {
+  transientToastMessage.value = message
+  if (transientToastTimer !== null) {
+    window.clearTimeout(transientToastTimer)
+  }
+  transientToastTimer = window.setTimeout(() => {
+    transientToastMessage.value = ''
+    transientToastTimer = null
   }, 2400)
+}
+
+function clearTransientToast(): void {
+  if (transientToastTimer !== null) {
+    window.clearTimeout(transientToastTimer)
+    transientToastTimer = null
+  }
+  transientToastMessage.value = ''
 }
 
 function toErrorMessage(error: unknown): string {
@@ -941,7 +980,12 @@ function toErrorMessage(error: unknown): string {
         <p>Researcher Pro</p>
       </div>
 
-      <button type="button" class="sidebar-upload-button" :disabled="isBusy" @click="openUploadDialog">
+      <button
+        type="button"
+        class="sidebar-upload-button"
+        :disabled="isWorkspaceBusy"
+        @click="openUploadDialog"
+      >
         <AppIcon name="add" />
         <strong>Upload New</strong>
       </button>
@@ -1032,8 +1076,10 @@ function toErrorMessage(error: unknown): string {
         </template>
       </header>
 
-      <div v-if="errorMessage || (activeView === 'chat' && statusMessage)" class="notice-row">
-        <p v-if="activeView === 'chat' && statusMessage" class="status-note">{{ statusMessage }}</p>
+      <div v-if="errorMessage || (activeView === 'chat' && operationNotice)" class="notice-row">
+        <p v-if="activeView === 'chat' && operationNotice" class="status-note">
+          {{ operationNotice }}
+        </p>
         <p v-if="errorMessage" class="error-note">{{ errorMessage }}</p>
       </div>
 
@@ -1055,7 +1101,12 @@ function toErrorMessage(error: unknown): string {
           </div>
           <div v-if="pendingReplaceFile" class="replace-actions">
             <p>This filename already exists. Replacement will create a new active version.</p>
-            <button type="button" class="danger-subtle" :disabled="isBusy" @click="uploadSelectedFile(true)">
+            <button
+              type="button"
+              class="danger-subtle"
+              :disabled="isWorkspaceBusy"
+              @click="uploadSelectedFile(true)"
+            >
               Confirm Replacement
             </button>
             <button type="button" class="secondary-button" @click="pendingReplaceFile = null">Cancel</button>
@@ -1064,7 +1115,7 @@ function toErrorMessage(error: unknown): string {
             v-else
             type="button"
             class="primary-action"
-            :disabled="isBusy || !selectedUploadFile"
+            :disabled="isWorkspaceBusy || !selectedUploadFile"
             @click="uploadSelectedFile(false)"
           >
             Upload and Parse
@@ -1465,7 +1516,7 @@ function toErrorMessage(error: unknown): string {
                     :key="sheet.sheet_id"
                     type="button"
                     :class="{ active: sheet.sheet_id === selectedSheetId }"
-                    @click="runInteraction(() => selectSheet(sheet))"
+                    @click="runWorkspaceAction(() => selectSheet(sheet))"
                   >
                     {{ sheet.sheet_name }}
                   </button>
@@ -1514,7 +1565,7 @@ function toErrorMessage(error: unknown): string {
                       :key="sheet.sheet_id"
                       type="button"
                       :class="{ active: sheet.sheet_id === selectedSheetId }"
-                      @click="runInteraction(() => selectSheet(sheet))"
+                      @click="runWorkspaceAction(() => selectSheet(sheet))"
                     >
                       <strong>{{ sheet.sheet_code }} {{ sheet.sheet_name }}</strong>
                       <span>{{ sheet.row_count }} rows / {{ sheet.column_count }} columns</span>
@@ -1773,7 +1824,7 @@ function toErrorMessage(error: unknown): string {
               :key="sheet.sheet_id"
               type="button"
               :class="{ active: sheet.sheet_id === selectedSheetId }"
-              @click="runInteraction(() => selectSheet(sheet))"
+              @click="runWorkspaceAction(() => selectSheet(sheet))"
             >
               {{ sheet.sheet_name }}
             </button>
@@ -1819,8 +1870,8 @@ function toErrorMessage(error: unknown): string {
       </section>
     </section>
 
-    <div v-if="toastMessage" class="app-toast" role="status">
-      {{ toastMessage }}
+    <div v-if="transientToastMessage" class="app-toast" role="status">
+      {{ transientToastMessage }}
     </div>
 
     <section
@@ -1848,7 +1899,11 @@ function toErrorMessage(error: unknown): string {
         <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
         <div class="dialog-actions">
           <button type="button" class="dialog-secondary" @click="cancelDialog">Cancel</button>
-          <button type="submit" class="dialog-primary" :disabled="isBusy || isChatSessionLoading">
+          <button
+            type="submit"
+            class="dialog-primary"
+            :disabled="isWorkspaceBusy || isChatSessionLoading"
+          >
             Save
           </button>
         </div>
@@ -1886,7 +1941,7 @@ function toErrorMessage(error: unknown): string {
           <button
             type="button"
             class="dialog-danger"
-            :disabled="isBusy || isChatSessionLoading"
+            :disabled="isWorkspaceBusy || isChatSessionLoading"
             @click="
               confirmDialog.kind === 'file'
                 ? confirmDeleteFile()

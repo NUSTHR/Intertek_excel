@@ -4,8 +4,8 @@ from app.adapters.dialogue import LangGraphChatWorkflow
 from app.adapters.llm.fake_llm_client import FakeLlmClient
 from app.adapters.llm.siliconflow_client import (
     LlmProviderConfig,
+    MultiProviderLlmClient,
     SiliconFlowConfig,
-    SiliconFlowLlmClient,
 )
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
@@ -67,7 +67,7 @@ def get_llm_client() -> LlmClient:
     settings = get_settings()
     if settings.llm_provider.lower() == "fake":
         return FakeLlmClient()
-    return SiliconFlowLlmClient(
+    return MultiProviderLlmClient(
         SiliconFlowConfig(
             api_base_url=settings.llm_api_base_url,
             api_key=settings.llm_api_key,

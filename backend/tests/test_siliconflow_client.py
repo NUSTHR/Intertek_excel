@@ -6,11 +6,18 @@ import pytest
 
 from app.adapters.llm.siliconflow_client import (
     LlmProviderConfig,
+    MultiProviderLlmClient,
     SiliconFlowConfig,
-    SiliconFlowLlmClient,
 )
 from app.core.errors import LlmRequestError
-from app.domain.models import DocumentSummary, SheetProfile, SheetSummary, WorkbookProfile
+from app.domain.models import (
+    ChatTurn,
+    DocumentSummary,
+    SelectedDocument,
+    SheetProfile,
+    SheetSummary,
+    WorkbookProfile,
+)
 
 
 def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
@@ -71,7 +78,7 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
             },
         )
 
-    client = SiliconFlowLlmClient(
+    client = MultiProviderLlmClient(
         SiliconFlowConfig(
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
@@ -170,7 +177,7 @@ def test_siliconflow_router_filters_unknown_version() -> None:
             },
         )
 
-    client = SiliconFlowLlmClient(
+    client = MultiProviderLlmClient(
         SiliconFlowConfig(
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
@@ -204,6 +211,87 @@ def test_siliconflow_router_filters_unknown_version() -> None:
     assert selected == []
 
 
+def test_siliconflow_answer_sends_history_as_role_messages() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_blocks": [],
+                                    "citations": [],
+                                    "insufficient_evidence": True,
+                                    "follow_up_suggestions": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+
+    client.answer_with_rows(
+        "What LVD standard applies now?",
+        [
+            SelectedDocument(
+                file_id="file_1",
+                version_id="version_1",
+                reason="Current turn evidence.",
+            )
+        ],
+        rows=[],
+        previous_turns=[
+            ChatTurn(
+                turn_id="turn_1",
+                session_id="session_1",
+                question="What applies to coffee makers?",
+                answer_text="Coffee makers use IEC 60335-2-15.",
+                citation_ids=["C1"],
+                selected_documents=[
+                    SelectedDocument(
+                        file_id="file_1",
+                        version_id="version_1",
+                        reason="Previous evidence.",
+                    )
+                ],
+                created_at="now",
+            )
+        ],
+    )
+
+    messages = requests[0]["messages"]
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[1]["content"] == "What applies to coffee makers?"
+    assert "Coffee makers use IEC 60335-2-15." in messages[2]["content"]
+    assert "Previous answer metadata" in messages[2]["content"]
+    assert "Previous chat turns" not in messages[-1]["content"]
+
+
 def test_siliconflow_timeout_error_includes_stage_model_and_duration() -> None:
     def post(_url: str, **_kwargs: Any) -> httpx2.Response:
         request = httpx2.Request(
@@ -212,7 +300,7 @@ def test_siliconflow_timeout_error_includes_stage_model_and_duration() -> None:
         )
         raise httpx2.ReadTimeout("The read operation timed out", request=request)
 
-    client = SiliconFlowLlmClient(
+    client = MultiProviderLlmClient(
         SiliconFlowConfig(
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
@@ -278,7 +366,7 @@ def test_siliconflow_uses_enable_thinking_false_for_supported_models() -> None:
             },
         )
 
-    client = SiliconFlowLlmClient(
+    client = MultiProviderLlmClient(
         SiliconFlowConfig(
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
@@ -339,7 +427,7 @@ def test_deepseek_official_provider_uses_official_url_and_json_mode() -> None:
             },
         )
 
-    client = SiliconFlowLlmClient(
+    client = MultiProviderLlmClient(
         SiliconFlowConfig(
             api_base_url="https://api.siliconflow.test/v1",
             api_key="siliconflow-key",
