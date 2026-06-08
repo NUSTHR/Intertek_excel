@@ -114,6 +114,19 @@ export async function listExcelFiles(): Promise<ExcelFile[]> {
   return response.files
 }
 
+export async function renameExcelFile(
+  fileId: string,
+  displayName: string,
+): Promise<ExcelFile> {
+  return requestJson<ExcelFile>(`/api/excel/files/${fileId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ display_name: displayName }),
+  })
+}
+
 export async function deleteExcelFile(
   fileId: string,
   confirmDelete = false,

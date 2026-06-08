@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import {
   askExcelQuestion,
+  createChatSession,
 } from '../api/chat-api'
-import type { ChatAnswer, ExcelCitation } from '../types/chat'
+import type { ChatAnswer, ChatSession, ExcelCitation } from '../types/chat'
 import CitationPanel from './CitationPanel.vue'
 import SourceTracePanel from './SourceTracePanel.vue'
 
@@ -13,24 +14,39 @@ interface ChatHistoryEntry {
   answer: ChatAnswer | null
 }
 
+const draftSessionKey = '__draft__'
+
 const props = defineProps<{
   routerProvider: string | null
   routerModel: string | null
   answerProvider: string | null
   answerModel: string | null
+  sessionId: string
+  sessionTitle: string
 }>()
 
 const emit = defineEmits<{
   answerReceived: [answer: ChatAnswer]
   selectCitation: [citation: ExcelCitation]
+  sessionCreated: [session: ChatSession]
+  sessionTitleSuggested: [sessionId: string, title: string]
 }>()
 
 const question = ref<string>('')
-const sessionId = ref<string>('')
-const history = ref<ChatHistoryEntry[]>([])
+const historiesBySession = ref<Record<string, ChatHistoryEntry[]>>({})
 const selectedCitation = ref<ExcelCitation | null>(null)
 const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
+
+const currentSessionKey = computed(() => props.sessionId || draftSessionKey)
+
+const history = computed<ChatHistoryEntry[]>(() => {
+  return historiesBySession.value[currentSessionKey.value] ?? []
+})
+
+const currentSessionLabel = computed(() => {
+  return props.sessionTitle || 'New chat'
+})
 
 const latestAnswer = computed<ChatAnswer | null>(() => {
   for (let index = history.value.length - 1; index >= 0; index -= 1) {
@@ -59,24 +75,44 @@ const latestTotalSeconds = computed(() => {
   )
 })
 
+watch(currentSessionKey, () => {
+  selectedCitation.value = latestAnswer.value?.citations[0] ?? null
+})
+
 async function submitQuestion(): Promise<void> {
   const trimmedQuestion = question.value.trim()
   if (!trimmedQuestion) {
     errorMessage.value = 'Enter a question first.'
     return
   }
+
   errorMessage.value = ''
   isAsking.value = true
   selectedCitation.value = null
-  const entry: ChatHistoryEntry = {
-    question: trimmedQuestion,
-    answer: null,
-  }
-  history.value = [...history.value, entry]
+
+  let targetSessionId = props.sessionId
+  let targetSessionKey = props.sessionId || draftSessionKey
+  let entry: ChatHistoryEntry | null = null
+  let createdSession = false
+
   try {
+    if (!targetSessionId) {
+      const session = await createChatSession()
+      targetSessionId = session.session_id
+      targetSessionKey = session.session_id
+      createdSession = true
+      emit('sessionCreated', session)
+    }
+
+    entry = {
+      question: trimmedQuestion,
+      answer: null,
+    }
+    setHistory(targetSessionKey, [...historyForSession(targetSessionKey), entry])
+
     const answer = await askExcelQuestion(
       trimmedQuestion,
-      sessionId.value || null,
+      targetSessionId,
       {
         routerProvider: props.routerProvider ?? '',
         routerModel: props.routerModel ?? '',
@@ -84,20 +120,45 @@ async function submitQuestion(): Promise<void> {
         answerModel: props.answerModel ?? '',
       },
     )
-    entry.answer = answer
-    history.value = [...history.value]
-    sessionId.value = answer.session_id
+    setHistory(
+      targetSessionKey,
+      historyForSession(targetSessionKey).map((item) => (
+        item === entry ? { ...item, answer } : item
+      )),
+    )
     emit('answerReceived', answer)
+
     selectedCitation.value = answer.citations[0] ?? null
     if (selectedCitation.value) {
       emit('selectCitation', selectedCitation.value)
     }
+
+    if (createdSession || !props.sessionTitle || props.sessionTitle === 'New chat') {
+      emit('sessionTitleSuggested', answer.session_id, titleFromQuestion(trimmedQuestion))
+    }
+
     question.value = ''
   } catch (error: unknown) {
-    history.value = history.value.filter((item) => item !== entry)
+    if (entry) {
+      setHistory(
+        targetSessionKey,
+        historyForSession(targetSessionKey).filter((item) => item !== entry),
+      )
+    }
     errorMessage.value = error instanceof Error ? error.message : 'Unexpected error.'
   } finally {
     isAsking.value = false
+  }
+}
+
+function historyForSession(sessionKey: string): ChatHistoryEntry[] {
+  return historiesBySession.value[sessionKey] ?? []
+}
+
+function setHistory(sessionKey: string, entries: ChatHistoryEntry[]): void {
+  historiesBySession.value = {
+    ...historiesBySession.value,
+    [sessionKey]: entries,
   }
 }
 
@@ -115,6 +176,11 @@ function selectCitationById(citationId: string): void {
 
 function entryTimings(entry: ChatHistoryEntry): { stage: string; duration_seconds: number }[] {
   return entry.answer?.timings ?? []
+}
+
+function titleFromQuestion(value: string): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  return normalized.length > 56 ? `${normalized.slice(0, 53)}...` : normalized
 }
 
 function stageLabel(stage: string): string {
@@ -148,10 +214,10 @@ function timingValue(
 
 <template>
   <section class="chat-panel">
-    <div class="panel-heading">
+    <div class="chat-panel-head">
       <div>
-        <p class="eyebrow">ExcelAI</p>
-        <h3>Data Chat</h3>
+        <p class="eyebrow">Chat & Citations</p>
+        <h3>{{ currentSessionLabel }}</h3>
       </div>
       <span class="doc-count">{{ latestAnswer?.selected_documents.length ?? 0 }} docs</span>
     </div>
@@ -234,17 +300,6 @@ function timingValue(
               <strong>ExcelAI</strong>
             </div>
             <p>Waiting for model response.</p>
-            <div v-if="entryTimings(entry).length > 0" class="timing-strip">
-              <div
-                v-for="timing in entryTimings(entry)"
-                :key="`${entry.question}-${timing.stage}`"
-                class="timing-pill"
-                :class="{ total: timing.stage.endsWith('_total') }"
-              >
-                <span>{{ stageLabel(timing.stage) }}</span>
-                <strong>{{ formatSeconds(timing.duration_seconds) }}</strong>
-              </div>
-            </div>
           </article>
         </template>
       </template>
@@ -254,7 +309,7 @@ function timingValue(
           <span>AI</span>
           <strong>ExcelAI</strong>
         </div>
-        <p>No answers yet.</p>
+        <p>No messages in this session.</p>
       </div>
     </div>
 

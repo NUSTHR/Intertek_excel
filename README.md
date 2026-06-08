@@ -139,9 +139,9 @@ The UI and backend currently support these SiliconFlow model IDs:
 
 Default stage models:
 
-- summary: `deepseek-ai/DeepSeek-V4-Pro`
+- summary: `inclusionAI/Ling-flash-2.0`
 - router: `inclusionAI/Ling-flash-2.0`
-- answer: `deepseek-ai/DeepSeek-V4-Pro`
+- answer: `inclusionAI/Ling-flash-2.0`
 
 The backend applies a conservative compatibility strategy for "disable
 thinking": it sends `enable_thinking=false` only for model families whose
@@ -215,7 +215,6 @@ Important invariants:
 - Add answer-stage context/token guardrails
 - Improve right-column chat layout
 - Improve timing and observability around failed chat stages
-- Remove or repurpose legacy `LLM_CHAT_ROWS_PER_SHEET`
 
 ## Verification Status
 

@@ -57,6 +57,28 @@ class ChatService:
     def get_session(self, session_id: str) -> ChatSession | None:
         return self._sessions.get_session(session_id)
 
+    def list_sessions(self) -> list[ChatSession]:
+        return self._sessions.list_sessions()
+
+    def rename_session(self, session_id: str, title: str) -> ChatSession | None:
+        normalized_title = self._normalize_session_title(title)
+        return self._sessions.rename_session(
+            session_id=session_id,
+            title=normalized_title,
+            updated_at=utc_now_iso(),
+        )
+
+    def set_session_pinned(self, session_id: str, pinned: bool) -> ChatSession | None:
+        now = utc_now_iso()
+        return self._sessions.set_session_pinned(
+            session_id=session_id,
+            pinned_at=now if pinned else None,
+            updated_at=now,
+        )
+
+    def delete_session(self, session_id: str) -> bool:
+        return self._sessions.delete_session(session_id)
+
     def answer_question(
         self,
         question: str,
@@ -283,6 +305,10 @@ class ChatService:
         )
         self._sessions.create_session(session)
         return session
+
+    def _normalize_session_title(self, title: str) -> str:
+        normalized = " ".join(title.split())
+        return normalized[:120] if normalized else "New chat"
 
     def _attach_new_documents(
         self,

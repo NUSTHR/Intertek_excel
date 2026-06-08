@@ -1,4 +1,10 @@
-import type { ChatAnswer, ChatModelSelection, ChatRouteResult, ChatSession } from '../types/chat'
+import type {
+  ChatAnswer,
+  ChatModelSelection,
+  ChatRouteResult,
+  ChatSession,
+  ChatSessionListResponse,
+} from '../types/chat'
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
 const requestTimeoutMs = Number(import.meta.env.VITE_EXCEL_WORKSPACE_CHAT_TIMEOUT_MS ?? 180000)
@@ -16,6 +22,68 @@ export async function createChatSession(): Promise<ChatSession> {
     throw new Error(payload.detail || `Request failed with status ${response.status}.`)
   }
   return (await response.json()) as ChatSession
+}
+
+export async function listChatSessions(): Promise<ChatSession[]> {
+  const response = await fetch(`${apiBaseUrl}/api/excel/chat/sessions`)
+  if (!response.ok) {
+    const payload = await parseErrorPayload(response)
+    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
+  }
+  const payload = (await response.json()) as ChatSessionListResponse
+  return payload.sessions
+}
+
+export async function renameChatSession(sessionId: string, title: string): Promise<ChatSession> {
+  const response = await fetch(
+    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title }),
+    },
+  )
+  if (!response.ok) {
+    const payload = await parseErrorPayload(response)
+    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
+  }
+  return (await response.json()) as ChatSession
+}
+
+export async function setChatSessionPinned(
+  sessionId: string,
+  pinned: boolean,
+): Promise<ChatSession> {
+  const response = await fetch(
+    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/pin`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ pinned }),
+    },
+  )
+  if (!response.ok) {
+    const payload = await parseErrorPayload(response)
+    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
+  }
+  return (await response.json()) as ChatSession
+}
+
+export async function deleteChatSession(sessionId: string): Promise<void> {
+  const response = await fetch(
+    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'DELETE',
+    },
+  )
+  if (!response.ok) {
+    const payload = await parseErrorPayload(response)
+    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
+  }
 }
 
 export async function askExcelQuestion(

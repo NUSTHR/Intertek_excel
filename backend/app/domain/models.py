@@ -119,6 +119,8 @@ class ChatSession:
     session_id: str
     created_at: str
     updated_at: str
+    title: str = "New chat"
+    pinned_at: str | None = None
     status: str = "active"
 
 

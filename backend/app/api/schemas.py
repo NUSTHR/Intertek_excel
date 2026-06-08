@@ -20,6 +20,10 @@ class CheckFileNameResponse(BaseModel):
     active_version_id: str | None = None
 
 
+class RenameExcelFileRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=255)
+
+
 class ExcelFileResponse(BaseModel):
     file_id: str
     display_name: str
@@ -203,7 +207,21 @@ class ChatSessionResponse(BaseModel):
     session_id: str
     created_at: str
     updated_at: str
+    title: str
+    pinned_at: str | None = None
     status: str
+
+
+class ChatSessionListResponse(BaseModel):
+    sessions: list[ChatSessionResponse] = Field(default_factory=list)
+
+
+class RenameChatSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class PinChatSessionRequest(BaseModel):
+    pinned: bool
 
 
 class AttachedDocumentResponse(BaseModel):

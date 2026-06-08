@@ -48,7 +48,6 @@ class Settings(BaseSettings):
     deepseek_answer_model: str = DEFAULT_DEEPSEEK_ANSWER_MODEL
     llm_request_timeout_seconds: float = 60.0
     llm_summary_max_profile_rows: int = 10
-    llm_chat_rows_per_sheet: int = 200
 
     @property
     def backend_root(self) -> Path:

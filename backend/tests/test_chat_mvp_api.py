@@ -157,6 +157,57 @@ def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
         assert len(llm_client.answer_calls[1]["previous_turns"]) == 1
 
 
+def test_chat_session_can_be_listed_renamed_pinned_and_deleted(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        first_response = client.post("/api/excel/chat/sessions")
+        second_response = client.post("/api/excel/chat/sessions")
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        first_session_id = first_response.json()["session_id"]
+        second_session_id = second_response.json()["session_id"]
+
+        rename_response = client.patch(
+            f"/api/excel/chat/sessions/{first_session_id}",
+            json={"title": "Financial Analysis Q3"},
+        )
+        assert rename_response.status_code == 200
+        renamed = rename_response.json()
+        assert renamed["title"] == "Financial Analysis Q3"
+        assert renamed["pinned_at"] is None
+
+        pin_response = client.patch(
+            f"/api/excel/chat/sessions/{first_session_id}/pin",
+            json={"pinned": True},
+        )
+        assert pin_response.status_code == 200
+        pinned = pin_response.json()
+        assert pinned["pinned_at"] is not None
+
+        list_response = client.get("/api/excel/chat/sessions")
+        assert list_response.status_code == 200
+        sessions = list_response.json()["sessions"]
+        assert [session["session_id"] for session in sessions] == [
+            first_session_id,
+            second_session_id,
+        ]
+
+        unpin_response = client.patch(
+            f"/api/excel/chat/sessions/{first_session_id}/pin",
+            json={"pinned": False},
+        )
+        assert unpin_response.status_code == 200
+        assert unpin_response.json()["pinned_at"] is None
+
+        delete_response = client.delete(f"/api/excel/chat/sessions/{first_session_id}")
+        assert delete_response.status_code == 204
+
+        missing_response = client.get(f"/api/excel/chat/sessions/{first_session_id}")
+        assert missing_response.status_code == 404
+
+
 def test_chat_route_returns_documents_before_answer_stage(
     tmp_path: Path,
 ) -> None:

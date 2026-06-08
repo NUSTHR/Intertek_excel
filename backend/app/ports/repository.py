@@ -30,6 +30,14 @@ class ExcelAssetRepository(Protocol):
     def list_files(self) -> list[ExcelFile]:
         ...
 
+    def update_file_display_name(
+        self,
+        file_id: str,
+        display_name: str,
+        updated_at: str,
+    ) -> ExcelFile | None:
+        ...
+
     def delete_file(self, file_id: str) -> dict[str, int]:
         ...
 
@@ -103,10 +111,32 @@ class ChatSessionRepository(Protocol):
     def create_session(self, session: ChatSession) -> None:
         ...
 
+    def list_sessions(self) -> list[ChatSession]:
+        ...
+
     def get_session(self, session_id: str) -> ChatSession | None:
         ...
 
     def touch_session(self, session_id: str, updated_at: str) -> None:
+        ...
+
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        updated_at: str,
+    ) -> ChatSession | None:
+        ...
+
+    def set_session_pinned(
+        self,
+        session_id: str,
+        pinned_at: str | None,
+        updated_at: str,
+    ) -> ChatSession | None:
+        ...
+
+    def delete_session(self, session_id: str) -> bool:
         ...
 
     def attach_document(self, document: AttachedDocument) -> None:

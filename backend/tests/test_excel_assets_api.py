@@ -167,6 +167,42 @@ def test_api_failed_replacement_keeps_previous_active_version(
     ]
 
 
+def test_api_rename_file_updates_list_and_detail(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_xlsx_fixture(workbook_path)
+
+    with workbook_path.open("rb") as workbook_file:
+        upload_response = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "standards.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert upload_response.status_code == 200
+    file_id = upload_response.json()["file"]["file_id"]
+
+    rename_response = client.patch(
+        f"/api/excel/files/{file_id}",
+        json={"display_name": "standards-renamed.xlsx"},
+    )
+    assert rename_response.status_code == 200
+    assert rename_response.json()["display_name"] == "standards-renamed.xlsx"
+
+    detail_response = client.get(f"/api/excel/files/{file_id}")
+    list_response = client.get("/api/excel/files")
+
+    assert detail_response.json()["display_name"] == "standards-renamed.xlsx"
+    assert list_response.json()["files"][0]["display_name"] == "standards-renamed.xlsx"
+
+
 def test_api_delete_file_requires_confirmation_and_hard_deletes(
     client: TestClient,
     tmp_path: Path,

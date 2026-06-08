@@ -11,11 +11,14 @@ from app.api.schemas import (
     ChatRequest,
     ChatRouteRequest,
     ChatRouteResponse,
+    ChatSessionListResponse,
     ChatSessionResponse,
     ChatStageTimingResponse,
     ExcelCitationResponse,
     LlmModelDefaultsResponse,
     LlmModelOptionsResponse,
+    PinChatSessionRequest,
+    RenameChatSessionRequest,
     SelectedDocumentResponse,
 )
 from app.application.chat.service import ChatService
@@ -53,6 +56,13 @@ def create_chat_session(service: ChatServiceDependency) -> ChatSessionResponse:
     return _to_session_response(service.create_session())
 
 
+@router.get("/chat/sessions", response_model=ChatSessionListResponse)
+def list_chat_sessions(service: ChatServiceDependency) -> ChatSessionListResponse:
+    return ChatSessionListResponse(
+        sessions=[_to_session_response(session) for session in service.list_sessions()]
+    )
+
+
 @router.get("/chat/sessions/{session_id}", response_model=ChatSessionResponse)
 def get_chat_session(
     session_id: str,
@@ -62,6 +72,40 @@ def get_chat_session(
     if session is None:
         raise AssetNotFoundError("chat session was not found")
     return _to_session_response(session)
+
+
+@router.patch("/chat/sessions/{session_id}", response_model=ChatSessionResponse)
+def rename_chat_session(
+    session_id: str,
+    request: RenameChatSessionRequest,
+    service: ChatServiceDependency,
+) -> ChatSessionResponse:
+    session = service.rename_session(session_id, request.title)
+    if session is None:
+        raise AssetNotFoundError("chat session was not found")
+    return _to_session_response(session)
+
+
+@router.patch("/chat/sessions/{session_id}/pin", response_model=ChatSessionResponse)
+def pin_chat_session(
+    session_id: str,
+    request: PinChatSessionRequest,
+    service: ChatServiceDependency,
+) -> ChatSessionResponse:
+    session = service.set_session_pinned(session_id, request.pinned)
+    if session is None:
+        raise AssetNotFoundError("chat session was not found")
+    return _to_session_response(session)
+
+
+@router.delete("/chat/sessions/{session_id}", status_code=204)
+def delete_chat_session(
+    session_id: str,
+    service: ChatServiceDependency,
+) -> None:
+    deleted = service.delete_session(session_id)
+    if not deleted:
+        raise AssetNotFoundError("chat session was not found")
 
 
 @router.post(
@@ -257,5 +301,7 @@ def _to_session_response(session: ChatSession) -> ChatSessionResponse:
         session_id=session.session_id,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        title=session.title,
+        pinned_at=session.pinned_at,
         status=session.status,
     )

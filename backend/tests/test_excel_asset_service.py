@@ -96,6 +96,22 @@ def test_duplicate_upload_requires_explicit_replacement(
     assert len(service.list_versions(first.file.file_id)) == 2
 
 
+def test_rename_file_updates_display_name_and_rejects_conflict(
+    service: ExcelAssetService,
+) -> None:
+    first = service.upload_workbook("risk.xlsx", b"first")
+    second = service.upload_workbook("audit.xlsx", b"second")
+
+    renamed = service.rename_file(first.file.file_id, "risk-renamed.xlsx")
+
+    assert renamed.file_id == first.file.file_id
+    assert renamed.display_name == "risk-renamed.xlsx"
+    assert service.get_file(first.file.file_id).display_name == "risk-renamed.xlsx"
+
+    with pytest.raises(FileNameConflictError):
+        service.rename_file(second.file.file_id, "risk-renamed.xlsx")
+
+
 def test_failed_replacement_does_not_change_active_version(
     service: ExcelAssetService,
 ) -> None:

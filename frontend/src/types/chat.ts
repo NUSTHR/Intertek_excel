@@ -11,7 +11,13 @@ export interface ChatSession {
   session_id: string
   created_at: string
   updated_at: string
+  title: string
+  pinned_at: string | null
   status: string
+}
+
+export interface ChatSessionListResponse {
+  sessions: ChatSession[]
 }
 
 export interface SelectedDocument {

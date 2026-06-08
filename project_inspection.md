@@ -73,9 +73,9 @@ LLM provider:
   - `Qwen/Qwen3.6-27B`
   - `Qwen/Qwen3.6-35B-A3B`
   - `inclusionAI/Ling-flash-2.0`
-- Default summary model: `deepseek-ai/DeepSeek-V4-Pro`
+- Default summary model: `inclusionAI/Ling-flash-2.0`
 - Default router model: `inclusionAI/Ling-flash-2.0`
-- Default answer model: `deepseek-ai/DeepSeek-V4-Pro`
+- Default answer model: `inclusionAI/Ling-flash-2.0`
 - Fake LLM adapter exists for local tests only
 
 Do not commit real API keys. Backend `.env` is ignored and must remain local.
@@ -220,6 +220,7 @@ The repository currently handles:
 Key tables:
 
 ```text
+schema_migrations
 excel_files
 excel_file_versions
 excel_sheets
@@ -233,6 +234,11 @@ chat_turns
 ```
 
 Summary persistence was added because the earlier summary service was memory-only. A generated document summary now survives backend restarts.
+
+Schema creation is tracked through the repository's versioned migration list.
+Applied migration versions and checksums are recorded in `schema_migrations`,
+so future schema changes should append a new migration instead of editing an
+already applied one.
 
 Default database path:
 
@@ -613,12 +619,10 @@ LLM_ROUTER_MODEL
 LLM_ANSWER_MODEL
 LLM_REQUEST_TIMEOUT_SECONDS
 LLM_SUMMARY_MAX_PROFILE_ROWS
-LLM_CHAT_ROWS_PER_SHEET
 ```
 
 Note:
 
-- `LLM_CHAT_ROWS_PER_SHEET` is now legacy-ish. The chat service was changed to load all attached document rows in pages. It still exists in settings but should be removed or repurposed later to avoid confusion.
 - Never commit real `LLM_API_KEY`.
 
 Frontend settings:
@@ -829,15 +833,11 @@ If selected rows exceed a safe character/token budget for the chosen answer mode
 
 Make the input always reachable and make citations/source trace collapsible or independently scrollable.
 
-4. Remove or rename legacy `LLM_CHAT_ROWS_PER_SHEET`
-
-It is misleading now that all attached rows are loaded.
-
-5. Add integration tests if scoped routing is introduced
+4. Add integration tests if scoped routing is introduced
 
 Once file scope exists, add tests proving a relevant but out-of-scope file is not selected or sent.
 
-6. Add better session inspection API
+5. Add better session inspection API
 
 Current `GET /chat/sessions/{session_id}` returns only session metadata. Future API should expose:
 
@@ -848,7 +848,7 @@ last citations
 timings
 ```
 
-7. Improve timing/observability
+6. Improve timing/observability
 
 `ChatStageTiming` exists and timings are returned. Next step is structured logging and perhaps a lightweight trace ID.
 

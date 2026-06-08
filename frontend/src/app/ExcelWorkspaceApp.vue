@@ -9,12 +9,21 @@ import {
   listExcelVersions,
   lookupExcelRow,
   previewExcelSheet,
+  renameExcelFile,
   uploadExcelFile,
 } from '../api/excel-assets-api'
+import {
+  createChatSession,
+  deleteChatSession,
+  listChatSessions,
+  renameChatSession,
+  setChatSessionPinned,
+} from '../api/chat-api'
 import { generateDocumentSummary, getDocumentSummary } from '../api/document-summaries-api'
 import { getLlmModelOptions } from '../api/llm-api'
+import AppIcon from '../components/AppIcon.vue'
 import ChatPanel from '../components/ChatPanel.vue'
-import type { ChatAnswer, ExcelCitation, SelectedDocument } from '../types/chat'
+import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary } from '../types/document-summary'
 import type { LlmModelDefaults, LlmProviderOption } from '../types/llm'
 import type {
@@ -26,11 +35,28 @@ import type {
 } from '../types/excel-assets'
 
 type ActiveView = 'files' | 'chat'
+type FileInsightTab = 'summary' | 'preview' | 'schema'
+type ModelStage = 'summary' | 'router' | 'answer'
+type RenameDialog =
+  | { kind: 'file'; file: ExcelFile }
+  | { kind: 'session'; session: ChatSession }
+type ConfirmDialog =
+  | { kind: 'file'; file: ExcelFile }
+  | { kind: 'session'; session: ChatSession }
 
 const previewLimit = 250
 const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm']
 
-const activeView = ref<ActiveView>('files')
+const initialActiveView: ActiveView =
+  typeof window !== 'undefined' && window.location.hash === '#chat' ? 'chat' : 'files'
+
+const activeView = ref<ActiveView>(initialActiveView)
+const activeFileInsightTab = ref<FileInsightTab>('summary')
+const isFileInsightFullscreen = ref<boolean>(false)
+const chatSessions = ref<ChatSession[]>([])
+const activeChatSessionId = ref<string>('')
+const chatSessionError = ref<string>('')
+const isChatSessionLoading = ref<boolean>(false)
 const files = ref<ExcelFile[]>([])
 const versions = ref<ExcelFileVersion[]>([])
 const sheets = ref<ExcelSheet[]>([])
@@ -44,6 +70,13 @@ const selectedSheetId = ref<string>('')
 const selectedUploadFile = ref<File | null>(null)
 const pendingReplaceFile = ref<File | null>(null)
 const pendingDeleteFile = ref<ExcelFile | null>(null)
+const renameDialog = ref<RenameDialog | null>(null)
+const renameDraft = ref<string>('')
+const confirmDialog = ref<ConfirmDialog | null>(null)
+const dialogError = ref<string>('')
+const toastMessage = ref<string>('')
+const openFileActionMenuId = ref<string>('')
+const openChatSessionActionMenuId = ref<string>('')
 const lookupRowId = ref<string>('')
 const statusMessage = ref<string>('Ready')
 const errorMessage = ref<string>('')
@@ -51,7 +84,6 @@ const searchTerm = ref<string>('')
 const isBusy = ref<boolean>(false)
 const isSummaryLoading = ref<boolean>(false)
 const isLookupLoading = ref<boolean>(false)
-const isDraggingUpload = ref<boolean>(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const availableLlmModels = ref<string[]>([])
 const availableLlmProviders = ref<LlmProviderOption[]>([])
@@ -61,17 +93,18 @@ const routerProvider = ref<string>('siliconflow')
 const routerModel = ref<string>('')
 const answerProvider = ref<string>('siliconflow')
 const answerModel = ref<string>('')
+let toastTimer: number | null = null
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
 })
 
-const activeVersion = computed(() => {
-  return versions.value.find((version) => version.version_id === selectedVersionId.value) ?? null
-})
-
 const selectedSheet = computed(() => {
   return sheets.value.find((sheet) => sheet.sheet_id === selectedSheetId.value) ?? null
+})
+
+const selectedVersion = computed(() => {
+  return versions.value.find((version) => version.version_id === selectedVersionId.value) ?? null
 })
 
 const filteredFiles = computed(() => {
@@ -91,6 +124,18 @@ const previewHeaders = computed(() => {
 
 const workbookRowCount = computed(() => {
   return sheets.value.reduce((total, sheet) => total + sheet.row_count, 0)
+})
+
+const schemaColumns = computed(() => {
+  const headerRow = preview.value?.offset === 0 ? preview.value.rows[0] ?? [] : []
+  const sampleRow = preview.value?.rows.find((row, index) => index > 0 && row.some(Boolean)) ?? []
+  return previewHeaders.value.map((label, index) => ({
+    key: `${label}-${index}`,
+    label,
+    sourceName: headerRow[index] || label,
+    sample: sampleRow[index] || '-',
+    type: index === 0 ? 'Row ID' : 'Text',
+  }))
 })
 
 const canPreviewPrevious = computed(() => {
@@ -117,12 +162,30 @@ const referencedDocuments = computed(() => {
   return latestAnswer.value?.selected_documents ?? []
 })
 
+const visibleSummaryTopics = computed(() => {
+  if (documentSummary.value?.key_topics.length) {
+    return documentSummary.value.key_topics.map((topic) => (
+      topic.startsWith('#') ? topic : `#${topic.replace(/\s+/g, '_')}`
+    ))
+  }
+  return ['#financial_report', '#q3_performance', '#revenue_growth']
+})
+
+const activeChatSession = computed(() => {
+  return (
+    chatSessions.value.find((session) => session.session_id === activeChatSessionId.value) ??
+    null
+  )
+})
+
+
 onMounted(() => {
   void initializeWorkspace()
 })
 
 async function initializeWorkspace(): Promise<void> {
   await loadLlmModelOptions()
+  await loadChatSessions()
   await refreshFiles()
 }
 
@@ -143,6 +206,173 @@ function applyModelDefaults(defaults: LlmModelDefaults): void {
   ensureStageModel('summary')
   ensureStageModel('router')
   ensureStageModel('answer')
+}
+
+function setActiveView(view: ActiveView): void {
+  closeActionMenus()
+  if (view !== 'files') {
+    isFileInsightFullscreen.value = false
+  }
+  activeView.value = view
+  if (typeof window !== 'undefined') {
+    window.history.replaceState(null, '', view === 'chat' ? '#chat' : '#files')
+  }
+}
+
+function setFileInsightTab(tab: FileInsightTab): void {
+  closeActionMenus()
+  activeFileInsightTab.value = tab
+}
+
+function toggleFileInsightFullscreen(): void {
+  isFileInsightFullscreen.value = !isFileInsightFullscreen.value
+  showToast(isFileInsightFullscreen.value ? 'Expanded detail view.' : 'Restored split view.')
+}
+
+function toggleFileActionMenu(fileId: string): void {
+  openChatSessionActionMenuId.value = ''
+  openFileActionMenuId.value = openFileActionMenuId.value === fileId ? '' : fileId
+}
+
+function toggleChatSessionActionMenu(sessionId: string): void {
+  openFileActionMenuId.value = ''
+  openChatSessionActionMenuId.value =
+    openChatSessionActionMenuId.value === sessionId ? '' : sessionId
+}
+
+function closeActionMenus(): void {
+  openFileActionMenuId.value = ''
+  openChatSessionActionMenuId.value = ''
+}
+
+async function loadChatSessions(preferredSessionId: string | null = null): Promise<void> {
+  chatSessionError.value = ''
+  isChatSessionLoading.value = true
+  try {
+    const sessions = await listChatSessions()
+    chatSessions.value = sortChatSessions(sessions)
+    const nextActiveSessionId = preferredSessionId || activeChatSessionId.value
+    const activeStillExists = chatSessions.value.some(
+      (session) => session.session_id === nextActiveSessionId,
+    )
+    if (nextActiveSessionId && activeStillExists) {
+      activeChatSessionId.value = nextActiveSessionId
+      return
+    }
+    activeChatSessionId.value = chatSessions.value[0]?.session_id ?? ''
+  } catch (error: unknown) {
+    chatSessionError.value = toErrorMessage(error)
+  } finally {
+    isChatSessionLoading.value = false
+  }
+}
+
+async function startNewChatSession(): Promise<void> {
+  closeActionMenus()
+  chatSessionError.value = ''
+  isChatSessionLoading.value = true
+  try {
+    const session = await createChatSession()
+    upsertChatSession(session)
+    activeChatSessionId.value = session.session_id
+    latestAnswer.value = null
+    setActiveView('chat')
+  } catch (error: unknown) {
+    chatSessionError.value = toErrorMessage(error)
+  } finally {
+    isChatSessionLoading.value = false
+  }
+}
+
+function selectChatSession(session: ChatSession): void {
+  closeActionMenus()
+  activeChatSessionId.value = session.session_id
+  latestAnswer.value = null
+  setActiveView('chat')
+}
+
+async function renameChatSessionPrompt(session: ChatSession): Promise<void> {
+  closeActionMenus()
+  dialogError.value = ''
+  renameDialog.value = { kind: 'session', session }
+  renameDraft.value = session.title
+}
+
+async function toggleChatSessionPin(session: ChatSession): Promise<void> {
+  closeActionMenus()
+  await updateChatSession(() => setChatSessionPinned(session.session_id, !session.pinned_at))
+}
+
+async function removeChatSession(session: ChatSession): Promise<void> {
+  closeActionMenus()
+  dialogError.value = ''
+  confirmDialog.value = { kind: 'session', session }
+}
+
+async function confirmDeleteChatSession(session: ChatSession): Promise<void> {
+  chatSessionError.value = ''
+  isChatSessionLoading.value = true
+  try {
+    await deleteChatSession(session.session_id)
+    confirmDialog.value = null
+    showToast('Chat session deleted.')
+    chatSessions.value = chatSessions.value.filter(
+      (item) => item.session_id !== session.session_id,
+    )
+    if (activeChatSessionId.value === session.session_id) {
+      activeChatSessionId.value = chatSessions.value[0]?.session_id ?? ''
+      latestAnswer.value = null
+    }
+  } catch (error: unknown) {
+    chatSessionError.value = toErrorMessage(error)
+  } finally {
+    isChatSessionLoading.value = false
+  }
+}
+
+function handleChatSessionCreated(session: ChatSession): void {
+  upsertChatSession(session)
+  activeChatSessionId.value = session.session_id
+}
+
+async function handleChatSessionTitleSuggested(sessionId: string, title: string): Promise<void> {
+  const session = chatSessions.value.find((item) => item.session_id === sessionId)
+  if (!session || session.title !== 'New chat') {
+    return
+  }
+  await updateChatSession(() => renameChatSession(sessionId, title))
+}
+
+async function updateChatSession(action: () => Promise<ChatSession>): Promise<void> {
+  chatSessionError.value = ''
+  isChatSessionLoading.value = true
+  try {
+    const session = await action()
+    upsertChatSession(session)
+  } catch (error: unknown) {
+    chatSessionError.value = toErrorMessage(error)
+  } finally {
+    isChatSessionLoading.value = false
+  }
+}
+
+function upsertChatSession(session: ChatSession): void {
+  const sessions = chatSessions.value.filter((item) => item.session_id !== session.session_id)
+  chatSessions.value = sortChatSessions([session, ...sessions])
+}
+
+function sortChatSessions(sessions: ChatSession[]): ChatSession[] {
+  return [...sessions].sort((left, right) => {
+    if (left.pinned_at && !right.pinned_at) {
+      return -1
+    }
+    if (!left.pinned_at && right.pinned_at) {
+      return 1
+    }
+    const leftDate = left.pinned_at || left.updated_at
+    const rightDate = right.pinned_at || right.updated_at
+    return rightDate.localeCompare(leftDate)
+  })
 }
 
 async function refreshFiles(): Promise<void> {
@@ -166,12 +396,13 @@ async function refreshFiles(): Promise<void> {
 }
 
 async function chooseFile(file: ExcelFile, view: ActiveView | null = null): Promise<void> {
+  closeActionMenus()
   errorMessage.value = ''
   isBusy.value = true
   try {
     await selectFile(file)
     if (view) {
-      activeView.value = view
+      setActiveView(view)
     }
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
@@ -291,11 +522,6 @@ function handleUploadFileChange(event: Event): void {
   setUploadFile(input.files?.[0] ?? null)
 }
 
-function handleUploadDrop(event: DragEvent): void {
-  isDraggingUpload.value = false
-  setUploadFile(event.dataTransfer?.files[0] ?? null)
-}
-
 function setUploadFile(file: File | null): void {
   pendingReplaceFile.value = null
   if (!file) {
@@ -313,18 +539,86 @@ function setUploadFile(file: File | null): void {
 }
 
 function requestDeleteFile(file: ExcelFile): void {
-  pendingDeleteFile.value = file
+  closeActionMenus()
+  confirmDialog.value = { kind: 'file', file }
+  pendingDeleteFile.value = null
+  dialogError.value = ''
   errorMessage.value = ''
-  statusMessage.value = `Confirm deletion for ${file.display_name}. This will permanently remove all related versions, artifacts, summaries, and chat attachments.`
 }
 
-function cancelDeleteFile(): void {
-  pendingDeleteFile.value = null
-  statusMessage.value = 'Deletion cancelled.'
+function exportPreviewCsv(): void {
+  if (!preview.value || preview.value.rows.length === 0) {
+    errorMessage.value = 'No preview rows are available to download.'
+    return
+  }
+  const csvText = preview.value.rows
+    .map((row) => row.map((cell) => csvEscape(cell)).join(','))
+    .join('\n')
+  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' })
+  const link = document.createElement('a')
+  const objectUrl = URL.createObjectURL(blob)
+  link.href = objectUrl
+  link.download = `${selectedFile.value?.display_name ?? 'excel-preview'}-${selectedSheet.value?.sheet_code ?? 'sheet'}.csv`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(objectUrl)
+  showToast('Preview downloaded.')
+}
+
+async function renameFilePrompt(file: ExcelFile): Promise<void> {
+  closeActionMenus()
+  dialogError.value = ''
+  renameDialog.value = { kind: 'file', file }
+  renameDraft.value = file.display_name
+}
+
+function cancelDialog(): void {
+  renameDialog.value = null
+  confirmDialog.value = null
+  dialogError.value = ''
+  renameDraft.value = ''
+}
+
+async function submitRenameDialog(): Promise<void> {
+  const dialog = renameDialog.value
+  if (!dialog) {
+    return
+  }
+
+  const trimmedValue = renameDraft.value.trim()
+  if (!trimmedValue) {
+    dialogError.value =
+      dialog.kind === 'file' ? 'Workbook name cannot be empty.' : 'Session title cannot be empty.'
+    return
+  }
+
+  dialogError.value = ''
+  try {
+    if (dialog.kind === 'file') {
+      errorMessage.value = ''
+      isBusy.value = true
+      const renamedFile = await renameExcelFile(dialog.file.file_id, trimmedValue)
+      files.value = files.value.map((item) => (
+        item.file_id === renamedFile.file_id ? renamedFile : item
+      ))
+      statusMessage.value = `${renamedFile.display_name} renamed`
+      showToast('Workbook renamed.')
+    } else {
+      await updateChatSession(() => renameChatSession(dialog.session.session_id, trimmedValue))
+      showToast('Chat session renamed.')
+    }
+    cancelDialog()
+  } catch (error: unknown) {
+    dialogError.value = toErrorMessage(error)
+  } finally {
+    isBusy.value = false
+  }
 }
 
 async function confirmDeleteFile(): Promise<void> {
-  const file = pendingDeleteFile.value
+  const file =
+    confirmDialog.value?.kind === 'file' ? confirmDialog.value.file : pendingDeleteFile.value
   if (!file) {
     return
   }
@@ -334,6 +628,7 @@ async function confirmDeleteFile(): Promise<void> {
   try {
     const result = await deleteExcelFile(file.file_id, true)
     pendingDeleteFile.value = null
+    confirmDialog.value = null
     if (selectedFileId.value === file.file_id) {
       clearSelection()
     }
@@ -343,13 +638,15 @@ async function confirmDeleteFile(): Promise<void> {
     }
     statusMessage.value =
       `${result.display_name} deleted. Removed ${result.deleted_versions} version(s), ${result.deleted_sheets} sheet(s), ${result.deleted_artifacts} artifact(s), ${result.deleted_summaries} summary record(s), and ${result.deleted_chat_session_documents} chat attachment(s).`
+    showToast('Workbook deleted.')
   } catch (error: unknown) {
     if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
       pendingDeleteFile.value = file
+      confirmDialog.value = { kind: 'file', file }
       statusMessage.value = `Confirm deletion for ${file.display_name}.`
       return
     }
-    errorMessage.value = toErrorMessage(error)
+    dialogError.value = toErrorMessage(error)
   } finally {
     isBusy.value = false
   }
@@ -439,7 +736,7 @@ async function ensureLookupRowVisible(result: RowLookupResponse): Promise<void> 
 }
 
 async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
-  activeView.value = 'chat'
+  setActiveView('chat')
   errorMessage.value = ''
   try {
     let targetFile = files.value.find((file) => file.file_id === citation.file_id)
@@ -466,6 +763,7 @@ async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
 
 function handleChatAnswer(answer: ChatAnswer): void {
   latestAnswer.value = answer
+  void loadChatSessions(answer.session_id)
 }
 
 async function openReferencedDocument(document: SelectedDocument): Promise<void> {
@@ -522,11 +820,18 @@ function fileTypeLabel(file: ExcelFile): string {
   return extension.includes('xls') ? 'Excel' : extension.toUpperCase()
 }
 
-function fileStatusLabel(file: ExcelFile): string {
-  if (file.file_id === selectedFileId.value && activeVersion.value) {
-    return activeVersion.value.status
+function fileIcon(file: ExcelFile): string {
+  const name = file.display_name.toLowerCase()
+  if (name.endsWith('.csv') || name.includes('analysis')) {
+    return 'analytics'
   }
-  return file.active_version_id ? 'ready' : 'pending'
+  if (name.includes('warehouse') || name.includes('inventory')) {
+    return 'description'
+  }
+  if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.xlsm')) {
+    return 'table_chart'
+  }
+  return 'description'
 }
 
 function fileDisplayName(fileId: string): string {
@@ -572,7 +877,7 @@ function modelsForProvider(provider: string): string[] {
   return availableLlmProviders.value.find((item) => item.provider === provider)?.models ?? []
 }
 
-function ensureStageModel(stage: 'summary' | 'router' | 'answer'): void {
+function ensureStageModel(stage: ModelStage): void {
   const provider =
     stage === 'summary'
       ? summaryProvider.value
@@ -602,6 +907,24 @@ function columnLabel(index: number): string {
   return label
 }
 
+function csvEscape(value: string): string {
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`
+  }
+  return value
+}
+
+function showToast(message: string): void {
+  toastMessage.value = message
+  if (toastTimer !== null) {
+    window.clearTimeout(toastTimer)
+  }
+  toastTimer = window.setTimeout(() => {
+    toastMessage.value = ''
+    toastTimer = null
+  }, 2400)
+}
+
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message
@@ -611,109 +934,120 @@ function toErrorMessage(error: unknown): string {
 </script>
 
 <template>
-  <main class="excelai-app">
+  <main class="excelai-app" :class="{ 'chat-mode': activeView === 'chat' }">
     <aside class="app-sidebar">
       <div class="brand-block">
         <h1>ExcelAI</h1>
-        <p>Data Analyst Pro</p>
+        <p>Researcher Pro</p>
       </div>
 
+      <button type="button" class="sidebar-upload-button" :disabled="isBusy" @click="openUploadDialog">
+        <AppIcon name="add" />
+        <strong>Upload New</strong>
+      </button>
+
       <nav class="primary-nav" aria-label="Primary">
+        <button type="button" class="nav-item muted-nav">
+          <span class="nav-glyph"><AppIcon name="dashboard" /></span>
+          <span>Dashboard</span>
+        </button>
         <button
           type="button"
           class="nav-item"
           :class="{ active: activeView === 'files' }"
-          @click="activeView = 'files'"
+          @click="setActiveView('files')"
         >
-          <span class="nav-glyph">F</span>
+          <span class="nav-glyph"><AppIcon name="folder_open" /></span>
           <span>Files</span>
         </button>
-        <button
-          type="button"
-          class="nav-item"
-          :class="{ active: activeView === 'chat' }"
-          @click="activeView = 'chat'"
-        >
-          <span class="nav-glyph">C</span>
-          <span>Chat</span>
+        <button type="button" class="nav-item muted-nav">
+          <span class="nav-glyph"><AppIcon name="query_stats" /></span>
+          <span>Analytics</span>
         </button>
-        <button type="button" class="nav-item muted-nav" disabled>
-          <span class="nav-glyph">H</span>
-          <span>History</span>
+        <button type="button" class="nav-item muted-nav">
+          <span class="nav-glyph"><AppIcon name="auto_awesome" /></span>
+          <span>Knowledge Base</span>
         </button>
-        <button type="button" class="nav-item muted-nav" disabled>
-          <span class="nav-glyph">S</span>
+        <button type="button" class="nav-item muted-nav">
+          <span class="nav-glyph"><AppIcon name="settings" /></span>
           <span>Settings</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
-        <button type="button" class="primary-action" :disabled="isBusy" @click="refreshFiles">
-          Refresh Files
+        <button type="button" class="nav-item muted-nav support-link">
+          <span class="nav-glyph"><AppIcon name="help" /></span>
+          <span>Support</span>
         </button>
         <div class="user-mini">
           <div class="avatar">A</div>
           <div>
-            <strong>Professional User</strong>
-            <span>Local workspace</span>
+            <strong>Alex Rivera</strong>
+            <span>alex.r@excelai.com</span>
           </div>
+          <button type="button" class="logout-button" aria-label="Logout">
+            <AppIcon name="logout" />
+          </button>
         </div>
       </div>
     </aside>
 
     <section class="app-main">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">{{ activeView === 'files' ? 'Knowledge Base' : 'Conversation' }}</p>
-          <h2>{{ activeView === 'files' ? 'File Management' : 'Excel Analysis' }}</h2>
-        </div>
-        <div class="topbar-actions">
-          <label class="search-field">
-            <span>Search</span>
-            <input v-model="searchTerm" type="search" placeholder="Search workbooks..." />
+      <header class="topbar" :class="{ 'file-topbar': activeView === 'files' }">
+        <template v-if="activeView === 'files'">
+          <label class="search-field file-search-field">
+            <span class="search-icon"><AppIcon name="search" /></span>
+            <input v-model="searchTerm" type="search" placeholder="Search knowledge base..." />
           </label>
-          <button type="button" class="view-switch" @click="activeView = activeView === 'files' ? 'chat' : 'files'">
-            {{ activeView === 'files' ? 'Open Chat' : 'Manage Files' }}
-          </button>
-        </div>
+          <div class="file-topbar-meta">
+            <strong>Knowledge Interface</strong>
+            <span class="topbar-divider"></span>
+            <button type="button" class="topbar-icon-button" aria-label="Notifications">
+              <AppIcon name="notifications" />
+            </button>
+            <button type="button" class="topbar-icon-button" aria-label="History">
+              <AppIcon name="history" />
+            </button>
+            <div class="topbar-avatar">A</div>
+          </div>
+        </template>
+        <template v-else>
+          <div>
+          <p class="eyebrow">Conversation</p>
+          <h2>Excel Analysis</h2>
+          </div>
+          <div class="topbar-actions">
+            <label class="search-field">
+              <span class="search-icon"><AppIcon name="search" /></span>
+              <input v-model="searchTerm" type="search" placeholder="Search workbooks..." />
+            </label>
+            <button
+              type="button"
+              class="view-switch"
+              @click="setActiveView('files')"
+            >
+              Manage Files
+            </button>
+          </div>
+        </template>
       </header>
 
-      <div v-if="statusMessage || errorMessage" class="notice-row">
-        <p v-if="statusMessage" class="status-note">{{ statusMessage }}</p>
+      <div v-if="errorMessage || (activeView === 'chat' && statusMessage)" class="notice-row">
+        <p v-if="activeView === 'chat' && statusMessage" class="status-note">{{ statusMessage }}</p>
         <p v-if="errorMessage" class="error-note">{{ errorMessage }}</p>
       </div>
 
       <section v-if="activeView === 'files'" class="file-page">
-        <section
-          class="upload-card"
-          :class="{ dragging: isDraggingUpload }"
-          @click="openUploadDialog"
-          @dragover.prevent="isDraggingUpload = true"
-          @dragleave.prevent="isDraggingUpload = false"
-          @drop.prevent="handleUploadDrop"
-        >
-          <input
-            ref="fileInput"
-            class="visually-hidden"
-            type="file"
-            accept=".xls,.xlsx,.xlsm,.xltx,.xltm"
-            @change="handleUploadFileChange"
-          />
-          <div class="upload-icon">UP</div>
-          <div class="upload-copy">
-            <h3>Upload Excel Workbook</h3>
-            <p>
-              <button type="button" class="link-button" @click.stop="openUploadDialog">Browse</button>
-              Excel workbook files.
-            </p>
-          </div>
-          <div class="format-pills">
-            <span>.xlsx</span>
-            <span>.xls</span>
-            <span>.xlsm</span>
-          </div>
-        </section>
+        <input
+          ref="fileInput"
+          class="visually-hidden"
+          type="file"
+          accept=".xls,.xlsx,.xlsm,.xltx,.xltm"
+          @change="handleUploadFileChange"
+        />
 
+        <div class="file-management-shell">
+          <section class="file-sources-pane">
         <section v-if="selectedUploadFile || pendingReplaceFile" class="upload-queue">
           <div>
             <p class="eyebrow">Pending Upload</p>
@@ -737,249 +1071,579 @@ function toErrorMessage(error: unknown): string {
           </button>
         </section>
 
-        <section v-if="pendingDeleteFile" class="upload-queue">
-          <div>
-            <p class="eyebrow">Pending Delete</p>
-            <h3>{{ pendingDeleteFile.display_name }}</h3>
+        <section class="file-list-panel">
+          <div class="panel-heading">
+            <div>
+              <h3>Knowledge Sources</h3>
+            </div>
+            <span class="files-found-label">{{ filteredFiles.length }} Files Found</span>
           </div>
-          <div class="replace-actions">
-            <p>
-              This will permanently delete the workbook and all related versions, artifacts,
-              profiles, summaries, row mappings, and chat document attachments.
-            </p>
-            <button type="button" class="danger-subtle" :disabled="isBusy" @click="confirmDeleteFile">
-              Confirm Delete
+
+          <div class="file-card-list">
+            <article
+              v-for="file in filteredFiles"
+              :key="file.file_id"
+              role="button"
+              tabindex="0"
+              class="file-library-card"
+              :class="{ selected: file.file_id === selectedFileId }"
+              @click="chooseFile(file)"
+              @keydown.enter.prevent="chooseFile(file)"
+              @keydown.space.prevent="chooseFile(file)"
+            >
+              <span class="file-badge large"><AppIcon :name="fileIcon(file)" /></span>
+              <span class="file-card-main">
+                <strong>{{ file.display_name }}</strong>
+                <span class="file-meta-line">
+                  {{ fileTypeLabel(file) }} - Modified {{ formatDate(file.updated_at) }}
+                </span>
+              </span>
+              <span class="file-card-actions" @click.stop>
+                <button
+                  type="button"
+                  class="menu-trigger"
+                  :aria-expanded="openFileActionMenuId === file.file_id"
+                  aria-label="File actions"
+                  @click="toggleFileActionMenu(file.file_id)"
+                >
+                  <AppIcon name="more_vert" />
+                </button>
+              </span>
+              <span
+                v-if="openFileActionMenuId === file.file_id"
+                class="item-action-menu file-card-menu"
+                @click.stop
+              >
+                <button type="button" @click="chooseFile(file)">Open</button>
+                <button type="button" @click="renameFilePrompt(file)">Rename</button>
+                <button type="button" @click="chooseFile(file, 'chat')">Analyze</button>
+                <button type="button" class="danger-text" @click="requestDeleteFile(file)">Delete</button>
+              </span>
+            </article>
+
+            <div v-if="filteredFiles.length === 0" class="file-empty-panel">
+              No matching workbooks.
+            </div>
+          </div>
+
+          <div class="file-pagination">
+            <button type="button" class="pagination-link">
+              <AppIcon name="chevron_left" />
+              Previous
             </button>
-            <button type="button" class="secondary-button" :disabled="isBusy" @click="cancelDeleteFile">
-              Cancel
+            <div class="pagination-pages">
+              <span class="active">1</span>
+              <span>2</span>
+              <span>3</span>
+            </div>
+            <button type="button" class="pagination-link">
+              Next
+              <AppIcon name="chevron_right" />
             </button>
           </div>
         </section>
 
-        <section class="file-table-card">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Workbooks</p>
-              <h3>{{ filteredFiles.length }} files</h3>
+          </section>
+
+          <section class="file-insight-pane" :class="{ fullscreen: isFileInsightFullscreen }">
+            <div class="file-insight-tabs">
+              <button
+                type="button"
+                :class="{ active: activeFileInsightTab === 'summary' }"
+                @click="setFileInsightTab('summary')"
+              >
+                Summary
+              </button>
+              <button
+                type="button"
+                :class="{ active: activeFileInsightTab === 'preview' }"
+                @click="setFileInsightTab('preview')"
+              >
+                Data Preview
+              </button>
+              <button
+                type="button"
+                :class="{ active: activeFileInsightTab === 'schema' }"
+                @click="setFileInsightTab('schema')"
+              >
+                Schema
+              </button>
+              <div class="file-insight-tools">
+                <button
+                  type="button"
+                  class="icon-only-button"
+                  aria-label="Download preview"
+                  :disabled="!preview"
+                  @click="exportPreviewCsv"
+                >
+                  <AppIcon name="download" />
+                </button>
+                <button
+                  type="button"
+                  class="icon-only-button"
+                  aria-label="Fullscreen"
+                  @click="toggleFileInsightFullscreen"
+                >
+                  <AppIcon :name="isFileInsightFullscreen ? 'fullscreen_exit' : 'fullscreen'" />
+                </button>
+              </div>
             </div>
-            <button type="button" class="secondary-button" :disabled="isBusy" @click="refreshFiles">
+            <div class="file-insight-scroll">
+              <section v-if="activeFileInsightTab === 'summary'" class="file-summary-stack">
+                <article v-if="availableLlmProviders.length > 0" class="model-config-card">
+                  <div class="config-heading">
+                    <div>
+                      <span class="config-icon"><AppIcon name="tune" /></span>
+                      <h3>Model Settings</h3>
+                    </div>
+                  </div>
+                  <div class="model-config-grid">
+                    <div class="model-setting-row">
+                      <span>Summary Model</span>
+                      <select v-model="summaryProvider" @change="ensureStageModel('summary')">
+                        <option
+                          v-for="provider in availableLlmProviders"
+                          :key="`summary-provider-${provider.provider}`"
+                          :value="provider.provider"
+                        >
+                          {{ provider.label }}
+                        </option>
+                      </select>
+                      <select v-model="summaryModel">
+                        <option
+                          v-for="model in modelsForProvider(summaryProvider)"
+                          :key="`summary-model-${model}`"
+                          :value="model"
+                        >
+                          {{ model }}
+                        </option>
+                      </select>
+                    </div>
+                    <div class="model-setting-row">
+                      <span>Router Model</span>
+                      <select v-model="routerProvider" @change="ensureStageModel('router')">
+                        <option
+                          v-for="provider in availableLlmProviders"
+                          :key="`router-provider-${provider.provider}`"
+                          :value="provider.provider"
+                        >
+                          {{ provider.label }}
+                        </option>
+                      </select>
+                      <select v-model="routerModel">
+                        <option
+                          v-for="model in modelsForProvider(routerProvider)"
+                          :key="`router-model-${model}`"
+                          :value="model"
+                        >
+                          {{ model }}
+                        </option>
+                      </select>
+                    </div>
+                    <div class="model-setting-row">
+                      <span>Chat Model</span>
+                      <select v-model="answerProvider" @change="ensureStageModel('answer')">
+                        <option
+                          v-for="provider in availableLlmProviders"
+                          :key="`answer-provider-${provider.provider}`"
+                          :value="provider.provider"
+                        >
+                          {{ provider.label }}
+                        </option>
+                      </select>
+                      <select v-model="answerModel">
+                        <option
+                          v-for="model in modelsForProvider(answerProvider)"
+                          :key="`answer-model-${model}`"
+                          :value="model"
+                        >
+                          {{ model }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+                </article>
+
+                <article class="document-summary-card">
+                  <div class="summary-card-head">
+                    <div>
+                      <span class="summary-icon"><AppIcon name="auto_awesome" /></span>
+                      <h3>AI Executive Summary</h3>
+                    </div>
+                    <div class="summary-head-actions">
+                      <button
+                        type="button"
+                        class="secondary-button"
+                        :disabled="isSummaryLoading || !selectedVersionId"
+                        @click="generateSummaryForSelectedVersion"
+                      >
+                        <AppIcon name="refresh" />
+                        {{ isSummaryLoading ? 'Generating...' : 'Regenerate' }}
+                      </button>
+                      <button
+                        type="button"
+                        class="summary-edit-button"
+                        aria-label="Edit summary"
+                      >
+                        <AppIcon name="edit" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div v-if="documentSummary" class="summary-content">
+                    <p class="summary-text">{{ documentSummary.summary_text }}</p>
+                  </div>
+                  <div v-else class="insight-empty-state">
+                    <div class="insight-icon"><AppIcon name="auto_awesome" /></div>
+                    <h4>No summary generated</h4>
+                    <p>Select a file and click generate to see AI insights.</p>
+                    <button
+                      type="button"
+                      class="primary-action"
+                      :disabled="isSummaryLoading || !selectedVersionId"
+                      @click="generateSummaryForSelectedVersion"
+                    >
+                      <AppIcon name="bolt" />
+                      {{ isSummaryLoading ? 'Generating...' : 'Generate Summary' }}
+                    </button>
+                  </div>
+
+                  <div class="topic-toolbar">
+                    <span>Keywords & Tags</span>
+                    <button type="button">+ Add Tag</button>
+                  </div>
+                  <div class="topic-list">
+                    <span v-for="topic in visibleSummaryTopics" :key="topic">
+                      {{ topic }}
+                      <AppIcon name="close" />
+                    </span>
+                  </div>
+                </article>
+              </section>
+
+              <section v-else-if="activeFileInsightTab === 'preview'" class="file-preview-panel">
+                <div class="file-preview-controls">
+                  <label>
+                    <span>Version</span>
+                    <select
+                      v-model="selectedVersionId"
+                      :disabled="versions.length === 0"
+                      @change="selectCurrentVersion"
+                    >
+                      <option value="">Version</option>
+                      <option
+                        v-for="version in versions"
+                        :key="version.version_id"
+                        :value="version.version_id"
+                      >
+                        {{ version.status }} - {{ shortId(version.version_id) }}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Sheet</span>
+                    <select
+                      v-model="selectedSheetId"
+                      :disabled="sheets.length === 0"
+                      @change="selectCurrentSheet"
+                    >
+                      <option value="">Sheet</option>
+                      <option
+                        v-for="sheet in sheets"
+                        :key="sheet.sheet_id"
+                        :value="sheet.sheet_id"
+                      >
+                        {{ sheet.sheet_code }} {{ sheet.sheet_name }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="row-jump">
+                    <span>Row ID</span>
+                    <div class="inline-control">
+                      <input
+                        v-model="lookupRowId"
+                        placeholder="S001_R25"
+                        type="text"
+                        @keydown.enter="lookupRow"
+                      />
+                      <button type="button" :disabled="isLookupLoading" @click="lookupRow">
+                        Find
+                      </button>
+                    </div>
+                  </label>
+                </div>
+
+                <div class="preview-metrics">
+                  <div>
+                    <span>Sheets</span>
+                    <strong>{{ sheets.length }}</strong>
+                  </div>
+                  <div>
+                    <span>Rows</span>
+                    <strong>{{ workbookRowCount }}</strong>
+                  </div>
+                  <div>
+                    <span>Visible</span>
+                    <strong>{{ previewRangeLabel }}</strong>
+                  </div>
+                  <div>
+                    <span>Highlighted</span>
+                    <strong>{{ rowLookup?.mapping.row_id ?? '-' }}</strong>
+                  </div>
+                </div>
+
+                <section v-if="rowLookup" class="evidence-strip compact">
+                  <div>
+                    <p class="eyebrow">Highlighted Evidence</p>
+                    <h3>{{ rowLookup.mapping.row_id }}</h3>
+                  </div>
+                  <p>
+                    {{ rowLookup.sheet.sheet_name }} / original row
+                    {{ rowLookup.mapping.original_row_number }}
+                  </p>
+                </section>
+
+                <section class="spreadsheet-card preview-card">
+                  <div class="spreadsheet-header">
+                    <div>
+                      <strong>{{ selectedSheet?.sheet_name ?? 'Sheet preview' }}</strong>
+                      <span>{{ previewRangeLabel }}</span>
+                    </div>
+                    <div class="pagination-actions">
+                      <button
+                        type="button"
+                        class="secondary-button"
+                        :disabled="!canPreviewPrevious"
+                        @click="loadPreviewPage((preview?.offset ?? 0) - previewLimit)"
+                      >
+                        Previous
+                      </button>
+                      <button
+                        type="button"
+                        class="secondary-button"
+                        :disabled="!canPreviewNext"
+                        @click="loadPreviewPage((preview?.offset ?? 0) + previewLimit)"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+
+                  <div v-if="preview" class="excel-scroll">
+                    <table class="excel-table">
+                      <thead>
+                        <tr>
+                          <th v-for="header in previewHeaders" :key="header">{{ header }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          v-for="(row, rowIndex) in preview.rows"
+                          :id="rowDomId(row[0])"
+                          :key="`${row[0]}-${preview.offset}-${rowIndex}`"
+                          :class="{
+                            highlighted: rowIsHighlighted(row),
+                            'header-like': preview.offset === 0 && rowIndex === 0,
+                          }"
+                          @click="lookupVisibleRow(row)"
+                        >
+                          <td v-for="(cell, cellIndex) in row" :key="`${row[0]}-${cellIndex}`">
+                            {{ cell || '-' }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-else class="empty-state">
+                    Upload or select a workbook to preview its rows.
+                  </div>
+                </section>
+
+                <div class="sheet-tabs compact" aria-label="Workbook sheets">
+                  <button
+                    v-for="sheet in sheets"
+                    :key="sheet.sheet_id"
+                    type="button"
+                    :class="{ active: sheet.sheet_id === selectedSheetId }"
+                    @click="runInteraction(() => selectSheet(sheet))"
+                  >
+                    {{ sheet.sheet_name }}
+                  </button>
+                </div>
+              </section>
+
+              <section v-else class="file-schema-panel">
+                <article class="schema-overview-card">
+                  <div class="schema-card-head">
+                    <div>
+                      <AppIcon name="schema" />
+                      <h3>{{ selectedFile?.display_name ?? 'No workbook selected' }}</h3>
+                    </div>
+                    <span>{{ selectedVersion?.status ?? 'No version' }}</span>
+                  </div>
+                  <div class="schema-metrics">
+                    <div>
+                      <span>Version</span>
+                      <strong>{{ shortId(selectedVersionId) }}</strong>
+                    </div>
+                    <div>
+                      <span>Sheets</span>
+                      <strong>{{ sheets.length }}</strong>
+                    </div>
+                    <div>
+                      <span>Rows</span>
+                      <strong>{{ workbookRowCount }}</strong>
+                    </div>
+                    <div>
+                      <span>Columns</span>
+                      <strong>{{ selectedSheet?.column_count ?? 0 }}</strong>
+                    </div>
+                  </div>
+                </article>
+
+                <article class="schema-sheet-card">
+                  <div class="schema-card-head">
+                    <div>
+                      <AppIcon name="view_week" />
+                      <h3>Workbook Sheets</h3>
+                    </div>
+                  </div>
+                  <div class="schema-sheet-list">
+                    <button
+                      v-for="sheet in sheets"
+                      :key="sheet.sheet_id"
+                      type="button"
+                      :class="{ active: sheet.sheet_id === selectedSheetId }"
+                      @click="runInteraction(() => selectSheet(sheet))"
+                    >
+                      <strong>{{ sheet.sheet_code }} {{ sheet.sheet_name }}</strong>
+                      <span>{{ sheet.row_count }} rows / {{ sheet.column_count }} columns</span>
+                    </button>
+                    <div v-if="sheets.length === 0" class="file-empty-panel">
+                      No sheets available.
+                    </div>
+                  </div>
+                </article>
+
+                <article class="schema-column-card">
+                  <div class="schema-card-head">
+                    <div>
+                      <AppIcon name="table_rows" />
+                      <h3>{{ selectedSheet?.sheet_name ?? 'Columns' }}</h3>
+                    </div>
+                  </div>
+                  <div class="schema-column-list">
+                    <div v-for="column in schemaColumns" :key="column.key" class="schema-column-row">
+                      <strong>{{ column.label }}</strong>
+                      <span>{{ column.sourceName }}</span>
+                      <em>{{ column.type }}</em>
+                      <small>{{ column.sample }}</small>
+                    </div>
+                    <div v-if="schemaColumns.length === 0" class="file-empty-panel">
+                      Select a sheet to inspect columns.
+                    </div>
+                  </div>
+                </article>
+              </section>
+            </div>
+          </section>
+        </div>
+        <button
+          type="button"
+          class="file-chat-fab"
+          aria-label="Open chat"
+          @click="setActiveView('chat')"
+        >
+          <AppIcon name="chat_bubble" />
+        </button>
+      </section>
+
+      <section v-else class="analysis-page">
+        <aside class="chat-session-rail">
+          <div class="chat-rail-brand">
+            <div class="rail-logo">EA</div>
+            <div>
+              <h3>ExcelAI</h3>
+              <p>Data Analyst Pro</p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            class="new-chat-button"
+            :disabled="isChatSessionLoading"
+            @click="startNewChatSession"
+          >
+            <span>+</span>
+            <strong>New Chat</strong>
+          </button>
+
+          <div class="session-section-head">
+            <span>Recent</span>
+            <button type="button" :disabled="isChatSessionLoading" @click="loadChatSessions()">
               Refresh
             </button>
           </div>
 
-          <div class="table-wrap">
-            <table class="file-table">
-              <thead>
-                <tr>
-                  <th>File Name</th>
-                  <th>Type</th>
-                  <th>Active Version</th>
-                  <th>Updated</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="file in filteredFiles"
-                  :key="file.file_id"
-                  class="file-row"
-                  :class="{ selected: file.file_id === selectedFileId }"
-                  @click="chooseFile(file)"
+          <div class="chat-session-list">
+            <article
+              v-for="session in chatSessions"
+              :key="session.session_id"
+              role="button"
+              tabindex="0"
+              class="chat-session-item"
+              :class="{
+                active: session.session_id === activeChatSessionId,
+                pinned: Boolean(session.pinned_at),
+              }"
+              @click="selectChatSession(session)"
+              @keydown.enter.prevent="selectChatSession(session)"
+              @keydown.space.prevent="selectChatSession(session)"
+            >
+              <span class="session-glyph">{{ session.pinned_at ? 'P' : 'C' }}</span>
+              <span class="session-copy">
+                <strong>{{ session.title }}</strong>
+                <small>{{ formatDate(session.updated_at) }}</small>
+              </span>
+              <span class="session-actions" @click.stop>
+                <button
+                  type="button"
+                  class="menu-trigger compact"
+                  :aria-expanded="openChatSessionActionMenuId === session.session_id"
+                  aria-label="Session actions"
+                  @click="toggleChatSessionActionMenu(session.session_id)"
                 >
-                  <td>
-                    <div class="file-name-cell">
-                      <span class="file-badge">XL</span>
-                      <strong>{{ file.display_name }}</strong>
-                    </div>
-                  </td>
-                  <td>{{ fileTypeLabel(file) }}</td>
-                  <td class="mono">{{ shortId(file.active_version_id) }}</td>
-                  <td>{{ formatDate(file.updated_at) }}</td>
-                  <td>
-                    <span class="status-pill" :class="fileStatusLabel(file)">
-                      {{ fileStatusLabel(file) }}
-                    </span>
-                  </td>
-                  <td class="row-actions">
-                    <button type="button" class="icon-text-button" @click.stop="chooseFile(file, 'chat')">
-                      Open
-                    </button>
-                    <button type="button" class="icon-text-button danger-text" @click.stop="requestDeleteFile(file)">
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-                <tr v-if="filteredFiles.length === 0">
-                  <td colspan="6" class="empty-cell">No matching workbooks.</td>
-                </tr>
-              </tbody>
-            </table>
+                  ...
+                </button>
+              </span>
+              <span
+                v-if="openChatSessionActionMenuId === session.session_id"
+                class="item-action-menu session-action-menu"
+                @click.stop
+              >
+                <button type="button" @click="selectChatSession(session)">Open</button>
+                <button type="button" @click="toggleChatSessionPin(session)">
+                  {{ session.pinned_at ? 'Unpin' : 'Pin' }}
+                </button>
+                <button type="button" @click="renameChatSessionPrompt(session)">Rename</button>
+                <button type="button" class="danger-text" @click="removeChatSession(session)">Delete</button>
+              </span>
+            </article>
+
+            <div v-if="chatSessions.length === 0" class="session-empty-state">
+              No chat sessions yet.
+            </div>
           </div>
-        </section>
 
-        <section class="file-detail-grid">
-          <article class="workbook-overview">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Selected Workbook</p>
-                <h3>{{ selectedFile?.display_name ?? 'No workbook selected' }}</h3>
-              </div>
-              <button
-                type="button"
-                class="secondary-button"
-                :disabled="!selectedFile"
-                @click="activeView = 'chat'"
-              >
-                Analyze
-              </button>
-            </div>
+          <p v-if="chatSessionError" class="error-note session-error">{{ chatSessionError }}</p>
 
-            <div v-if="availableLlmProviders.length > 0" class="model-config-card">
-              <div class="panel-heading">
-                <div>
-                  <p class="eyebrow">LLM Settings</p>
-                  <h3>Stage Providers</h3>
-                </div>
-              </div>
-              <div class="model-config-grid">
-                <div class="model-stage-control">
-                  <label>
-                    <span>Summary Provider</span>
-                    <select v-model="summaryProvider" @change="ensureStageModel('summary')">
-                      <option
-                        v-for="provider in availableLlmProviders"
-                        :key="`summary-provider-${provider.provider}`"
-                        :value="provider.provider"
-                      >
-                        {{ provider.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Summary Model</span>
-                    <select v-model="summaryModel">
-                      <option v-for="model in modelsForProvider(summaryProvider)" :key="`summary-${model}`" :value="model">
-                        {{ model }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                <div class="model-stage-control">
-                  <label>
-                    <span>Router Provider</span>
-                    <select v-model="routerProvider" @change="ensureStageModel('router')">
-                      <option
-                        v-for="provider in availableLlmProviders"
-                        :key="`router-provider-${provider.provider}`"
-                        :value="provider.provider"
-                      >
-                        {{ provider.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Router Model</span>
-                    <select v-model="routerModel">
-                      <option v-for="model in modelsForProvider(routerProvider)" :key="`router-${model}`" :value="model">
-                        {{ model }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                <div class="model-stage-control">
-                  <label>
-                    <span>Answer Provider</span>
-                    <select v-model="answerProvider" @change="ensureStageModel('answer')">
-                      <option
-                        v-for="provider in availableLlmProviders"
-                        :key="`answer-provider-${provider.provider}`"
-                        :value="provider.provider"
-                      >
-                        {{ provider.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Answer Model</span>
-                    <select v-model="answerModel">
-                      <option v-for="model in modelsForProvider(answerProvider)" :key="`answer-${model}`" :value="model">
-                        {{ model }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-              </div>
-            </div>
+          <div class="rail-system-links">
+            <button type="button" @click="setActiveView('files')">Files</button>
+            <button type="button" disabled>History</button>
+            <button type="button" disabled>Settings</button>
+          </div>
+        </aside>
 
-            <div class="metric-grid">
-              <div>
-                <span>Versions</span>
-                <strong>{{ versions.length }}</strong>
-              </div>
-              <div>
-                <span>Sheets</span>
-                <strong>{{ sheets.length }}</strong>
-              </div>
-              <div>
-                <span>Rows</span>
-                <strong>{{ workbookRowCount }}</strong>
-              </div>
-              <div>
-                <span>Active</span>
-                <strong>{{ activeVersion?.status ?? '-' }}</strong>
-              </div>
-            </div>
-
-            <div class="form-grid compact">
-              <label>
-                <span>Version</span>
-                <select v-model="selectedVersionId" :disabled="versions.length === 0" @change="selectCurrentVersion">
-                  <option value="">Select version</option>
-                  <option v-for="version in versions" :key="version.version_id" :value="version.version_id">
-                    {{ version.status }} - {{ formatDate(version.created_at) }}
-                  </option>
-                </select>
-              </label>
-              <label>
-                <span>Sheet</span>
-                <select v-model="selectedSheetId" :disabled="sheets.length === 0" @change="selectCurrentSheet">
-                  <option value="">Select sheet</option>
-                  <option v-for="sheet in sheets" :key="sheet.sheet_id" :value="sheet.sheet_id">
-                    {{ sheet.sheet_code }} {{ sheet.sheet_name }}
-                  </option>
-                </select>
-              </label>
-            </div>
-          </article>
-
-          <article class="document-summary-card">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">Document Description</p>
-                <h3>{{ documentSummary?.business_domain || 'Model-generated profile' }}</h3>
-              </div>
-              <button
-                type="button"
-                class="primary-action"
-                :disabled="isSummaryLoading || !selectedVersionId"
-                @click="generateSummaryForSelectedVersion"
-              >
-                {{ isSummaryLoading ? 'Generating...' : 'Generate' }}
-              </button>
-            </div>
-
-            <p v-if="documentSummary" class="summary-text">{{ documentSummary.summary_text }}</p>
-            <p v-else class="empty-copy">No document description yet.</p>
-
-            <div v-if="documentSummary" class="topic-list">
-              <span v-for="topic in documentSummary.key_topics" :key="topic">{{ topic }}</span>
-            </div>
-          </article>
-        </section>
-      </section>
-
-      <section v-else class="analysis-page">
         <section class="sheet-stage">
           <div class="sheet-toolbar">
             <div>
@@ -1140,15 +1804,99 @@ function toErrorMessage(error: unknown): string {
           </section>
 
           <ChatPanel
+            :session-id="activeChatSessionId"
+            :session-title="activeChatSession?.title ?? ''"
             :router-provider="routerProvider || null"
             :router-model="routerModel || null"
             :answer-provider="answerProvider || null"
             :answer-model="answerModel || null"
             @answer-received="handleChatAnswer"
             @select-citation="handleCitationSelected"
+            @session-created="handleChatSessionCreated"
+            @session-title-suggested="handleChatSessionTitleSuggested"
           />
         </aside>
       </section>
+    </section>
+
+    <div v-if="toastMessage" class="app-toast" role="status">
+      {{ toastMessage }}
+    </div>
+
+    <section
+      v-if="renameDialog"
+      class="dialog-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="rename-dialog-title"
+      @keydown.esc="cancelDialog"
+    >
+      <form class="app-dialog" @submit.prevent="submitRenameDialog">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">{{ renameDialog.kind === 'file' ? 'Workbook' : 'Chat Session' }}</p>
+            <h3 id="rename-dialog-title">Rename</h3>
+          </div>
+          <button type="button" class="dialog-icon-button" aria-label="Close" @click="cancelDialog">
+            <AppIcon name="close" />
+          </button>
+        </div>
+        <label class="dialog-field">
+          <span>Name</span>
+          <input v-model="renameDraft" type="text" autocomplete="off" />
+        </label>
+        <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
+        <div class="dialog-actions">
+          <button type="button" class="dialog-secondary" @click="cancelDialog">Cancel</button>
+          <button type="submit" class="dialog-primary" :disabled="isBusy || isChatSessionLoading">
+            Save
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <section
+      v-if="confirmDialog"
+      class="dialog-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-dialog-title"
+      @keydown.esc="cancelDialog"
+    >
+      <div class="app-dialog">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">{{ confirmDialog.kind === 'file' ? 'Workbook' : 'Chat Session' }}</p>
+            <h3 id="confirm-dialog-title">Delete</h3>
+          </div>
+          <button type="button" class="dialog-icon-button" aria-label="Close" @click="cancelDialog">
+            <AppIcon name="close" />
+          </button>
+        </div>
+        <p class="dialog-copy">
+          {{
+            confirmDialog.kind === 'file'
+              ? `Delete "${confirmDialog.file.display_name}" and all related versions, artifacts, summaries, and chat attachments?`
+              : `Delete "${confirmDialog.session.title}"?`
+          }}
+        </p>
+        <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
+        <div class="dialog-actions">
+          <button type="button" class="dialog-secondary" @click="cancelDialog">Cancel</button>
+          <button
+            type="button"
+            class="dialog-danger"
+            :disabled="isBusy || isChatSessionLoading"
+            @click="
+              confirmDialog.kind === 'file'
+                ? confirmDeleteFile()
+                : confirmDeleteChatSession(confirmDialog.session)
+            "
+          >
+            Delete
+          </button>
+        </div>
+      </div>
     </section>
   </main>
 </template>

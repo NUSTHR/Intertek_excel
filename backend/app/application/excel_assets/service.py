@@ -129,6 +129,25 @@ class ExcelAssetService:
     def get_file(self, file_id: str) -> ExcelFile:
         return self._require_file(file_id)
 
+    def rename_file(self, file_id: str, display_name: str) -> ExcelFile:
+        file = self._require_file(file_id)
+        normalized_name = self._normalize_display_name(display_name)
+        existing_file = self._repository.find_file_by_display_name(normalized_name)
+        if existing_file is not None and existing_file.file_id != file.file_id:
+            raise FileNameConflictError(
+                display_name=normalized_name,
+                file_id=existing_file.file_id,
+            )
+
+        updated_file = self._repository.update_file_display_name(
+            file_id=file.file_id,
+            display_name=normalized_name,
+            updated_at=utc_now_iso(),
+        )
+        if updated_file is None:
+            raise AssetNotFoundError("Excel file was not found")
+        return updated_file
+
     def delete_file(
         self,
         file_id: str,

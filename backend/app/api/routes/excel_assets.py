@@ -16,6 +16,7 @@ from app.api.schemas import (
     ListExcelFilesResponse,
     ListExcelSheetsResponse,
     ListExcelVersionsResponse,
+    RenameExcelFileRequest,
     RowLookupResponse,
     RowMappingResponse,
     SheetPreviewResponse,
@@ -96,6 +97,15 @@ def get_excel_file(
     service: ExcelAssetServiceDependency,
 ) -> ExcelFileResponse:
     return _to_file_response(service.get_file(file_id))
+
+
+@router.patch("/files/{file_id}", response_model=ExcelFileResponse)
+def rename_excel_file(
+    file_id: str,
+    request: RenameExcelFileRequest,
+    service: ExcelAssetServiceDependency,
+) -> ExcelFileResponse:
+    return _to_file_response(service.rename_file(file_id, request.display_name))
 
 
 @router.delete("/files/{file_id}", response_model=DeleteExcelFileResponse)

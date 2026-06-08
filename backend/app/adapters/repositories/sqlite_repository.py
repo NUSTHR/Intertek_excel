@@ -1,7 +1,10 @@
+import hashlib
 import json
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
+from app.core.time import utc_now_iso
 from app.domain.models import (
     AttachedDocument,
     ChatSession,
@@ -19,6 +22,177 @@ from app.domain.models import (
 )
 
 
+@dataclass(frozen=True)
+class SchemaMigration:
+    version: int
+    name: str
+    statements: tuple[str, ...]
+
+
+SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
+    SchemaMigration(
+        version=1,
+        name="initial_excel_workspace_schema",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS excel_files (
+              file_id TEXT PRIMARY KEY,
+              display_name TEXT NOT NULL UNIQUE,
+              active_version_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS excel_file_versions (
+              version_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              original_filename TEXT NOT NULL,
+              file_hash TEXT NOT NULL,
+              status TEXT NOT NULL,
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              activated_at TEXT,
+              FOREIGN KEY(file_id) REFERENCES excel_files(file_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS excel_sheets (
+              sheet_id TEXT PRIMARY KEY,
+              version_id TEXT NOT NULL,
+              sheet_index INTEGER NOT NULL,
+              sheet_code TEXT NOT NULL,
+              sheet_name TEXT NOT NULL,
+              row_count INTEGER NOT NULL,
+              column_count INTEGER NOT NULL,
+              raw_csv_path TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS excel_artifacts (
+              artifact_id TEXT PRIMARY KEY,
+              version_id TEXT NOT NULL,
+              artifact_type TEXT NOT NULL,
+              path TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS excel_row_mappings (
+              mapping_id TEXT PRIMARY KEY,
+              version_id TEXT NOT NULL,
+              sheet_id TEXT NOT NULL,
+              row_id TEXT NOT NULL,
+              original_row_number INTEGER NOT NULL,
+              raw_csv_row_number INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id),
+              FOREIGN KEY(sheet_id) REFERENCES excel_sheets(sheet_id),
+              UNIQUE(sheet_id, row_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS document_summaries (
+              summary_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              version_id TEXT NOT NULL UNIQUE,
+              summary_text TEXT NOT NULL,
+              business_domain TEXT NOT NULL,
+              key_topics_json TEXT NOT NULL,
+              suitable_questions_json TEXT NOT NULL,
+              unsuitable_questions_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS document_sheet_summaries (
+              summary_id TEXT NOT NULL,
+              sheet_id TEXT NOT NULL,
+              sheet_name TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              important_columns_json TEXT NOT NULL,
+              likely_question_types_json TEXT NOT NULL,
+              PRIMARY KEY(summary_id, sheet_id),
+              FOREIGN KEY(summary_id) REFERENCES document_summaries(summary_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+              session_id TEXT PRIMARY KEY,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              status TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_session_documents (
+              session_id TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              version_id TEXT NOT NULL,
+              attached_at TEXT NOT NULL,
+              row_count INTEGER NOT NULL,
+              context_hash TEXT NOT NULL,
+              status TEXT NOT NULL,
+              PRIMARY KEY(session_id, version_id),
+              FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id),
+              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_turns (
+              turn_id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              question TEXT NOT NULL,
+              answer_text TEXT NOT NULL,
+              citation_ids_json TEXT NOT NULL,
+              selected_documents_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_versions_file_id
+              ON excel_file_versions(file_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_sheets_version_id
+              ON excel_sheets(version_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_mappings_sheet_row
+              ON excel_row_mappings(sheet_id, row_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_sheet_summaries_summary_id
+              ON document_sheet_summaries(summary_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_turns_session_id
+              ON chat_turns(session_id, created_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=2,
+        name="add_chat_session_metadata",
+        statements=(
+            """
+            ALTER TABLE chat_sessions
+            ADD COLUMN title TEXT NOT NULL DEFAULT 'New chat'
+            """,
+            """
+            ALTER TABLE chat_sessions
+            ADD COLUMN pinned_at TEXT
+            """,
+        ),
+    ),
+)
+
+
 class SQLiteExcelAssetRepository:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
@@ -26,132 +200,72 @@ class SQLiteExcelAssetRepository:
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.executescript(
-                """
-                PRAGMA foreign_keys = ON;
+            self._ensure_migration_table(connection)
+            self._apply_migrations(connection)
 
-                CREATE TABLE IF NOT EXISTS excel_files (
-                  file_id TEXT PRIMARY KEY,
-                  display_name TEXT NOT NULL UNIQUE,
-                  active_version_id TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS excel_file_versions (
-                  version_id TEXT PRIMARY KEY,
-                  file_id TEXT NOT NULL,
-                  original_filename TEXT NOT NULL,
-                  file_hash TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  error_message TEXT,
-                  created_at TEXT NOT NULL,
-                  activated_at TEXT,
-                  FOREIGN KEY(file_id) REFERENCES excel_files(file_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS excel_sheets (
-                  sheet_id TEXT PRIMARY KEY,
-                  version_id TEXT NOT NULL,
-                  sheet_index INTEGER NOT NULL,
-                  sheet_code TEXT NOT NULL,
-                  sheet_name TEXT NOT NULL,
-                  row_count INTEGER NOT NULL,
-                  column_count INTEGER NOT NULL,
-                  raw_csv_path TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS excel_artifacts (
-                  artifact_id TEXT PRIMARY KEY,
-                  version_id TEXT NOT NULL,
-                  artifact_type TEXT NOT NULL,
-                  path TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS excel_row_mappings (
-                  mapping_id TEXT PRIMARY KEY,
-                  version_id TEXT NOT NULL,
-                  sheet_id TEXT NOT NULL,
-                  row_id TEXT NOT NULL,
-                  original_row_number INTEGER NOT NULL,
-                  raw_csv_row_number INTEGER NOT NULL,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id),
-                  FOREIGN KEY(sheet_id) REFERENCES excel_sheets(sheet_id),
-                  UNIQUE(sheet_id, row_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS document_summaries (
-                  summary_id TEXT PRIMARY KEY,
-                  file_id TEXT NOT NULL,
-                  version_id TEXT NOT NULL UNIQUE,
-                  summary_text TEXT NOT NULL,
-                  business_domain TEXT NOT NULL,
-                  key_topics_json TEXT NOT NULL,
-                  suitable_questions_json TEXT NOT NULL,
-                  unsuitable_questions_json TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS document_sheet_summaries (
-                  summary_id TEXT NOT NULL,
-                  sheet_id TEXT NOT NULL,
-                  sheet_name TEXT NOT NULL,
-                  summary TEXT NOT NULL,
-                  important_columns_json TEXT NOT NULL,
-                  likely_question_types_json TEXT NOT NULL,
-                  PRIMARY KEY(summary_id, sheet_id),
-                  FOREIGN KEY(summary_id) REFERENCES document_summaries(summary_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS chat_sessions (
-                  session_id TEXT PRIMARY KEY,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  status TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS chat_session_documents (
-                  session_id TEXT NOT NULL,
-                  file_id TEXT NOT NULL,
-                  version_id TEXT NOT NULL,
-                  attached_at TEXT NOT NULL,
-                  row_count INTEGER NOT NULL,
-                  context_hash TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  PRIMARY KEY(session_id, version_id),
-                  FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id),
-                  FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS chat_turns (
-                  turn_id TEXT PRIMARY KEY,
-                  session_id TEXT NOT NULL,
-                  question TEXT NOT NULL,
-                  answer_text TEXT NOT NULL,
-                  citation_ids_json TEXT NOT NULL,
-                  selected_documents_json TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_versions_file_id
-                  ON excel_file_versions(file_id);
-                CREATE INDEX IF NOT EXISTS idx_sheets_version_id
-                  ON excel_sheets(version_id);
-                CREATE INDEX IF NOT EXISTS idx_mappings_sheet_row
-                  ON excel_row_mappings(sheet_id, row_id);
-                CREATE INDEX IF NOT EXISTS idx_sheet_summaries_summary_id
-                  ON document_sheet_summaries(summary_id);
-                CREATE INDEX IF NOT EXISTS idx_chat_turns_session_id
-                  ON chat_turns(session_id, created_at);
-                """
+    def _ensure_migration_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              version INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              checksum TEXT NOT NULL,
+              applied_at TEXT NOT NULL
             )
+            """
+        )
+
+    def _apply_migrations(self, connection: sqlite3.Connection) -> None:
+        applied = self._applied_migrations(connection)
+        known_versions = {migration.version for migration in SCHEMA_MIGRATIONS}
+        unknown_versions = sorted(set(applied) - known_versions)
+        if unknown_versions:
+            raise RuntimeError(
+                "database contains unknown schema migration version(s): "
+                f"{unknown_versions}"
+            )
+        for migration in sorted(SCHEMA_MIGRATIONS, key=lambda item: item.version):
+            checksum = self._migration_checksum(migration)
+            applied_checksum = applied.get(migration.version)
+            if applied_checksum is not None:
+                if applied_checksum != checksum:
+                    raise RuntimeError(
+                        "schema migration checksum mismatch "
+                        f"for version {migration.version}"
+                    )
+                continue
+
+            for statement in migration.statements:
+                connection.execute(statement)
+            connection.execute(
+                """
+                INSERT INTO schema_migrations
+                  (version, name, checksum, applied_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    migration.version,
+                    migration.name,
+                    checksum,
+                    utc_now_iso(),
+                ),
+            )
+
+    def _applied_migrations(self, connection: sqlite3.Connection) -> dict[int, str]:
+        rows = connection.execute(
+            "SELECT version, checksum FROM schema_migrations ORDER BY version ASC"
+        ).fetchall()
+        return {int(row["version"]): str(row["checksum"]) for row in rows}
+
+    def _migration_checksum(self, migration: SchemaMigration) -> str:
+        payload = "\n".join(
+            [
+                str(migration.version),
+                migration.name,
+                *[statement.strip() for statement in migration.statements],
+            ]
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def create_file(self, file: ExcelFile) -> None:
         with self._connect() as connection:
@@ -192,6 +306,29 @@ class SQLiteExcelAssetRepository:
                 "SELECT * FROM excel_files ORDER BY updated_at DESC, display_name ASC"
             ).fetchall()
         return [file for row in rows if (file := self._to_file(row)) is not None]
+
+    def update_file_display_name(
+        self,
+        file_id: str,
+        display_name: str,
+        updated_at: str,
+    ) -> ExcelFile | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_files
+                SET display_name = ?, updated_at = ?
+                WHERE file_id = ?
+                """,
+                (display_name, updated_at, file_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM excel_files WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+        return self._to_file(row)
 
     def delete_file(self, file_id: str) -> dict[str, int]:
         with self._connect() as connection:
@@ -649,16 +786,32 @@ class SQLiteExcelAssetRepository:
             connection.execute(
                 """
                 INSERT OR IGNORE INTO chat_sessions
-                  (session_id, created_at, updated_at, status)
-                VALUES (?, ?, ?, ?)
+                  (session_id, created_at, updated_at, title, pinned_at, status)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.session_id,
                     session.created_at,
                     session.updated_at,
+                    session.title,
+                    session.pinned_at,
                     session.status,
                 ),
             )
+
+    def list_sessions(self) -> list[ChatSession]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chat_sessions
+                WHERE status = 'active'
+                ORDER BY
+                  CASE WHEN pinned_at IS NULL THEN 1 ELSE 0 END ASC,
+                  pinned_at DESC,
+                  updated_at DESC
+                """,
+            ).fetchall()
+        return [session for row in rows if (session := self._to_session(row)) is not None]
 
     def get_session(self, session_id: str) -> ChatSession | None:
         with self._connect() as connection:
@@ -678,6 +831,68 @@ class SQLiteExcelAssetRepository:
                 """,
                 (updated_at, session_id),
             )
+
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        updated_at: str,
+    ) -> ChatSession | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE chat_sessions
+                SET title = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (title, updated_at, session_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM chat_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return self._to_session(row)
+
+    def set_session_pinned(
+        self,
+        session_id: str,
+        pinned_at: str | None,
+        updated_at: str,
+    ) -> ChatSession | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE chat_sessions
+                SET pinned_at = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (pinned_at, updated_at, session_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM chat_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return self._to_session(row)
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM chat_turns WHERE session_id = ?",
+                (session_id,),
+            )
+            connection.execute(
+                "DELETE FROM chat_session_documents WHERE session_id = ?",
+                (session_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM chat_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+        return cursor.rowcount > 0
 
     def attach_document(self, document: AttachedDocument) -> None:
         with self._connect() as connection:
@@ -865,10 +1080,13 @@ class SQLiteExcelAssetRepository:
     def _to_session(self, row: sqlite3.Row | None) -> ChatSession | None:
         if row is None:
             return None
+        columns = set(row.keys())
         return ChatSession(
             session_id=str(row["session_id"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            title=str(row["title"]) if "title" in columns else "New chat",
+            pinned_at=row["pinned_at"] if "pinned_at" in columns else None,
             status=str(row["status"]),
         )
 
