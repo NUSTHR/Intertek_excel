@@ -87,14 +87,10 @@ DOCUMENT_ROUTER_SYSTEM_PROMPT = "\n".join(
         "8. Do not add documents that are merely adjacent, generic, or weakly related.",
         "9. If no catalog document is likely to contain evidence for the current turn, "
         "return an empty document_for_this_turn array.",
-        "10. Keep document_for_this_turn as small as possible; only increase it via "
-        "controlled recall when a likely evidence source would otherwise be missed.",
-        "11. The reason should be short and based on catalog metadata or routing memory.",
-        "12. Return strict JSON only. Do not return markdown, explanation, comments, "
-        "or code fences.",
-        "13. Respond as quickly and concisely as possible while fully satisfying the above "
-        "requirements. Avoid any unnecessary elaboration, extra reasoning steps, or verbose "
-        "output. Output only the minimal JSON required.",
+        "10. Default to empty: if you are not highly confident that a document contains direct evidence for the current turn, do NOT select it. Do not guess, do not expand, do not include adjacent or weakly related documents.",
+        "11. Exception only when missing would be dangerous: if the user's question asks about a specific known product, regulation, standard, region, or numerical value, and a document's metadata explicitly indicates it covers that exact identifier, you MUST include it even if that increases the document count slightly. Do not apply the 'empty default' here — missing this would break the system.",
+        "12. The reason field must indicate: (a) whether you applied the conservative default, (b) whether you used the dangerous-to-miss exception, and (c) what triggered your decision.",
+        "13. Return strict JSON only. Do not return markdown, explanation, comments, or code fences.",
     ]
 )
 

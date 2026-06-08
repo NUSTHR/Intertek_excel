@@ -123,6 +123,32 @@ const previewHeaders = computed(() => {
   )
 })
 
+const excelDataColumnCount = computed(() => {
+  const widestDataRow = preview.value?.rows.reduce(
+    (width, row) => Math.max(width, Math.max(0, row.length - 1)),
+    0,
+  ) ?? 0
+  return Math.max(6, widestDataRow, Math.max(0, previewHeaders.value.length - 1))
+})
+
+const excelColumnLabels = computed(() => {
+  return Array.from({ length: excelDataColumnCount.value }, (_value, index) =>
+    columnLabel(index + 1),
+  )
+})
+
+const excelDisplayRows = computed(() => {
+  return preview.value?.rows ?? []
+})
+
+const excelFillerRowCount = computed(() => {
+  return Math.max(0, 25 - excelDisplayRows.value.length)
+})
+
+const selectedFileDisplayName = computed(() => {
+  return selectedFile.value?.display_name ?? 'No workbook selected'
+})
+
 const workbookRowCount = computed(() => {
   return sheets.value.reduce((total, sheet) => total + sheet.row_count, 0)
 })
@@ -161,6 +187,18 @@ const previewRangeLabel = computed(() => {
 
 const documentTitleMap = computed<Record<string, string>>(() => {
   return Object.fromEntries(files.value.map((file) => [file.file_id, file.display_name]))
+})
+
+const activeDocumentForChat = computed<SelectedDocument | null>(() => {
+  if (!selectedFileId.value || !selectedVersionId.value) {
+    return null
+  }
+  return {
+    file_id: selectedFileId.value,
+    version_id: selectedVersionId.value,
+    reason: 'Current workbook',
+    confidence: null,
+  }
 })
 
 const visibleSummaryTopics = computed(() => {
@@ -1595,9 +1633,11 @@ function toErrorMessage(error: unknown): string {
       </section>
 
       <section v-else class="analysis-page">
-        <aside class="chat-session-rail">
+        <aside class="chat-session-rail excelai-side-nav">
           <div class="chat-rail-brand">
-            <div class="rail-logo">EA</div>
+            <div class="rail-logo">
+              <AppIcon name="analytics" />
+            </div>
             <div>
               <h3>ExcelAI</h3>
               <p>Data Analyst Pro</p>
@@ -1610,15 +1650,12 @@ function toErrorMessage(error: unknown): string {
             :disabled="isChatSessionLoading"
             @click="startNewChatSession"
           >
-            <span>+</span>
+            <AppIcon name="add" />
             <strong>New Chat</strong>
           </button>
 
           <div class="session-section-head">
             <span>Recent</span>
-            <button type="button" :disabled="isChatSessionLoading" @click="loadChatSessions()">
-              Refresh
-            </button>
           </div>
 
           <div class="chat-session-list">
@@ -1636,10 +1673,11 @@ function toErrorMessage(error: unknown): string {
               @keydown.enter.prevent="selectChatSession(session)"
               @keydown.space.prevent="selectChatSession(session)"
             >
-              <span class="session-glyph">{{ session.pinned_at ? 'P' : 'C' }}</span>
+              <span class="session-glyph">
+                <AppIcon name="chat_bubble" />
+              </span>
               <span class="session-copy">
                 <strong>{{ session.title }}</strong>
-                <small>{{ formatDate(session.updated_at) }}</small>
               </span>
               <span class="session-actions" @click.stop>
                 <button
@@ -1649,7 +1687,7 @@ function toErrorMessage(error: unknown): string {
                   aria-label="Session actions"
                   @click="toggleChatSessionActionMenu(session.session_id)"
                 >
-                  ...
+                  <AppIcon name="more_vert" />
                 </button>
               </span>
               <span
@@ -1674,136 +1712,118 @@ function toErrorMessage(error: unknown): string {
           <p v-if="chatSessionError" class="error-note session-error">{{ chatSessionError }}</p>
 
           <div class="rail-system-links">
-            <button type="button" @click="setActiveView('files')">Files</button>
-            <button type="button" disabled>History</button>
-            <button type="button" disabled>Settings</button>
+            <button type="button" disabled>
+              <AppIcon name="history" />
+              <span>History</span>
+            </button>
+            <button type="button" @click="setActiveView('files')">
+              <AppIcon name="folder_open" />
+              <span>Files</span>
+            </button>
+            <button type="button" disabled>
+              <AppIcon name="settings" />
+              <span>Settings</span>
+            </button>
+          </div>
+
+          <div class="chat-rail-user">
+            <img
+              alt="User profile"
+              src="https://lh3.googleusercontent.com/aida-public/AB6AXuCydg9xLa1V1jLmz2zCEqipeHRQX6jNRFmnvrbvDd1087ZqFBiMN2m1WqUS7eiTRlcTPGlA-AXESHcNu2x3iBZc1wI_ehf6OJReBuSe9QPBEE4Ii9Cdz6LPcEYHIrJzk4ZitvvROTavnO5XvMCyCvOpEs_GCfqkaNMjx-5vMQXTyOjMIJAvAdoxzX-SvCHKsmXA7ciOdVwuZEtN2TGlzfvKAbf3QZnikct32nv9K3teVaruCd7nFPTVaEgfdt0PJa0sKECq8RA0JBRw"
+            />
+            <div>
+              <strong>Alex Rivera</strong>
+              <span>Pro Tier</span>
+            </div>
           </div>
         </aside>
 
         <section class="sheet-stage">
-          <div class="sheet-toolbar">
-            <div>
-              <p class="eyebrow">Spreadsheet Preview</p>
-              <h3>{{ selectedFile?.display_name ?? 'No workbook selected' }}</h3>
+          <header class="sheet-topbar">
+            <div class="sheet-search-field">
+              <AppIcon name="search" />
+              <input
+                v-model="searchTerm"
+                type="search"
+                placeholder="Search data..."
+              />
             </div>
-            <div class="sheet-controls">
-              <label>
-                <span>Version</span>
-                <select v-model="selectedVersionId" :disabled="versions.length === 0" @change="selectCurrentVersion">
-                  <option value="">Version</option>
-                  <option v-for="version in versions" :key="version.version_id" :value="version.version_id">
-                    {{ version.status }} - {{ shortId(version.version_id) }}
-                  </option>
-                </select>
-              </label>
-              <label>
-                <span>Sheet</span>
-                <select v-model="selectedSheetId" :disabled="sheets.length === 0" @change="selectCurrentSheet">
-                  <option value="">Sheet</option>
-                  <option v-for="sheet in sheets" :key="sheet.sheet_id" :value="sheet.sheet_id">
-                    {{ sheet.sheet_code }} {{ sheet.sheet_name }}
-                  </option>
-                </select>
-              </label>
-              <label class="row-jump">
-                <span>Row ID</span>
-                <div class="inline-control">
-                  <input v-model="lookupRowId" placeholder="S001_R25" type="text" @keydown.enter="lookupRow" />
-                  <button type="button" :disabled="isLookupLoading" @click="lookupRow">
-                    Find
-                  </button>
+            <div class="sheet-topbar-actions">
+              <button type="button" aria-label="Notifications">
+                <AppIcon name="notifications" />
+              </button>
+            </div>
+          </header>
+
+          <div class="excel-grid-shell custom-scrollbar">
+            <div
+              class="excel-grid-card"
+              :style="{ '--excel-column-count': excelDataColumnCount }"
+            >
+              <div class="excel-grid-header-row">
+                <div class="excel-grid-corner">
+                  <AppIcon name="grid_view" />
                 </div>
-              </label>
-            </div>
-          </div>
-
-          <div class="sheet-stats">
-            <div>
-              <span>Sheets</span>
-              <strong>{{ sheets.length }}</strong>
-            </div>
-            <div>
-              <span>Rows</span>
-              <strong>{{ workbookRowCount }}</strong>
-            </div>
-            <div>
-              <span>Visible</span>
-              <strong>{{ previewRangeLabel }}</strong>
-            </div>
-            <div>
-              <span>Highlighted</span>
-              <strong>{{ rowLookup?.mapping.row_id ?? '-' }}</strong>
-            </div>
-          </div>
-
-          <section v-if="rowLookup" class="evidence-strip">
-            <div>
-              <p class="eyebrow">Highlighted Evidence</p>
-              <h3>{{ rowLookup.mapping.row_id }}</h3>
-            </div>
-            <p>
-              {{ rowLookup.sheet.sheet_name }} / original row
-              {{ rowLookup.mapping.original_row_number }}
-            </p>
-          </section>
-
-          <section class="spreadsheet-card">
-            <div class="spreadsheet-header">
-              <div>
-                <strong>{{ selectedSheet?.sheet_name ?? 'Sheet preview' }}</strong>
-                <span>{{ previewRangeLabel }}</span>
+                <div
+                  v-for="label in excelColumnLabels"
+                  :key="`column-${label}`"
+                  class="excel-grid-column-head"
+                >
+                  {{ label }}
+                </div>
               </div>
-              <div class="pagination-actions">
-                <button
-                  type="button"
-                  class="secondary-button"
-                  :disabled="!canPreviewPrevious"
-                  @click="loadPreviewPage((preview?.offset ?? 0) - previewLimit)"
+
+              <div
+                v-for="(row, rowIndex) in excelDisplayRows"
+                :id="rowDomId(row[0])"
+                :key="`${row[0] || rowIndex}-${preview?.offset ?? 0}`"
+                class="excel-grid-row"
+                :class="{
+                  highlighted: rowIsHighlighted(row),
+                  'header-like': (preview?.offset ?? 0) === 0 && rowIndex === 0,
+                }"
+                @click="lookupVisibleRow(row)"
+              >
+                <div class="excel-grid-row-number">{{ (preview?.offset ?? 0) + rowIndex + 1 }}</div>
+                <div
+                  v-for="columnIndex in excelDataColumnCount"
+                  :key="`${row[0] || rowIndex}-${columnIndex}`"
+                  class="excel-grid-cell"
+                  :class="{ 'cell-cited': rowIsHighlighted(row) && columnIndex <= 2 }"
                 >
-                  Previous
-                </button>
-                <button
-                  type="button"
-                  class="secondary-button"
-                  :disabled="!canPreviewNext"
-                  @click="loadPreviewPage((preview?.offset ?? 0) + previewLimit)"
-                >
-                  Next
-                </button>
+                  {{ row[columnIndex] || '' }}
+                  <span v-if="rowIsHighlighted(row) && columnIndex <= 2"></span>
+                </div>
+              </div>
+
+              <div
+                v-for="fillerIndex in excelFillerRowCount"
+                :key="`filler-${fillerIndex}`"
+                class="excel-grid-row filler"
+              >
+                <div class="excel-grid-row-number">
+                  {{ excelDisplayRows.length + fillerIndex }}
+                </div>
+                <div
+                  v-for="columnIndex in excelDataColumnCount"
+                  :key="`filler-${fillerIndex}-${columnIndex}`"
+                  class="excel-grid-cell"
+                ></div>
               </div>
             </div>
 
-            <div v-if="preview" class="excel-scroll">
-              <table class="excel-table">
-                <thead>
-                  <tr>
-                    <th v-for="header in previewHeaders" :key="header">{{ header }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="(row, rowIndex) in preview.rows"
-                    :id="rowDomId(row[0])"
-                    :key="`${row[0]}-${preview.offset}-${rowIndex}`"
-                    :class="{
-                      highlighted: rowIsHighlighted(row),
-                      'header-like': preview.offset === 0 && rowIndex === 0,
-                    }"
-                    @click="lookupVisibleRow(row)"
-                  >
-                    <td v-for="(cell, cellIndex) in row" :key="`${row[0]}-${cellIndex}`">
-                      {{ cell || '-' }}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-else class="empty-state">
+            <div v-if="!preview" class="excel-grid-empty">
               Upload or select a workbook to preview its rows.
             </div>
-          </section>
+          </div>
 
           <div class="sheet-tabs" aria-label="Workbook sheets">
+            <div class="sheet-file-selector">
+              <AppIcon name="description" />
+              <span>{{ selectedFileDisplayName }}</span>
+              <AppIcon name="keyboard_arrow_down" />
+            </div>
+            <div class="sheet-tab-divider"></div>
             <button
               v-for="sheet in sheets"
               :key="sheet.sheet_id"
@@ -1825,6 +1845,7 @@ function toErrorMessage(error: unknown): string {
             :answer-provider="answerProvider || null"
             :answer-model="answerModel || null"
             :document-titles="documentTitleMap"
+            :active-document="activeDocumentForChat"
             @answer-received="handleChatAnswer"
             @select-citation="handleCitationSelected"
             @select-document="openReferencedDocument"

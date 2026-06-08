@@ -6,6 +6,7 @@ import {
   createChatSession,
 } from '../api/chat-api'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
+import AppIcon from './AppIcon.vue'
 
 interface ChatHistoryEntry {
   id: string
@@ -24,6 +25,7 @@ const props = defineProps<{
   sessionId: string
   sessionTitle: string
   documentTitles: Record<string, string>
+  activeDocument: SelectedDocument | null
 }>()
 
 const emit = defineEmits<{
@@ -62,8 +64,15 @@ const activeSourceDocuments = computed<SelectedDocument[]>(() => {
   return latestAnswer.value?.selected_documents ?? []
 })
 
+const dataSourceDocuments = computed<SelectedDocument[]>(() => {
+  if (activeSourceDocuments.value.length > 0) {
+    return activeSourceDocuments.value
+  }
+  return props.activeDocument ? [props.activeDocument] : []
+})
+
 const sourceCountLabel = computed(() => {
-  const count = activeSourceDocuments.value.length
+  const count = dataSourceDocuments.value.length
   return `${count} ${count === 1 ? 'File' : 'Files'}`
 })
 
@@ -238,7 +247,7 @@ function resizeChatInput(): void {
     <header class="chat-panel-head">
       <h3>Chat &amp; Citations</h3>
       <button type="button" class="chat-icon-button" aria-label="Collapse chat panel">
-        <span class="material-symbols-outlined" data-icon="close_fullscreen">close_fullscreen</span>
+        <AppIcon name="close_fullscreen" />
       </button>
     </header>
 
@@ -250,19 +259,19 @@ function resizeChatInput(): void {
             <strong>{{ sourceCountLabel }}</strong>
           </div>
           <button type="button" class="chat-source-menu" aria-label="Data source options">
-            <span class="material-symbols-outlined" data-icon="more_vert">more_vert</span>
+            <AppIcon name="more_vert" />
           </button>
         </div>
         <div class="chat-data-source-list">
           <button
-            v-for="document in activeSourceDocuments"
+            v-for="document in dataSourceDocuments"
             :key="documentKey(document)"
             type="button"
             class="chat-data-source-row"
             @click="selectDocument(document)"
           >
             <span class="chat-source-file-icon">
-              <span class="material-symbols-outlined" data-icon="description">description</span>
+              <AppIcon name="description" />
             </span>
             <span class="chat-source-copy">
               <strong>{{ documentTitle(document) }}</strong>
@@ -271,9 +280,7 @@ function resizeChatInput(): void {
             <span class="chat-source-status" aria-hidden="true">
               <span></span>
             </span>
-            <span class="material-symbols-outlined chat-source-expand" data-icon="expand_more">
-              expand_more
-            </span>
+            <span class="chat-source-expand"><AppIcon name="keyboard_arrow_down" /></span>
           </button>
         </div>
       </section>
@@ -289,7 +296,7 @@ function resizeChatInput(): void {
             <div class="assistant-message-stack">
               <div class="assistant-title">
                 <span class="assistant-bot-icon">
-                  <span class="material-symbols-outlined" data-icon="smart_toy">smart_toy</span>
+                  <AppIcon name="analytics" />
                 </span>
                 <strong>ExcelAI</strong>
               </div>
@@ -333,7 +340,7 @@ function resizeChatInput(): void {
             <div class="assistant-message-stack">
               <div class="assistant-title">
                 <span class="assistant-bot-icon">
-                  <span class="material-symbols-outlined" data-icon="smart_toy">smart_toy</span>
+                  <AppIcon name="analytics" />
                 </span>
                 <strong>ExcelAI</strong>
               </div>
@@ -362,10 +369,10 @@ function resizeChatInput(): void {
         <div class="chat-input-actions">
           <div class="chat-tools">
             <button type="button" class="chat-tool-button" aria-label="Attach file">
-              <span class="material-symbols-outlined" data-icon="attach_file">attach_file</span>
+              <AppIcon name="attach_file" />
             </button>
             <button type="button" class="chat-tool-button" aria-label="Add chart">
-              <span class="material-symbols-outlined" data-icon="add_chart">add_chart</span>
+              <AppIcon name="add_chart" />
             </button>
           </div>
           <button
@@ -374,9 +381,7 @@ function resizeChatInput(): void {
             :disabled="isAsking || !question.trim()"
             aria-label="Send message"
           >
-            <span class="material-symbols-outlined" data-icon="arrow_upward">
-              {{ isAsking ? 'hourglass_empty' : 'arrow_upward' }}
-            </span>
+            <AppIcon :name="isAsking ? 'history' : 'arrow_upward'" />
           </button>
         </div>
       </div>
