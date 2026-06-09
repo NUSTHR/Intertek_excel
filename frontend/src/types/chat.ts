@@ -29,6 +29,7 @@ export interface SelectedDocument {
 
 export interface ExcelCitation {
   citation_id: string
+  evidence_id: string
   file_id: string
   version_id: string
   sheet_id: string

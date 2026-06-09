@@ -465,17 +465,18 @@ class MultiProviderLlmClient:
                         f"Selected documents:\n{documents_json}\n\n"
                         f"Rows:\n{rows_json}\n\n"
                         "Each row object has file_id, version_id, sheet_id, sheet_name, "
-                        "row_id, cells.\n\n"
+                        "row_id, evidence_id, cells.\n\n"
                         "Return JSON in exactly this shape:\n\n"
                         "{\n"
                         '  "answer_blocks": [\n'
                         "    {\n"
                         '      "text": "string",\n'
-                        '      "evidence_row_ids": ["string"]\n'
+                        '      "evidence_ids": ["string"]\n'
                         "    }\n"
                         "  ],\n"
                         '  "citations": [\n'
                         "    {\n"
+                        '      "evidence_id": "string",\n'
                         '      "version_id": "string",\n'
                         '      "sheet_id": "string",\n'
                         '      "row_id": "string",\n'
@@ -486,9 +487,12 @@ class MultiProviderLlmClient:
                         '  "follow_up_suggestions": ["string"]\n'
                         "}\n\n"
                         "Important:\n"
-                        "- evidence_row_ids must contain only row_id values from Rows.\n"
+                        "- evidence_ids must contain only evidence_id values from Rows.\n"
+                        "- Prefer using evidence_id everywhere citations are needed.\n"
                         "- citation version_id, sheet_id, and row_id must match one row "
-                        "object from Rows exactly.\n"
+                        "object from Rows exactly when they are included.\n"
+                        "- If evidence_id is provided in a citation object, it must match "
+                        "one row object from Rows exactly.\n"
                         "- quote should be a short snippet copied or summarized from the "
                         "cited row.\n"
                         "- If no provided row supports an answer, set insufficient_evidence "
@@ -501,20 +505,28 @@ class MultiProviderLlmClient:
             answer_blocks=[
                 DraftAnswerBlock(
                     text=str(block.get("text", "")).strip(),
-                    evidence_row_ids=self._string_list(block.get("evidence_row_ids")),
+                    evidence_ids=self._string_list(
+                        block.get("evidence_ids", block.get("evidence_row_ids"))
+                    ),
                 )
                 for block in self._object_list(payload.get("answer_blocks"))
                 if str(block.get("text", "")).strip()
             ],
             citations=[
                 DraftCitation(
-                    row_id=str(citation.get("row_id", "")).strip(),
+                    evidence_id=str(citation.get("evidence_id", "")).strip(),
                     quote=str(citation.get("quote", "")).strip(),
                     version_id=str(citation.get("version_id", "")).strip(),
                     sheet_id=str(citation.get("sheet_id", "")).strip(),
+                    row_id=str(citation.get("row_id", "")).strip(),
                 )
                 for citation in self._object_list(payload.get("citations"))
-                if str(citation.get("row_id", "")).strip()
+                if any(
+                    [
+                        str(citation.get("evidence_id", "")).strip(),
+                        str(citation.get("row_id", "")).strip(),
+                    ]
+                )
             ],
             insufficient_evidence=bool(payload.get("insufficient_evidence", False)),
             follow_up_suggestions=self._string_list(payload.get("follow_up_suggestions")),

@@ -26,6 +26,7 @@ from app.domain.models import (
     DraftAnswerBlock,
     DraftChatAnswer,
     DraftCitation,
+    ExcelCitation,
     SelectedDocument,
 )
 from app.main import app
@@ -98,6 +99,10 @@ def test_summary_generation_and_chat_framework_flow(
     assert answer["selected_documents"][0]["version_id"] == version_id
     assert answer["answer_blocks"][0]["citation_ids"] == ["C1"]
     assert answer["citations"][0]["citation_id"] == "C1"
+    assert (
+        answer["citations"][0]["evidence_id"]
+        == f"{version_id}::{answer['citations'][0]['sheet_id']}::S001_R1"
+    )
     assert answer["citations"][0]["row_id"] == "S001_R1"
     assert answer["citations"][0]["row"][1:] == ["Code", "Date"]
 
@@ -138,6 +143,7 @@ def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
         assert first_answer["session_id"] == session_id
         assert first_answer["newly_attached_documents"][0]["version_id"] == version_id
         assert first_answer["attached_documents"][0]["row_count"] == 221
+        assert first_answer["citations"][0]["evidence_id"].endswith("::S001_R205")
         assert first_answer["citations"][0]["row_id"] == "S001_R205"
         assert len(llm_client.answer_calls[0]["rows"]) == 221
 
@@ -368,6 +374,129 @@ def test_llm_options_endpoint_and_request_level_models(
         assert llm_client.answer_models == ["deepseek-ai/DeepSeek-V4-Pro"]
 
 
+def test_verifier_uses_evidence_id_to_keep_correct_file() -> None:
+    chat = ChatService(
+        excel_assets=None,  # type: ignore[arg-type]
+        summaries=None,  # type: ignore[arg-type]
+        llm_client=FakeLlmClient(),
+        sessions=None,  # type: ignore[arg-type]
+    )
+    citation_index = {
+        "version_a::sheet_a::S001_R5": ExcelCitation(
+            citation_id="",
+            evidence_id="version_a::sheet_a::S001_R5",
+            file_id="file_a",
+            version_id="version_a",
+            sheet_id="sheet_a",
+            sheet_name="Sheet A",
+            row_id="S001_R5",
+            row=["S001_R5", "A row"],
+        ),
+        "version_b::sheet_b::S001_R5": ExcelCitation(
+            citation_id="",
+            evidence_id="version_b::sheet_b::S001_R5",
+            file_id="file_b",
+            version_id="version_b",
+            sheet_id="sheet_b",
+            sheet_name="Sheet B",
+            row_id="S001_R5",
+            row=["S001_R5", "B row"],
+        ),
+    }
+
+    citations, evidence_id_to_citation_id, warnings = chat._build_verified_citations(
+        [
+            DraftCitation(
+                evidence_id="version_a::sheet_a::S001_R5",
+                quote="A row",
+            )
+        ],
+        ["version_a::sheet_a::S001_R5"],
+        citation_index,
+    )
+
+    assert warnings == []
+    assert evidence_id_to_citation_id == {"version_a::sheet_a::S001_R5": "C1"}
+    assert citations[0].file_id == "file_a"
+    assert citations[0].sheet_id == "sheet_a"
+    assert citations[0].row_id == "S001_R5"
+
+
+def test_verifier_rejects_ambiguous_legacy_row_id() -> None:
+    chat = ChatService(
+        excel_assets=None,  # type: ignore[arg-type]
+        summaries=None,  # type: ignore[arg-type]
+        llm_client=FakeLlmClient(),
+        sessions=None,  # type: ignore[arg-type]
+    )
+    citation_index = {
+        "version_a::sheet_a::S001_R5": ExcelCitation(
+            citation_id="",
+            evidence_id="version_a::sheet_a::S001_R5",
+            file_id="file_a",
+            version_id="version_a",
+            sheet_id="sheet_a",
+            sheet_name="Sheet A",
+            row_id="S001_R5",
+            row=["S001_R5", "A row"],
+        ),
+        "version_b::sheet_b::S001_R5": ExcelCitation(
+            citation_id="",
+            evidence_id="version_b::sheet_b::S001_R5",
+            file_id="file_b",
+            version_id="version_b",
+            sheet_id="sheet_b",
+            sheet_name="Sheet B",
+            row_id="S001_R5",
+            row=["S001_R5", "B row"],
+        ),
+    }
+
+    citations, evidence_id_to_citation_id, warnings = chat._build_verified_citations(
+        [DraftCitation(row_id="S001_R5", quote="legacy row id only")],
+        ["S001_R5"],
+        citation_index,
+    )
+
+    assert citations == []
+    assert evidence_id_to_citation_id == {}
+    assert any("ignored ambiguous citation row_id: S001_R5" == warning for warning in warnings)
+
+
+def test_verifier_rejects_invalid_evidence_id() -> None:
+    chat = ChatService(
+        excel_assets=None,  # type: ignore[arg-type]
+        summaries=None,  # type: ignore[arg-type]
+        llm_client=FakeLlmClient(),
+        sessions=None,  # type: ignore[arg-type]
+    )
+    citation_index = {
+        "version_a::sheet_a::S001_R5": ExcelCitation(
+            citation_id="",
+            evidence_id="version_a::sheet_a::S001_R5",
+            file_id="file_a",
+            version_id="version_a",
+            sheet_id="sheet_a",
+            sheet_name="Sheet A",
+            row_id="S001_R5",
+            row=["S001_R5", "A row"],
+        )
+    }
+
+    citations, evidence_id_to_citation_id, warnings = chat._build_verified_citations(
+        [DraftCitation(evidence_id="version_x::sheet_y::S001_R5", quote="bad")],
+        ["version_x::sheet_y::S001_R5"],
+        citation_index,
+    )
+
+    assert citations == []
+    assert evidence_id_to_citation_id == {}
+    assert any(
+        warning == "ignored invalid citation evidence_id: version_x::sheet_y::S001_R5"
+        for warning in warnings
+    )
+
+
 def _write_xlsx_fixture(path: Path) -> None:
     workbook = Workbook()
     worksheet = workbook.active
@@ -460,14 +589,19 @@ class CapturingLlmClient(FakeLlmClient):
         )
         available_row_ids = {str(row["row_id"]) for row in rows}
         row_id = "S001_R205" if "S001_R205" in available_row_ids else str(rows[-1]["row_id"])
+        evidence_id = next(
+            str(row["evidence_id"])
+            for row in rows
+            if str(row["row_id"]) == row_id
+        )
         return DraftChatAnswer(
             answer_blocks=[
                 DraftAnswerBlock(
                     text=f"Captured answer for {question}.",
-                    evidence_row_ids=[row_id],
+                    evidence_ids=[evidence_id],
                 )
             ],
-            citations=[DraftCitation(row_id=row_id, quote="captured row")],
+            citations=[DraftCitation(evidence_id=evidence_id, quote="captured row")],
             insufficient_evidence=False,
             follow_up_suggestions=[],
         )

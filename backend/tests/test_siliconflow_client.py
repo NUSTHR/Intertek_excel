@@ -69,11 +69,12 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
             "answer_blocks": [
                 {
                     "text": "The workbook contains EN standards.",
-                    "evidence_row_ids": ["S001_R1"],
+                    "evidence_ids": ["version_1::sheet_1::S001_R1"],
                 }
             ],
             "citations": [
                 {
+                    "evidence_id": "version_1::sheet_1::S001_R1",
                     "version_id": "version_1",
                     "sheet_id": "sheet_1",
                     "row_id": "S001_R1",
@@ -143,6 +144,7 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
         selected,
         [
             {
+                "evidence_id": "version_1::sheet_1::S001_R1",
                 "file_id": "file_1",
                 "version_id": "version_1",
                 "sheet_id": "sheet_1",
@@ -173,7 +175,8 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     assert selected[0].version_id == "version_1"
     assert selected[0].confidence == 0.9
     assert draft_answer.answer_blocks[0].text == "The workbook contains EN standards."
-    assert draft_answer.answer_blocks[0].evidence_row_ids == ["S001_R1"]
+    assert draft_answer.answer_blocks[0].evidence_ids == ["version_1::sheet_1::S001_R1"]
+    assert draft_answer.citations[0].evidence_id == "version_1::sheet_1::S001_R1"
     assert draft_answer.citations[0].row_id == "S001_R1"
     assert draft_answer.citations[0].quote == "Code DOW"
     assert draft_answer.citations[0].version_id == "version_1"
@@ -186,6 +189,7 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     assert "enable_thinking" not in requests[0]
     assert "enable_thinking" not in requests[1]
     assert requests[2]["enable_thinking"] is False
+    assert '"evidence_id": "string"' in requests[2]["messages"][-1]["content"]
     assert '"version_id": "string"' in requests[2]["messages"][-1]["content"]
     assert '"sheet_id": "string"' in requests[2]["messages"][-1]["content"]
     summary_payload = json.loads(

@@ -173,15 +173,16 @@ class ChatTurn:
 @dataclass(frozen=True)
 class DraftAnswerBlock:
     text: str
-    evidence_row_ids: list[str]
+    evidence_ids: list[str]
 
 
 @dataclass(frozen=True)
 class DraftCitation:
-    row_id: str
-    quote: str
+    evidence_id: str = ""
+    quote: str = ""
     version_id: str = ""
     sheet_id: str = ""
+    row_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -195,6 +196,7 @@ class DraftChatAnswer:
 @dataclass(frozen=True)
 class ExcelCitation:
     citation_id: str
+    evidence_id: str
     file_id: str
     version_id: str
     sheet_id: str

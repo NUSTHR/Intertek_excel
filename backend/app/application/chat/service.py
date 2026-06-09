@@ -197,15 +197,15 @@ class ChatService:
                 model=answer_model,
                 provider=answer_provider,
             )
-        cited_row_ids = [
-            row_id
+        cited_evidence_ids = [
+            evidence_id
             for block in draft_answer.answer_blocks
-            for row_id in block.evidence_row_ids
+            for evidence_id in block.evidence_ids
         ]
         with total_timer.measure("verify_citations"):
-            citations, row_id_to_citation_id, warnings = self._build_verified_citations(
+            citations, evidence_id_to_citation_id, warnings = self._build_verified_citations(
                 draft_answer.citations,
-                cited_row_ids,
+                cited_evidence_ids,
                 citation_index,
             )
         answer_blocks = [
@@ -213,8 +213,11 @@ class ChatService:
                 text=block.text,
                 citation_ids=[
                     citation_id
-                    for row_id in block.evidence_row_ids
-                    if (citation_id := row_id_to_citation_id.get(row_id)) is not None
+                    for evidence_id in block.evidence_ids
+                    if (
+                        citation_id := evidence_id_to_citation_id.get(evidence_id)
+                    )
+                    is not None
                 ],
             )
             for block in draft_answer.answer_blocks
@@ -359,8 +362,14 @@ class ChatService:
                         if not row_response:
                             continue
                         row_id = row_response[0]
+                        evidence_id = self._evidence_id(
+                            version_id=document.version_id,
+                            sheet_id=sheet.sheet_id,
+                            row_id=row_id,
+                        )
                         rows.append(
                             {
+                                "evidence_id": evidence_id,
                                 "file_id": document.file_id,
                                 "version_id": document.version_id,
                                 "sheet_id": sheet.sheet_id,
@@ -369,8 +378,9 @@ class ChatService:
                                 "cells": row_response,
                             }
                         )
-                        citation_index[row_id] = ExcelCitation(
+                        citation_index[evidence_id] = ExcelCitation(
                             citation_id="",
+                            evidence_id=evidence_id,
                             file_id=document.file_id,
                             version_id=document.version_id,
                             sheet_id=sheet.sheet_id,
@@ -386,35 +396,124 @@ class ChatService:
     def _build_verified_citations(
         self,
         draft_citations: list,
-        evidence_row_ids: list[str],
+        evidence_ids: list[str],
         citation_index: dict[str, ExcelCitation],
     ) -> tuple[list[ExcelCitation], dict[str, str], list[str]]:
         citations: list[ExcelCitation] = []
-        row_id_to_citation_id: dict[str, str] = {}
+        evidence_id_to_citation_id: dict[str, str] = {}
         warnings: list[str] = []
-        quotes_by_row_id = {draft.row_id: draft.quote for draft in draft_citations}
-        for row_id in [*quotes_by_row_id, *evidence_row_ids]:
-            source = citation_index.get(row_id)
-            if source is None:
-                warnings.append(f"ignored invalid citation row_id: {row_id}")
+        row_matches_by_row_id = self._row_matches_by_row_id(citation_index)
+        quotes_by_evidence_id: dict[str, str] = {}
+        for draft in draft_citations:
+            resolved_evidence_id, warning = self._resolve_draft_citation_evidence_id(
+                draft,
+                citation_index,
+                row_matches_by_row_id,
+            )
+            if warning is not None:
+                warnings.append(warning)
                 continue
-            if row_id in row_id_to_citation_id:
+            if resolved_evidence_id is None:
+                continue
+            quotes_by_evidence_id[resolved_evidence_id] = draft.quote
+
+        for evidence_reference in [*quotes_by_evidence_id, *evidence_ids]:
+            resolved_evidence_id, warning = self._resolve_evidence_reference(
+                evidence_reference,
+                citation_index,
+                row_matches_by_row_id,
+            )
+            if warning is not None:
+                warnings.append(warning)
+                continue
+            if resolved_evidence_id is None:
+                continue
+            source = citation_index.get(resolved_evidence_id)
+            if source is None:
+                warnings.append(
+                    f"ignored invalid citation evidence_id: {resolved_evidence_id}"
+                )
+                continue
+            if resolved_evidence_id in evidence_id_to_citation_id:
                 continue
             citation_id = f"C{len(citations) + 1}"
-            row_id_to_citation_id[row_id] = citation_id
+            evidence_id_to_citation_id[resolved_evidence_id] = citation_id
             citations.append(
                 ExcelCitation(
                     citation_id=citation_id,
+                    evidence_id=source.evidence_id,
                     file_id=source.file_id,
                     version_id=source.version_id,
                     sheet_id=source.sheet_id,
                     sheet_name=source.sheet_name,
                     row_id=source.row_id,
                     row=source.row,
-                    quote=quotes_by_row_id.get(row_id, ""),
+                    quote=quotes_by_evidence_id.get(resolved_evidence_id, ""),
                 )
             )
-        return citations, row_id_to_citation_id, warnings
+        return citations, evidence_id_to_citation_id, warnings
+
+    def _row_matches_by_row_id(
+        self,
+        citation_index: dict[str, ExcelCitation],
+    ) -> dict[str, list[ExcelCitation]]:
+        matches: dict[str, list[ExcelCitation]] = {}
+        for citation in citation_index.values():
+            matches.setdefault(citation.row_id, []).append(citation)
+        return matches
+
+    def _resolve_draft_citation_evidence_id(
+        self,
+        draft_citation,
+        citation_index: dict[str, ExcelCitation],
+        row_matches_by_row_id: dict[str, list[ExcelCitation]],
+    ) -> tuple[str | None, str | None]:
+        if draft_citation.evidence_id:
+            if draft_citation.evidence_id in citation_index:
+                return draft_citation.evidence_id, None
+            return (
+                None,
+                f"ignored invalid citation evidence_id: {draft_citation.evidence_id}",
+            )
+        if draft_citation.version_id and draft_citation.sheet_id and draft_citation.row_id:
+            evidence_id = self._evidence_id(
+                version_id=draft_citation.version_id,
+                sheet_id=draft_citation.sheet_id,
+                row_id=draft_citation.row_id,
+            )
+            if evidence_id in citation_index:
+                return evidence_id, None
+            return None, f"ignored invalid citation evidence_id: {evidence_id}"
+        if draft_citation.row_id:
+            return self._resolve_evidence_reference(
+                draft_citation.row_id,
+                citation_index,
+                row_matches_by_row_id,
+            )
+        return None, None
+
+    def _resolve_evidence_reference(
+        self,
+        evidence_reference: str,
+        citation_index: dict[str, ExcelCitation],
+        row_matches_by_row_id: dict[str, list[ExcelCitation]],
+    ) -> tuple[str | None, str | None]:
+        if evidence_reference in citation_index:
+            return evidence_reference, None
+        matches = row_matches_by_row_id.get(evidence_reference, [])
+        if not matches:
+            if "::" in evidence_reference:
+                return (
+                    None,
+                    f"ignored invalid citation evidence_id: {evidence_reference}",
+                )
+            return None, f"ignored invalid citation row_id: {evidence_reference}"
+        if len(matches) > 1:
+            return None, f"ignored ambiguous citation row_id: {evidence_reference}"
+        return matches[0].evidence_id, None
+
+    def _evidence_id(self, *, version_id: str, sheet_id: str, row_id: str) -> str:
+        return f"{version_id}::{sheet_id}::{row_id}"
 
     def _attached_to_selected_documents(
         self,

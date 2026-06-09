@@ -256,6 +256,7 @@ class SelectedDocumentResponse(BaseModel):
 
 class ExcelCitationResponse(BaseModel):
     citation_id: str
+    evidence_id: str
     file_id: str
     version_id: str
     sheet_id: str

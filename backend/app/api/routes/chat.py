@@ -228,6 +228,7 @@ def _to_chat_answer_response(answer: ChatAnswer) -> ChatAnswerResponse:
         citations=[
             ExcelCitationResponse(
                 citation_id=citation.citation_id,
+                evidence_id=citation.evidence_id,
                 file_id=citation.file_id,
                 version_id=citation.version_id,
                 sheet_id=citation.sheet_id,

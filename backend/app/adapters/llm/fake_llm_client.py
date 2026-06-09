@@ -123,7 +123,7 @@ class FakeLlmClient:
         provider: str | None = None,
     ) -> DraftChatAnswer:
         _ = previous_turns, model, provider
-        cited_row_ids = [str(row["row_id"]) for row in rows[:3]]
+        cited_evidence_ids = [str(row["evidence_id"]) for row in rows[:3]]
         selected_count = len(documents)
         row_count = len(rows)
         return DraftChatAnswer(
@@ -133,12 +133,15 @@ class FakeLlmClient:
                         f"Draft answer for: {question} "
                         f"Selected {selected_count} document(s) and inspected {row_count} row(s)."
                     ),
-                    evidence_row_ids=cited_row_ids[:1],
+                    evidence_ids=cited_evidence_ids[:1],
                 )
             ],
             citations=[
-                DraftCitation(row_id=row_id, quote=f"Evidence row {row_id}")
-                for row_id in cited_row_ids
+                DraftCitation(
+                    evidence_id=evidence_id,
+                    quote=f"Evidence row {evidence_id}",
+                )
+                for evidence_id in cited_evidence_ids
             ],
             insufficient_evidence=False,
             follow_up_suggestions=[],
