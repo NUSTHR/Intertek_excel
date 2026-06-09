@@ -72,7 +72,14 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
                     "evidence_row_ids": ["S001_R1"],
                 }
             ],
-            "citations": [{"row_id": "S001_R1", "quote": "Code DOW"}],
+            "citations": [
+                {
+                    "version_id": "version_1",
+                    "sheet_id": "sheet_1",
+                    "row_id": "S001_R1",
+                    "quote": "Code DOW",
+                }
+            ],
             "insufficient_evidence": False,
             "follow_up_suggestions": ["Ask for a DOW date."],
         },
@@ -169,6 +176,8 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     assert draft_answer.answer_blocks[0].evidence_row_ids == ["S001_R1"]
     assert draft_answer.citations[0].row_id == "S001_R1"
     assert draft_answer.citations[0].quote == "Code DOW"
+    assert draft_answer.citations[0].version_id == "version_1"
+    assert draft_answer.citations[0].sheet_id == "sheet_1"
     assert [request["model"] for request in requests] == [
         "deepseek-ai/DeepSeek-V4-Pro",
         "inclusionAI/Ling-flash-2.0",
@@ -177,6 +186,8 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     assert "enable_thinking" not in requests[0]
     assert "enable_thinking" not in requests[1]
     assert requests[2]["enable_thinking"] is False
+    assert '"version_id": "string"' in requests[2]["messages"][-1]["content"]
+    assert '"sheet_id": "string"' in requests[2]["messages"][-1]["content"]
     summary_payload = json.loads(
         requests[0]["messages"][1]["content"].split("Workbook profile:\n", 1)[1]
     )

@@ -180,6 +180,8 @@ class DraftAnswerBlock:
 class DraftCitation:
     row_id: str
     quote: str
+    version_id: str = ""
+    sheet_id: str = ""
 
 
 @dataclass(frozen=True)

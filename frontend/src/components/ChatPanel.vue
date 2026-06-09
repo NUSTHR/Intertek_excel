@@ -456,7 +456,7 @@ function resizeChatInput(): void {
         </div>
       </div>
       <p class="chat-disclaimer">
-        AI may produce inaccurate financial results. Always verify.
+        AI may produce inaccurate results. Always verify.
       </p>
     </form>
   </section>

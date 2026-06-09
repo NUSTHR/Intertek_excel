@@ -476,6 +476,8 @@ class MultiProviderLlmClient:
                         "  ],\n"
                         '  "citations": [\n'
                         "    {\n"
+                        '      "version_id": "string",\n'
+                        '      "sheet_id": "string",\n'
                         '      "row_id": "string",\n'
                         '      "quote": "string"\n'
                         "    }\n"
@@ -485,7 +487,8 @@ class MultiProviderLlmClient:
                         "}\n\n"
                         "Important:\n"
                         "- evidence_row_ids must contain only row_id values from Rows.\n"
-                        "- citations must contain only row_id values from Rows.\n"
+                        "- citation version_id, sheet_id, and row_id must match one row "
+                        "object from Rows exactly.\n"
                         "- quote should be a short snippet copied or summarized from the "
                         "cited row.\n"
                         "- If no provided row supports an answer, set insufficient_evidence "
@@ -507,6 +510,8 @@ class MultiProviderLlmClient:
                 DraftCitation(
                     row_id=str(citation.get("row_id", "")).strip(),
                     quote=str(citation.get("quote", "")).strip(),
+                    version_id=str(citation.get("version_id", "")).strip(),
+                    sheet_id=str(citation.get("sheet_id", "")).strip(),
                 )
                 for citation in self._object_list(payload.get("citations"))
                 if str(citation.get("row_id", "")).strip()
