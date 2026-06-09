@@ -1500,7 +1500,7 @@ function toErrorMessage(error: unknown): string {
             <button
               type="button"
               class="view-switch"
-              @click="setActiveView('files')"
+              disabled
             >
               Manage Files
             </button>
@@ -2131,7 +2131,7 @@ function toErrorMessage(error: unknown): string {
               <AppIcon name="history" />
               <span>History</span>
             </button>
-            <button type="button" @click="setActiveView('files')">
+            <button type="button" disabled>
               <AppIcon name="folder_open" />
               <span>Files</span>
             </button>
