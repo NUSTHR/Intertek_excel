@@ -43,9 +43,31 @@ type RenameDialog =
 type ConfirmDialog =
   | { kind: 'file'; file: ExcelFile }
   | { kind: 'session'; session: ChatSession }
+type UploadDialog =
+  | { kind: 'new'; file: File }
+  | { kind: 'replace'; file: File }
+interface SelectedCell {
+  rowKey: string
+  rowNumber: number
+  columnIndex: number
+  address: string
+  value: string
+}
 
 const previewLimit = 250
-const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm']
+const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm', '.csv']
+const pinnedFileStorageKey = 'excelai-pinned-file-ids'
+const defaultRouterProvider = 'deepseek'
+const defaultRouterModel = 'deepseek-v4-flash'
+const maxUploadBytes = 50 * 1024 * 1024
+const minChatColumnWidth = 360
+const maxChatColumnWidth = 560
+const defaultExcelCellWidth = 120
+const defaultExcelRowHeight = 42
+const minExcelCellWidth = 92
+const maxExcelCellWidth = 260
+const minExcelRowHeight = 30
+const maxExcelRowHeight = 86
 
 const initialActiveView: ActiveView =
   typeof window !== 'undefined' && window.location.hash === '#chat' ? 'chat' : 'files'
@@ -73,6 +95,7 @@ const pendingDeleteFile = ref<ExcelFile | null>(null)
 const renameDialog = ref<RenameDialog | null>(null)
 const renameDraft = ref<string>('')
 const confirmDialog = ref<ConfirmDialog | null>(null)
+const uploadDialog = ref<UploadDialog | null>(null)
 const dialogError = ref<string>('')
 const transientToastMessage = ref<string>('')
 const openFileActionMenuId = ref<string>('')
@@ -93,8 +116,23 @@ const routerProvider = ref<string>('siliconflow')
 const routerModel = ref<string>('')
 const answerProvider = ref<string>('siliconflow')
 const answerModel = ref<string>('')
+const pinnedFileIds = ref<string[]>(loadPinnedFileIds())
+const selectedCell = ref<SelectedCell | null>(null)
+const excelColumnWidths = ref<Record<string, number>>({})
+const excelRowHeights = ref<Record<string, number>>({})
+const chatColumnWidth = ref<number>(420)
+const isChatResizing = ref<boolean>(false)
+const isUploadDragging = ref<boolean>(false)
+const isExcelColumnResizing = ref<boolean>(false)
+const isExcelRowResizing = ref<boolean>(false)
 let transientToastTimer: number | null = null
 let operationNoticeTimer: number | null = null
+let excelResizeStartX = 0
+let excelResizeStartY = 0
+let excelResizeStartWidth = 0
+let excelResizeStartHeight = 0
+let excelResizeTargetColumnKey = ''
+let excelResizeTargetRowKey = ''
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -110,10 +148,10 @@ const selectedVersion = computed(() => {
 
 const filteredFiles = computed(() => {
   const query = searchTerm.value.trim().toLowerCase()
-  if (!query) {
-    return files.value
-  }
-  return files.value.filter((file) => file.display_name.toLowerCase().includes(query))
+  const visibleFiles = !query
+    ? files.value
+    : files.value.filter((file) => file.display_name.toLowerCase().includes(query))
+  return sortFilesForDisplay(visibleFiles)
 })
 
 const previewHeaders = computed(() => {
@@ -147,6 +185,35 @@ const excelFillerRowCount = computed(() => {
 
 const selectedFileDisplayName = computed(() => {
   return selectedFile.value?.display_name ?? 'No workbook selected'
+})
+
+const workbookStatusLabel = computed(() => {
+  if (!selectedFile.value) {
+    return 'No active workbook'
+  }
+  const sheetLabel = selectedSheet.value?.sheet_name ?? 'No sheet selected'
+  return `${sheetLabel} / ${previewRangeLabel.value}`
+})
+
+const selectedCellAddress = computed(() => selectedCell.value?.address ?? 'C5')
+
+const selectedCellValue = computed(() => selectedCell.value?.value || '-')
+
+const chatWorkspaceStyle = computed(() => ({
+  '--chat-column-width': `${chatColumnWidth.value}px`,
+}))
+
+const excelGridStyle = computed(() => ({
+  '--excel-column-count': excelDataColumnCount.value,
+  '--excel-grid-columns': excelGridTemplateColumns.value,
+  '--excel-row-height': `${defaultExcelRowHeight}px`,
+}))
+
+const excelGridTemplateColumns = computed(() => {
+  const dataColumns = Array.from({ length: excelDataColumnCount.value }, (_value, index) => {
+    return `${getExcelColumnWidth(index + 1)}px`
+  })
+  return ['48px', ...dataColumns].join(' ')
 })
 
 const workbookRowCount = computed(() => {
@@ -212,7 +279,7 @@ const visibleSummaryTopics = computed(() => {
       topic.startsWith('#') ? topic : `#${topic.replace(/\s+/g, '_')}`
     ))
   }
-  return ['#financial_report', '#q3_performance', '#revenue_growth']
+  return []
 })
 
 const activeChatSession = computed(() => {
@@ -224,12 +291,21 @@ const activeChatSession = computed(() => {
 
 
 onMounted(() => {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('hashchange', syncActiveViewFromLocation)
+  }
   void initializeWorkspace()
 })
 
 onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('hashchange', syncActiveViewFromLocation)
+  }
   clearOperationNotice()
   clearTransientToast()
+  stopChatResize()
+  stopExcelColumnResize()
+  stopExcelRowResize()
 })
 
 async function initializeWorkspace(): Promise<void> {
@@ -248,8 +324,8 @@ async function loadLlmModelOptions(): Promise<void> {
 function applyModelDefaults(defaults: LlmModelDefaults): void {
   summaryProvider.value = defaults.summary_provider
   summaryModel.value = defaults.summary_model
-  routerProvider.value = defaults.router_provider
-  routerModel.value = defaults.router_model
+  routerProvider.value = preferredRouterProvider(defaults.router_provider)
+  routerModel.value = preferredRouterModel(defaults.router_model)
   answerProvider.value = defaults.answer_provider
   answerModel.value = defaults.answer_model
   ensureStageModel('summary')
@@ -266,6 +342,21 @@ function setActiveView(view: ActiveView): void {
   if (typeof window !== 'undefined') {
     window.history.replaceState(null, '', view === 'chat' ? '#chat' : '#files')
   }
+}
+
+function syncActiveViewFromLocation(): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+  const nextView: ActiveView = window.location.hash === '#chat' ? 'chat' : 'files'
+  if (activeView.value === nextView) {
+    return
+  }
+  closeActionMenus()
+  if (nextView !== 'files') {
+    isFileInsightFullscreen.value = false
+  }
+  activeView.value = nextView
 }
 
 function setFileInsightTab(tab: FileInsightTab): void {
@@ -325,6 +416,8 @@ async function startNewChatSession(): Promise<void> {
     upsertChatSession(session)
     activeChatSessionId.value = session.session_id
     latestAnswer.value = null
+    clearSelection()
+    selectedCell.value = null
     setActiveView('chat')
   } catch (error: unknown) {
     chatSessionError.value = toErrorMessage(error)
@@ -424,6 +517,59 @@ function sortChatSessions(sessions: ChatSession[]): ChatSession[] {
   })
 }
 
+function sortFilesForDisplay(items: ExcelFile[]): ExcelFile[] {
+  return [...items].sort((left, right) => {
+    const leftPinned = isFilePinned(left.file_id)
+    const rightPinned = isFilePinned(right.file_id)
+    if (leftPinned && !rightPinned) {
+      return -1
+    }
+    if (!leftPinned && rightPinned) {
+      return 1
+    }
+    return right.updated_at.localeCompare(left.updated_at)
+  })
+}
+
+function isFilePinned(fileId: string): boolean {
+  return pinnedFileIds.value.includes(fileId)
+}
+
+function toggleFilePin(file: ExcelFile): void {
+  closeActionMenus()
+  const nextIds = isFilePinned(file.file_id)
+    ? pinnedFileIds.value.filter((fileId) => fileId !== file.file_id)
+    : [file.file_id, ...pinnedFileIds.value]
+  pinnedFileIds.value = nextIds
+  savePinnedFileIds(nextIds)
+  showTransientToast(isFilePinned(file.file_id) ? 'Workbook pinned.' : 'Workbook unpinned.')
+}
+
+function loadPinnedFileIds(): string[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+  const storedValue = window.localStorage.getItem(pinnedFileStorageKey)
+  if (!storedValue) {
+    return []
+  }
+  try {
+    const parsedValue = JSON.parse(storedValue)
+    return Array.isArray(parsedValue)
+      ? parsedValue.filter((item): item is string => typeof item === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+function savePinnedFileIds(fileIds: string[]): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.localStorage.setItem(pinnedFileStorageKey, JSON.stringify(fileIds))
+}
+
 async function refreshFiles(): Promise<void> {
   errorMessage.value = ''
   isWorkspaceBusy.value = true
@@ -469,6 +615,7 @@ async function selectFile(file: ExcelFile): Promise<void> {
   preview.value = null
   rowLookup.value = null
   documentSummary.value = null
+  selectedCell.value = null
   versions.value = await listExcelVersions(file.file_id)
   const targetVersionId = file.active_version_id ?? versions.value[0]?.version_id ?? ''
   if (targetVersionId) {
@@ -492,6 +639,7 @@ async function selectVersion(versionId: string): Promise<void> {
   preview.value = null
   rowLookup.value = null
   documentSummary.value = null
+  selectedCell.value = null
   sheets.value = await listExcelSheets(versionId)
   await loadExistingSummary(versionId)
   if (sheets.value[0]) {
@@ -516,6 +664,7 @@ async function selectSheet(sheet: ExcelSheet): Promise<void> {
   selectedSheetId.value = sheet.sheet_id
   rowLookup.value = null
   lookupRowId.value = ''
+  selectedCell.value = null
   preview.value = await previewExcelSheet(sheet.sheet_id, 0, previewLimit)
 }
 
@@ -526,6 +675,8 @@ async function loadPreviewPage(offset: number): Promise<void> {
   errorMessage.value = ''
   try {
     const safeOffset = Math.max(0, offset)
+    rowLookup.value = null
+    selectedCell.value = null
     preview.value = await previewExcelSheet(selectedSheetId.value, safeOffset, previewLimit)
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
@@ -573,20 +724,51 @@ function handleUploadFileChange(event: Event): void {
   setUploadFile(input.files?.[0] ?? null)
 }
 
+function handleUploadDragEnter(): void {
+  if (!isWorkspaceBusy.value) {
+    isUploadDragging.value = true
+  }
+}
+
+function handleUploadDragLeave(event: DragEvent): void {
+  if (!(event.currentTarget instanceof HTMLElement)) {
+    isUploadDragging.value = false
+    return
+  }
+  const relatedTarget = event.relatedTarget
+  if (!(relatedTarget instanceof Node) || !event.currentTarget.contains(relatedTarget)) {
+    isUploadDragging.value = false
+  }
+}
+
+function handleUploadDrop(event: DragEvent): void {
+  isUploadDragging.value = false
+  if (isWorkspaceBusy.value) {
+    return
+  }
+  setUploadFile(event.dataTransfer?.files?.[0] ?? null)
+}
+
 function setUploadFile(file: File | null): void {
   pendingReplaceFile.value = null
+  uploadDialog.value = null
   if (!file) {
     selectedUploadFile.value = null
     return
   }
   if (!isAllowedUploadFile(file)) {
     selectedUploadFile.value = null
-    errorMessage.value = 'Only Excel workbooks are supported: .xls, .xlsx, .xlsm, .xltx, .xltm.'
+    errorMessage.value = 'Only Excel and CSV files are supported: .xls, .xlsx, .xlsm, .xltx, .xltm, .csv.'
+    return
+  }
+  if (file.size > maxUploadBytes) {
+    selectedUploadFile.value = null
+    errorMessage.value = 'File is larger than 50MB.'
     return
   }
   errorMessage.value = ''
   selectedUploadFile.value = file
-  showOperationNotice(`${file.name} is ready to upload`)
+  uploadDialog.value = { kind: 'new', file }
 }
 
 function requestDeleteFile(file: ExcelFile): void {
@@ -627,8 +809,32 @@ async function renameFilePrompt(file: ExcelFile): Promise<void> {
 function cancelDialog(): void {
   renameDialog.value = null
   confirmDialog.value = null
+  uploadDialog.value = null
   dialogError.value = ''
   renameDraft.value = ''
+  selectedUploadFile.value = null
+  pendingReplaceFile.value = null
+  if (fileInput.value) {
+    fileInput.value.value = ''
+  }
+}
+
+function cancelUploadDialog(): void {
+  uploadDialog.value = null
+  dialogError.value = ''
+  selectedUploadFile.value = null
+  pendingReplaceFile.value = null
+  if (fileInput.value) {
+    fileInput.value.value = ''
+  }
+}
+
+async function confirmUploadDialog(): Promise<void> {
+  const dialog = uploadDialog.value
+  if (!dialog) {
+    return
+  }
+  await uploadSelectedFile(dialog.kind === 'replace')
 }
 
 async function submitRenameDialog(): Promise<void> {
@@ -717,6 +923,8 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
     const result = await uploadExcelFile(file, replaceExisting)
     pendingReplaceFile.value = null
     selectedUploadFile.value = null
+    uploadDialog.value = null
+    dialogError.value = ''
     if (fileInput.value) {
       fileInput.value.value = ''
     }
@@ -730,14 +938,15 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
     if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
       pendingReplaceFile.value = file
       selectedUploadFile.value = null
-      errorMessage.value = ''
-      showOperationNotice(
-        'A workbook with this name exists. Confirm replacement to create a new version.',
-        5000,
-      )
+      uploadDialog.value = { kind: 'replace', file }
+      dialogError.value = ''
       return
     }
-    errorMessage.value = toErrorMessage(error)
+    if (uploadDialog.value) {
+      dialogError.value = toErrorMessage(error)
+    } else {
+      errorMessage.value = toErrorMessage(error)
+    }
   } finally {
     isWorkspaceBusy.value = false
   }
@@ -766,6 +975,7 @@ async function lookupRowInSheet(sheetId: string, rowId: string): Promise<void> {
   try {
     const result = await lookupExcelRow(sheetId, rowId)
     rowLookup.value = result
+    selectedCell.value = null
     await ensureLookupRowVisible(result)
     await nextTick()
     document.getElementById(rowDomId(result.mapping.row_id))?.scrollIntoView({
@@ -852,10 +1062,186 @@ function clearSelection(): void {
   preview.value = null
   rowLookup.value = null
   documentSummary.value = null
+  selectedCell.value = null
 }
 
 function rowIsHighlighted(row: string[]): boolean {
   return Boolean(rowLookup.value && row[0] === rowLookup.value.mapping.row_id)
+}
+
+function selectGridCell(row: string[], rowIndex: number, columnIndex: number): void {
+  const rowNumber = (preview.value?.offset ?? 0) + rowIndex + 1
+  selectedCell.value = {
+    rowKey: row[0] || `${rowNumber}`,
+    rowNumber,
+    columnIndex,
+    address: `${columnLabel(columnIndex)}${rowNumber}`,
+    value: getGridCellValue(row, columnIndex),
+  }
+}
+
+function isGridCellSelected(row: string[], rowIndex: number, columnIndex: number): boolean {
+  const cell = selectedCell.value
+  if (!cell) {
+    return false
+  }
+  const rowNumber = (preview.value?.offset ?? 0) + rowIndex + 1
+  const rowKey = row[0] || `${rowNumber}`
+  return cell.rowKey === rowKey && cell.columnIndex === columnIndex
+}
+
+function startChatResize(event: PointerEvent): void {
+  event.preventDefault()
+  isChatResizing.value = true
+  window.addEventListener('pointermove', handleChatResize)
+  window.addEventListener('pointerup', stopChatResize)
+  window.addEventListener('pointercancel', stopChatResize)
+}
+
+function handleChatResize(event: PointerEvent): void {
+  const viewportWidth = window.innerWidth
+  const nextWidth = Math.round(viewportWidth - event.clientX)
+  chatColumnWidth.value = clamp(nextWidth, minChatColumnWidth, maxChatColumnWidth)
+}
+
+function stopChatResize(): void {
+  if (!isChatResizing.value) {
+    return
+  }
+  isChatResizing.value = false
+  window.removeEventListener('pointermove', handleChatResize)
+  window.removeEventListener('pointerup', stopChatResize)
+  window.removeEventListener('pointercancel', stopChatResize)
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+function excelColumnKey(columnIndex: number): string {
+  return `${selectedSheetId.value || 'sheet'}:C${columnIndex}`
+}
+
+function excelRowKey(row: string[], rowIndex: number): string {
+  const rowNumber = (preview.value?.offset ?? 0) + rowIndex + 1
+  return `${selectedSheetId.value || 'sheet'}:${row[0] || `R${rowNumber}`}`
+}
+
+function fillerExcelRowKey(fillerIndex: number): string {
+  return `${selectedSheetId.value || 'sheet'}:F${fillerRowNumber(fillerIndex)}`
+}
+
+function fillerRowNumber(fillerIndex: number): number {
+  return (preview.value?.offset ?? 0) + excelDisplayRows.value.length + fillerIndex + 1
+}
+
+function getGridCellValue(row: string[], columnIndex: number): string {
+  return row[columnIndex] ?? ''
+}
+
+function getExcelColumnWidth(columnIndex: number): number {
+  return excelColumnWidths.value[excelColumnKey(columnIndex)] ?? defaultExcelCellWidth
+}
+
+function getExcelRowHeight(rowKey: string): number {
+  return excelRowHeights.value[rowKey] ?? defaultExcelRowHeight
+}
+
+function getExcelRowStyle(row: string[], rowIndex: number): Record<string, string> {
+  return {
+    '--excel-row-height-current': `${getExcelRowHeight(excelRowKey(row, rowIndex))}px`,
+  }
+}
+
+function getFillerExcelRowStyle(fillerIndex: number): Record<string, string> {
+  return {
+    '--excel-row-height-current': `${getExcelRowHeight(fillerExcelRowKey(fillerIndex))}px`,
+  }
+}
+
+function startExcelColumnResize(event: PointerEvent, columnIndex: number): void {
+  event.preventDefault()
+  event.stopPropagation()
+  isExcelColumnResizing.value = true
+  excelResizeStartX = event.clientX
+  excelResizeTargetColumnKey = excelColumnKey(columnIndex)
+  excelResizeStartWidth = getExcelColumnWidth(columnIndex)
+  window.addEventListener('pointermove', handleExcelColumnResize)
+  window.addEventListener('pointerup', stopExcelColumnResize)
+  window.addEventListener('pointercancel', stopExcelColumnResize)
+}
+
+function startExcelColumnResizeFromHeader(event: PointerEvent, columnIndex: number): void {
+  const target = event.currentTarget as HTMLElement
+  const rect = target.getBoundingClientRect()
+  if (rect.right - event.clientX > 14) {
+    return
+  }
+  startExcelColumnResize(event, columnIndex)
+}
+
+function handleExcelColumnResize(event: PointerEvent): void {
+  if (!excelResizeTargetColumnKey) {
+    return
+  }
+  const nextWidth = clamp(
+    excelResizeStartWidth + event.clientX - excelResizeStartX,
+    minExcelCellWidth,
+    maxExcelCellWidth,
+  )
+  excelColumnWidths.value = {
+    ...excelColumnWidths.value,
+    [excelResizeTargetColumnKey]: nextWidth,
+  }
+}
+
+function stopExcelColumnResize(): void {
+  if (!isExcelColumnResizing.value) {
+    return
+  }
+  isExcelColumnResizing.value = false
+  excelResizeTargetColumnKey = ''
+  window.removeEventListener('pointermove', handleExcelColumnResize)
+  window.removeEventListener('pointerup', stopExcelColumnResize)
+  window.removeEventListener('pointercancel', stopExcelColumnResize)
+}
+
+function startExcelRowResize(event: PointerEvent, rowKey: string): void {
+  event.preventDefault()
+  event.stopPropagation()
+  isExcelRowResizing.value = true
+  excelResizeStartY = event.clientY
+  excelResizeTargetRowKey = rowKey
+  excelResizeStartHeight = getExcelRowHeight(rowKey)
+  window.addEventListener('pointermove', handleExcelRowResize)
+  window.addEventListener('pointerup', stopExcelRowResize)
+  window.addEventListener('pointercancel', stopExcelRowResize)
+}
+
+function handleExcelRowResize(event: PointerEvent): void {
+  if (!excelResizeTargetRowKey) {
+    return
+  }
+  const nextHeight = clamp(
+    excelResizeStartHeight + event.clientY - excelResizeStartY,
+    minExcelRowHeight,
+    maxExcelRowHeight,
+  )
+  excelRowHeights.value = {
+    ...excelRowHeights.value,
+    [excelResizeTargetRowKey]: nextHeight,
+  }
+}
+
+function stopExcelRowResize(): void {
+  if (!isExcelRowResizing.value) {
+    return
+  }
+  isExcelRowResizing.value = false
+  excelResizeTargetRowKey = ''
+  window.removeEventListener('pointermove', handleExcelRowResize)
+  window.removeEventListener('pointerup', stopExcelRowResize)
+  window.removeEventListener('pointercancel', stopExcelRowResize)
 }
 
 function rowDomId(rowId: string): string {
@@ -915,6 +1301,25 @@ function shortId(value: string | null | undefined): string {
 
 function modelsForProvider(provider: string): string[] {
   return availableLlmProviders.value.find((item) => item.provider === provider)?.models ?? []
+}
+
+function preferredRouterProvider(fallbackProvider: string): string {
+  return availableLlmProviders.value.some((provider) => provider.provider === defaultRouterProvider)
+    ? defaultRouterProvider
+    : fallbackProvider
+}
+
+function preferredRouterModel(fallbackModel: string): string {
+  const providerModels = modelsForProvider(routerProvider.value)
+  const exactMatch = providerModels.find((model) => model === defaultRouterModel)
+  if (exactMatch) {
+    return exactMatch
+  }
+  const semanticMatch = providerModels.find((model) => {
+    const normalizedModel = model.toLowerCase()
+    return normalizedModel.includes('deepseek') && normalizedModel.includes('flash')
+  })
+  return semanticMatch ?? fallbackModel
 }
 
 function ensureStageModel(stage: ModelStage): void {
@@ -1008,16 +1413,6 @@ function toErrorMessage(error: unknown): string {
         <p>Researcher Pro</p>
       </div>
 
-      <button
-        type="button"
-        class="sidebar-upload-button"
-        :disabled="isWorkspaceBusy"
-        @click="openUploadDialog"
-      >
-        <AppIcon name="add" />
-        <strong>Upload New</strong>
-      </button>
-
       <nav class="primary-nav" aria-label="Primary">
         <button type="button" class="nav-item muted-nav">
           <span class="nav-glyph"><AppIcon name="dashboard" /></span>
@@ -1031,6 +1426,15 @@ function toErrorMessage(error: unknown): string {
         >
           <span class="nav-glyph"><AppIcon name="folder_open" /></span>
           <span>Files</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item"
+          :class="{ active: activeView === 'chat' }"
+          @click="setActiveView('chat')"
+        >
+          <span class="nav-glyph"><AppIcon name="chat_bubble" /></span>
+          <span>Chat</span>
         </button>
         <button type="button" class="nav-item muted-nav">
           <span class="nav-glyph"><AppIcon name="query_stats" /></span>
@@ -1116,40 +1520,12 @@ function toErrorMessage(error: unknown): string {
           ref="fileInput"
           class="visually-hidden"
           type="file"
-          accept=".xls,.xlsx,.xlsm,.xltx,.xltm"
+          accept=".xls,.xlsx,.xlsm,.xltx,.xltm,.csv"
           @change="handleUploadFileChange"
         />
 
         <div class="file-management-shell">
           <section class="file-sources-pane">
-        <section v-if="selectedUploadFile || pendingReplaceFile" class="upload-queue">
-          <div>
-            <p class="eyebrow">Pending Upload</p>
-            <h3>{{ pendingReplaceFile?.name ?? selectedUploadFile?.name }}</h3>
-          </div>
-          <div v-if="pendingReplaceFile" class="replace-actions">
-            <p>This filename already exists. Replacement will create a new active version.</p>
-            <button
-              type="button"
-              class="danger-subtle"
-              :disabled="isWorkspaceBusy"
-              @click="uploadSelectedFile(true)"
-            >
-              Confirm Replacement
-            </button>
-            <button type="button" class="secondary-button" @click="pendingReplaceFile = null">Cancel</button>
-          </div>
-          <button
-            v-else
-            type="button"
-            class="primary-action"
-            :disabled="isWorkspaceBusy || !selectedUploadFile"
-            @click="uploadSelectedFile(false)"
-          >
-            Upload and Parse
-          </button>
-        </section>
-
         <section class="file-list-panel">
           <div class="panel-heading">
             <div>
@@ -1158,6 +1534,24 @@ function toErrorMessage(error: unknown): string {
             <span class="files-found-label">{{ filteredFiles.length }} Files Found</span>
           </div>
 
+          <button
+            type="button"
+            class="knowledge-upload-zone"
+            :class="{ dragging: isUploadDragging }"
+            :disabled="isWorkspaceBusy"
+            @click="openUploadDialog"
+            @dragenter.prevent="handleUploadDragEnter"
+            @dragover.prevent="handleUploadDragEnter"
+            @dragleave.prevent="handleUploadDragLeave"
+            @drop.prevent="handleUploadDrop"
+          >
+            <span class="knowledge-upload-icon">
+              <AppIcon name="upload_file" />
+            </span>
+            <strong>Click or drag files to upload</strong>
+            <span>Supports Excel, CSV (Max 50MB)</span>
+          </button>
+
           <div class="file-card-list">
             <article
               v-for="file in filteredFiles"
@@ -1165,7 +1559,11 @@ function toErrorMessage(error: unknown): string {
               role="button"
               tabindex="0"
               class="file-library-card"
-              :class="{ selected: file.file_id === selectedFileId }"
+              :class="{
+                selected: file.file_id === selectedFileId,
+                pinned: isFilePinned(file.file_id),
+                'menu-open': openFileActionMenuId === file.file_id,
+              }"
               @click="chooseFile(file)"
               @keydown.enter.prevent="chooseFile(file)"
               @keydown.space.prevent="chooseFile(file)"
@@ -1184,8 +1582,8 @@ function toErrorMessage(error: unknown): string {
                   :aria-expanded="openFileActionMenuId === file.file_id"
                   aria-label="File actions"
                   @click="toggleFileActionMenu(file.file_id)"
-                >
-                  <AppIcon name="more_vert" />
+              >
+                <AppIcon name="more_vert" />
                 </button>
               </span>
               <span
@@ -1193,10 +1591,18 @@ function toErrorMessage(error: unknown): string {
                 class="item-action-menu file-card-menu"
                 @click.stop
               >
-                <button type="button" @click="chooseFile(file)">Open</button>
-                <button type="button" @click="renameFilePrompt(file)">Rename</button>
-                <button type="button" @click="chooseFile(file, 'chat')">Analyze</button>
-                <button type="button" class="danger-text" @click="requestDeleteFile(file)">Delete</button>
+                <button type="button" @click="toggleFilePin(file)">
+                  <AppIcon name="push_pin" />
+                  {{ isFilePinned(file.file_id) ? 'Unpin' : 'Pin' }}
+                </button>
+                <button type="button" @click="renameFilePrompt(file)">
+                  <AppIcon name="edit" />
+                  Rename
+                </button>
+                <button type="button" class="danger-text" @click="requestDeleteFile(file)">
+                  <AppIcon name="close" />
+                  Delete
+                </button>
               </span>
             </article>
 
@@ -1356,8 +1762,14 @@ function toErrorMessage(error: unknown): string {
                         :disabled="isSummaryLoading || !selectedVersionId"
                         @click="generateSummaryForSelectedVersion"
                       >
-                        <AppIcon name="refresh" />
-                        {{ isSummaryLoading ? 'Generating...' : 'Regenerate' }}
+                        <AppIcon :name="documentSummary ? 'refresh' : 'bolt'" />
+                        {{
+                          isSummaryLoading
+                            ? 'Generating...'
+                            : documentSummary
+                              ? 'Regenerate'
+                              : 'Generate Summary'
+                        }}
                       </button>
                       <button
                         type="button"
@@ -1387,11 +1799,11 @@ function toErrorMessage(error: unknown): string {
                     </button>
                   </div>
 
-                  <div class="topic-toolbar">
+                  <div v-if="documentSummary" class="topic-toolbar">
                     <span>Keywords & Tags</span>
                     <button type="button">+ Add Tag</button>
                   </div>
-                  <div class="topic-list">
+                  <div v-if="documentSummary" class="topic-list">
                     <span v-for="topic in visibleSummaryTopics" :key="topic">
                       {{ topic }}
                       <AppIcon name="close" />
@@ -1627,17 +2039,9 @@ function toErrorMessage(error: unknown): string {
             </div>
           </section>
         </div>
-        <button
-          type="button"
-          class="file-chat-fab"
-          aria-label="Open chat"
-          @click="setActiveView('chat')"
-        >
-          <AppIcon name="chat_bubble" />
-        </button>
       </section>
 
-      <section v-else class="analysis-page">
+      <section v-else class="analysis-page" :style="chatWorkspaceStyle">
         <aside class="chat-session-rail excelai-side-nav">
           <div class="chat-rail-brand">
             <div class="rail-logo">
@@ -1700,12 +2104,18 @@ function toErrorMessage(error: unknown): string {
                 class="item-action-menu session-action-menu"
                 @click.stop
               >
-                <button type="button" @click="selectChatSession(session)">Open</button>
                 <button type="button" @click="toggleChatSessionPin(session)">
+                  <AppIcon name="push_pin" />
                   {{ session.pinned_at ? 'Unpin' : 'Pin' }}
                 </button>
-                <button type="button" @click="renameChatSessionPrompt(session)">Rename</button>
-                <button type="button" class="danger-text" @click="removeChatSession(session)">Delete</button>
+                <button type="button" @click="renameChatSessionPrompt(session)">
+                  <AppIcon name="edit" />
+                  Rename
+                </button>
+                <button type="button" class="danger-text" @click="removeChatSession(session)">
+                  <AppIcon name="close" />
+                  Delete
+                </button>
               </span>
             </article>
 
@@ -1744,6 +2154,17 @@ function toErrorMessage(error: unknown): string {
         </aside>
 
         <section class="sheet-stage">
+          <div class="workbook-title-bar" aria-label="Current workbook">
+            <span class="workbook-title-icon">
+              <AppIcon name="description" />
+            </span>
+            <div class="workbook-title-copy">
+              <span>Current Workbook</span>
+              <strong :title="selectedFileDisplayName">{{ selectedFileDisplayName }}</strong>
+            </div>
+            <span class="workbook-title-meta">{{ workbookStatusLabel }}</span>
+          </div>
+
           <header class="sheet-topbar">
             <div class="sheet-search-field">
               <AppIcon name="search" />
@@ -1760,21 +2181,44 @@ function toErrorMessage(error: unknown): string {
             </div>
           </header>
 
+          <div class="excel-focus-bar">
+            <div class="active-cell-pill">
+              <AppIcon name="grid_view" />
+              <strong>{{ selectedCellAddress }}</strong>
+            </div>
+            <span class="focus-divider"></span>
+            <span class="value-label">Value:</span>
+            <div class="active-cell-value-scroll custom-scrollbar" tabindex="0">
+              <strong class="active-cell-value">{{ selectedCellValue }}</strong>
+            </div>
+          </div>
+
           <div class="excel-grid-shell custom-scrollbar">
             <div
+              v-if="preview"
               class="excel-grid-card"
-              :style="{ '--excel-column-count': excelDataColumnCount }"
+              :class="{
+                'column-resizing': isExcelColumnResizing,
+                'row-resizing': isExcelRowResizing,
+              }"
+              :style="excelGridStyle"
             >
               <div class="excel-grid-header-row">
                 <div class="excel-grid-corner">
                   <AppIcon name="grid_view" />
                 </div>
                 <div
-                  v-for="label in excelColumnLabels"
+                  v-for="(label, labelIndex) in excelColumnLabels"
                   :key="`column-${label}`"
                   class="excel-grid-column-head"
+                  @pointerdown="startExcelColumnResizeFromHeader($event, labelIndex + 1)"
                 >
                   {{ label }}
+                  <span
+                    class="excel-column-resize-handle"
+                    aria-hidden="true"
+                    @pointerdown="startExcelColumnResize($event, labelIndex + 1)"
+                  ></span>
                 </div>
               </div>
 
@@ -1787,17 +2231,28 @@ function toErrorMessage(error: unknown): string {
                   highlighted: rowIsHighlighted(row),
                   'header-like': (preview?.offset ?? 0) === 0 && rowIndex === 0,
                 }"
-                @click="lookupVisibleRow(row)"
+                :style="getExcelRowStyle(row, rowIndex)"
               >
-                <div class="excel-grid-row-number">{{ (preview?.offset ?? 0) + rowIndex + 1 }}</div>
+                <div class="excel-grid-row-number">
+                  {{ (preview?.offset ?? 0) + rowIndex + 1 }}
+                  <span
+                    class="excel-row-resize-handle"
+                    aria-hidden="true"
+                    @pointerdown="startExcelRowResize($event, excelRowKey(row, rowIndex))"
+                  ></span>
+                </div>
                 <div
                   v-for="columnIndex in excelDataColumnCount"
                   :key="`${row[0] || rowIndex}-${columnIndex}`"
                   class="excel-grid-cell"
-                  :class="{ 'cell-cited': rowIsHighlighted(row) && columnIndex <= 2 }"
+                  :class="{
+                    'cell-selected': isGridCellSelected(row, rowIndex, columnIndex),
+                  }"
+                  @click="selectGridCell(row, rowIndex, columnIndex)"
                 >
-                  {{ row[columnIndex] || '' }}
-                  <span v-if="rowIsHighlighted(row) && columnIndex <= 2"></span>
+                  <span class="excel-grid-cell-value custom-scrollbar">
+                    {{ getGridCellValue(row, columnIndex) }}
+                  </span>
                 </div>
               </div>
 
@@ -1805,9 +2260,15 @@ function toErrorMessage(error: unknown): string {
                 v-for="fillerIndex in excelFillerRowCount"
                 :key="`filler-${fillerIndex}`"
                 class="excel-grid-row filler"
+                :style="getFillerExcelRowStyle(fillerIndex)"
               >
                 <div class="excel-grid-row-number">
-                  {{ excelDisplayRows.length + fillerIndex }}
+                  {{ fillerRowNumber(fillerIndex) }}
+                  <span
+                    class="excel-row-resize-handle"
+                    aria-hidden="true"
+                    @pointerdown="startExcelRowResize($event, fillerExcelRowKey(fillerIndex))"
+                  ></span>
                 </div>
                 <div
                   v-for="columnIndex in excelDataColumnCount"
@@ -1818,17 +2279,13 @@ function toErrorMessage(error: unknown): string {
             </div>
 
             <div v-if="!preview" class="excel-grid-empty">
-              Upload or select a workbook to preview its rows.
+              <span class="excel-grid-empty-icon"><AppIcon name="grid_view" /></span>
+              <strong>No workbook selected</strong>
+              <p>Start a chat or choose a data source to preview its rows here.</p>
             </div>
           </div>
 
           <div class="sheet-tabs" aria-label="Workbook sheets">
-            <div class="sheet-file-selector">
-              <AppIcon name="description" />
-              <span>{{ selectedFileDisplayName }}</span>
-              <AppIcon name="keyboard_arrow_down" />
-            </div>
-            <div class="sheet-tab-divider"></div>
             <button
               v-for="sheet in sheets"
               :key="sheet.sheet_id"
@@ -1841,7 +2298,15 @@ function toErrorMessage(error: unknown): string {
           </div>
         </section>
 
-        <aside class="assistant-column">
+        <aside class="assistant-column" :class="{ resizing: isChatResizing }">
+          <button
+            type="button"
+            class="chat-column-resizer"
+            aria-label="Resize chat panel"
+            @pointerdown="startChatResize"
+          >
+            <AppIcon name="drag_handle" />
+          </button>
           <ChatPanel
             :session-id="activeChatSessionId"
             :session-title="activeChatSession?.title ?? ''"
@@ -1940,6 +2405,58 @@ function toErrorMessage(error: unknown): string {
             "
           >
             Delete
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section
+      v-if="uploadDialog"
+      class="dialog-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="upload-dialog-title"
+      @keydown.esc="cancelUploadDialog"
+    >
+      <div class="app-dialog upload-confirm-dialog">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">
+              {{ uploadDialog.kind === 'replace' ? 'Replacement' : 'Upload' }}
+            </p>
+            <h3 id="upload-dialog-title">
+              {{ uploadDialog.kind === 'replace' ? 'Confirm replacement' : 'Upload and parse' }}
+            </h3>
+          </div>
+          <button
+            type="button"
+            class="dialog-icon-button"
+            aria-label="Close"
+            @click="cancelUploadDialog"
+          >
+            <AppIcon name="close" />
+          </button>
+        </div>
+        <div class="upload-dialog-file">
+          <span class="file-badge large"><AppIcon name="table_chart" /></span>
+          <div>
+            <strong>{{ uploadDialog.file.name }}</strong>
+            <span>{{ uploadDialog.kind === 'replace' ? 'Create a new active version' : 'Parse workbook into searchable sheets' }}</span>
+          </div>
+        </div>
+        <p v-if="uploadDialog.kind === 'replace'" class="dialog-copy">
+          A file with this name already exists. Confirming will keep the workbook record and create a new active version.
+        </p>
+        <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
+        <div class="dialog-actions">
+          <button type="button" class="dialog-secondary" @click="cancelUploadDialog">Cancel</button>
+          <button
+            type="button"
+            class="dialog-primary"
+            :disabled="isWorkspaceBusy"
+            @click="confirmUploadDialog"
+          >
+            {{ isWorkspaceBusy ? 'Parsing...' : uploadDialog.kind === 'replace' ? 'Replace' : 'Upload' }}
           </button>
         </div>
       </div>

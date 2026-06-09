@@ -20,6 +20,7 @@ const iconPaths: Record<string, string[]> = {
   dashboard: ['M4 5h7v7H4V5zM13 5h7v4h-7V5zM13 11h7v8h-7v-8zM4 14h7v5H4v-5z'],
   description: ['M7 3h7l5 5v13H7V3z', 'M14 3v6h5', 'M9 13h6M9 17h6'],
   download: ['M12 3v11M7 9l5 5 5-5', 'M5 19h14'],
+  drag_handle: ['M8 6h.01M8 12h.01M8 18h.01M16 6h.01M16 12h.01M16 18h.01'],
   edit: ['M4 20h4l11-11a2.8 2.8 0 00-4-4L4 16v4z', 'M13.5 6.5l4 4'],
   folder_open: ['M3 7h7l2 2h9l-2 10H5L3 7z', 'M3 7V5h6l2 2'],
   fullscreen: ['M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'],
@@ -29,9 +30,11 @@ const iconPaths: Record<string, string[]> = {
   help: ['M12 20h.01', 'M9.5 9a2.5 2.5 0 115 0c0 2.5-2.5 2.2-2.5 5', 'M12 22a10 10 0 100-20 10 10 0 000 20z'],
   history: ['M3 12a9 9 0 109-9', 'M3 5v7h7', 'M12 7v5l4 2'],
   keyboard_arrow_down: ['M6 9l6 6 6-6'],
+  keyboard_arrow_up: ['M6 15l6-6 6 6'],
   logout: ['M10 6H6v12h4', 'M14 8l4 4-4 4', 'M18 12H9'],
   more_vert: ['M12 7h.01M12 12h.01M12 17h.01'],
   notifications: ['M18 16H6l1.4-2.4V10a4.6 4.6 0 119.2 0v3.6L18 16z', 'M10 19a2 2 0 004 0'],
+  push_pin: ['M14 3l7 7-3 1-4 4v4l-2 2-4-4-4 4-1-1 4-4-4-4 2-2h4l4-4 1-3z'],
   query_stats: ['M4 19V5M4 19h16', 'M7 15l3-4 3 2 5-7', 'M18 6h2v2'],
   refresh: ['M20 6v5h-5', 'M4 18v-5h5', 'M19 11a7 7 0 00-12-4M5 13a7 7 0 0012 4'],
   schema: ['M12 3v5M6 11h12M6 11v5M18 11v5', 'M9 8h6v6H9V8z', 'M3 16h6v5H3v-5z', 'M15 16h6v5h-6v-5z'],
@@ -40,6 +43,7 @@ const iconPaths: Record<string, string[]> = {
   table_chart: ['M4 5h16v14H4V5z', 'M4 10h16M9 5v14M15 5v14'],
   table_rows: ['M4 5h16v14H4V5z', 'M4 10h16M4 14h16'],
   tune: ['M4 7h10M18 7h2M4 17h2M10 17h10', 'M14 5v4M8 15v4'],
+  upload_file: ['M7 3h7l5 5v13H7V3z', 'M14 3v6h5', 'M12 17V9M8 13l4-4 4 4'],
   view_week: ['M4 5h16v14H4V5z', 'M9 5v14M15 5v14'],
 }
 

@@ -859,7 +859,7 @@ label > span {
 
 .analysis-page {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 420px;
+  grid-template-columns: 280px minmax(0, 1fr) var(--chat-column-width, 420px);
   flex: 1 1 auto;
   gap: 0;
   min-height: 0;
@@ -2649,6 +2649,902 @@ label > span {
   }
 }
 
+/* File page final visual tuning */
+.excelai-app:not(.chat-mode) .file-sources-pane {
+  padding: 24px 28px 22px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-list-panel {
+  gap: 16px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .panel-heading h3 {
+  font-size: 22px;
+  line-height: 30px;
+}
+
+.excelai-app:not(.chat-mode) .files-found-label {
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone {
+  min-height: 154px;
+  border-width: 1.5px;
+  border-radius: 14px;
+  padding: 24px 18px;
+  background: rgb(255 255 255 / 0.72);
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-icon {
+  width: 48px;
+  height: 48px;
+  margin-bottom: 6px;
+  font-size: 23px;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone strong {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone > span:last-child {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-card-list {
+  gap: 12px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card {
+  min-height: 78px;
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.excelai-app:not(.chat-mode) .file-badge.large {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  font-size: 22px;
+}
+
+.excelai-app:not(.chat-mode) .file-card-main {
+  gap: 3px;
+}
+
+.excelai-app:not(.chat-mode) .file-card-main strong {
+  font-size: 15px;
+  line-height: 21px;
+}
+
+.excelai-app:not(.chat-mode) .file-meta-line {
+  font-size: 12px;
+  line-height: 17px;
+}
+
+/* Final interaction overrides */
+.knowledge-upload-zone.dragging {
+  border-color: #0f172a;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgb(15 23 42 / 0.08);
+}
+
+.excelai-app.chat-mode .analysis-page {
+  grid-template-columns: 280px minmax(0, 1fr) var(--chat-column-width, 420px);
+}
+
+.excelai-app.chat-mode .assistant-column {
+  position: relative;
+  flex: 0 0 var(--chat-column-width, 420px);
+  width: var(--chat-column-width, 420px);
+  min-width: 360px;
+  max-width: 560px;
+}
+
+.excelai-app.chat-mode .excel-grid-card {
+  grid-template-columns: 48px repeat(var(--excel-column-count, 6), minmax(var(--excel-cell-width, 120px), var(--excel-cell-width, 120px)));
+}
+
+.excelai-app.chat-mode .excel-grid-row {
+  min-height: var(--excel-row-height, 42px);
+}
+
+.excelai-app.chat-mode .excel-grid-row-number,
+.excelai-app.chat-mode .excel-grid-cell {
+  min-height: var(--excel-row-height, 42px);
+}
+
+.excelai-app.chat-mode .chat-source-copy {
+  min-width: 0;
+}
+
+.excelai-app.chat-mode .chat-source-copy strong {
+  display: block;
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Final refinement pass */
+.file-sources-pane {
+  padding: 24px 28px 22px;
+  background: #fcf8fa;
+}
+
+.file-sources-pane .file-list-panel {
+  gap: 16px;
+}
+
+.file-sources-pane .panel-heading h3 {
+  font-size: 22px;
+  line-height: 30px;
+}
+
+.files-found-label {
+  color: #64748b;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.knowledge-upload-zone {
+  min-height: 154px;
+  border-width: 1.5px;
+  border-radius: 14px;
+  padding: 24px 18px;
+  background: rgb(255 255 255 / 0.62);
+}
+
+.knowledge-upload-icon {
+  width: 48px;
+  height: 48px;
+  margin-bottom: 6px;
+  color: #64748b;
+  background: #eef2f6;
+  font-size: 23px;
+}
+
+.knowledge-upload-zone strong {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.knowledge-upload-zone > span:last-child {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.file-sources-pane .file-card-list {
+  gap: 12px;
+}
+
+.file-sources-pane .file-library-card {
+  min-height: 78px;
+  border-color: #d7dce5;
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: #ffffff;
+}
+
+.file-sources-pane .file-library-card:hover {
+  border-color: #b7c1cf;
+  box-shadow: 0 10px 26px rgb(15 23 42 / 0.06);
+}
+
+.file-sources-pane .file-library-card.selected {
+  border: 1px solid #0f172a;
+  background: #f8fafc;
+}
+
+.file-badge.large {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  font-size: 22px;
+}
+
+.file-card-main {
+  gap: 3px;
+}
+
+.file-card-main strong {
+  font-size: 15px;
+  line-height: 21px;
+}
+
+.file-meta-line {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.file-card-menu,
+.session-action-menu {
+  width: 160px;
+}
+
+.session-action-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.session-action-menu button .app-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.active-cell-value-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+  white-space: nowrap;
+}
+
+.active-cell-value {
+  display: inline-block;
+  max-width: none;
+  min-width: max-content;
+}
+
+.excel-size-controls {
+  display: none;
+}
+
+.excel-grid-column-head,
+.excel-grid-row-number,
+.excel-grid-corner {
+  position: relative;
+}
+
+.excel-column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 5;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.excel-column-resize-handle::after {
+  position: absolute;
+  top: 8px;
+  right: 3px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+}
+
+.excel-column-resize-handle:hover::after,
+.excel-grid-card.column-resizing .excel-column-resize-handle::after {
+  background: #34d399;
+}
+
+.excel-row-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: -4px;
+  left: 0;
+  z-index: 5;
+  height: 8px;
+  cursor: row-resize;
+}
+
+.excel-row-resize-handle::after {
+  position: absolute;
+  right: 8px;
+  bottom: 3px;
+  left: 8px;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+}
+
+.excel-row-resize-handle:hover::after,
+.excel-grid-card.row-resizing .excel-row-resize-handle::after {
+  background: #34d399;
+}
+
+.excel-grid-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 520px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 14px;
+  color: #64748b;
+  background:
+    linear-gradient(#ffffff, #ffffff) padding-box,
+    repeating-linear-gradient(90deg, #f1f5f9 0 1px, transparent 1px 120px),
+    repeating-linear-gradient(0deg, #f1f5f9 0 1px, transparent 1px 42px);
+  text-align: center;
+}
+
+.excel-grid-empty-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 10px;
+  color: #64748b;
+  background: #f1f5f9;
+  font-size: 22px;
+}
+
+.excel-grid-empty strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.excel-grid-empty p {
+  max-width: 320px;
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 19px;
+}
+
+/* Interaction polish requested on 2026-06-09 */
+.app-icon {
+  flex: 0 0 1em;
+  min-width: 1em;
+  min-height: 1em;
+  stroke-width: 2;
+}
+
+.nav-glyph,
+.session-glyph,
+.rail-logo,
+.chat-source-file-icon,
+.file-badge,
+.knowledge-upload-icon,
+.topbar-icon-button,
+.icon-only-button,
+.menu-trigger,
+.chat-icon-button,
+.chat-tool-button,
+.chat-send-button {
+  flex-shrink: 0;
+}
+
+.nav-glyph .app-icon,
+.session-glyph .app-icon,
+.rail-logo .app-icon,
+.topbar-icon-button .app-icon,
+.icon-only-button .app-icon,
+.menu-trigger .app-icon,
+.chat-icon-button .app-icon,
+.chat-tool-button .app-icon,
+.chat-send-button .app-icon {
+  width: 1em;
+  height: 1em;
+}
+
+.app-sidebar {
+  padding-top: 24px;
+}
+
+.brand-block {
+  padding-bottom: 34px;
+}
+
+.file-sources-pane {
+  padding: 32px 34px 24px;
+  background: #fcf8fa;
+}
+
+.file-sources-pane .file-list-panel {
+  gap: 22px;
+}
+
+.file-sources-pane .panel-heading {
+  padding: 0;
+}
+
+.file-sources-pane .panel-heading h3 {
+  margin: 0;
+  color: #1b1b1d;
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 34px;
+}
+
+.files-found-label {
+  color: #45464d;
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.knowledge-upload-zone {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 206px;
+  border: 2px dashed #c6c6cd;
+  border-radius: 16px;
+  padding: 34px 24px;
+  color: #1b1b1d;
+  background: rgb(255 255 255 / 0.24);
+  text-align: center;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.knowledge-upload-zone:hover:not(:disabled) {
+  border-color: #0f172a;
+  background: #ffffff;
+}
+
+.knowledge-upload-zone:active:not(:disabled) {
+  transform: scale(0.995);
+}
+
+.knowledge-upload-icon {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  place-items: center;
+  margin-bottom: 12px;
+  border-radius: 999px;
+  color: #45464d;
+  background: #e4e2e4;
+  font-size: 30px;
+}
+
+.knowledge-upload-zone strong {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 28px;
+}
+
+.knowledge-upload-zone > span:last-child {
+  color: #45464d;
+  font-size: 18px;
+  line-height: 26px;
+}
+
+.file-sources-pane .file-card-list {
+  gap: 16px;
+}
+
+.file-sources-pane .file-library-card {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 104px;
+  border: 1px solid #c6c6cd;
+  border-radius: 16px;
+  padding: 22px 24px;
+  background: rgb(255 255 255 / 0.34);
+  box-shadow: none;
+}
+
+.file-sources-pane .file-library-card.selected {
+  border: 1.5px solid #000000;
+  background: #e4e2e4;
+  box-shadow: none;
+}
+
+.file-sources-pane .file-library-card.pinned:not(.selected) {
+  border-color: rgb(0 106 97 / 0.35);
+}
+
+.file-badge.large {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  color: #45464d;
+  background: #e4e2e4;
+  font-size: 28px;
+}
+
+.file-library-card.selected .file-badge.large {
+  color: #006a61;
+  background: #86f2e4;
+}
+
+.file-card-main strong {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 28px;
+}
+
+.file-meta-line {
+  color: #45464d;
+  font-size: 17px;
+  line-height: 24px;
+}
+
+.file-card-actions {
+  align-self: center;
+}
+
+.file-card-menu {
+  top: 76px;
+  right: 22px;
+  width: 172px;
+  border-color: #e2e8f0;
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: 0 20px 48px rgb(15 23 42 / 0.16);
+}
+
+.item-action-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #334155;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.item-action-menu button .app-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+}
+
+.item-action-menu button:hover {
+  border-color: transparent;
+  background: #f1f5f9;
+}
+
+.item-action-menu button.danger-text {
+  color: #ba1a1a;
+}
+
+.file-summary-stack .summary-head-actions {
+  align-items: center;
+}
+
+.file-summary-stack .summary-card-head .secondary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 142px;
+  justify-content: center;
+}
+
+.file-summary-stack .summary-card-head .secondary-button .app-icon {
+  width: 17px;
+  height: 17px;
+}
+
+.file-summary-stack .insight-empty-state .primary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  justify-self: center;
+  min-width: 168px;
+}
+
+.file-summary-stack .topic-toolbar:empty,
+.file-summary-stack .topic-list:empty {
+  display: none;
+}
+
+.upload-confirm-dialog {
+  width: min(480px, 100%);
+}
+
+.upload-dialog-file {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px;
+  background: #f8fafc;
+}
+
+.upload-dialog-file div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.upload-dialog-file strong,
+.upload-dialog-file span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-dialog-file strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.upload-dialog-file span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.chat-data-sources-card {
+  min-height: 132px;
+}
+
+.chat-data-source-list {
+  min-height: 74px;
+}
+
+.chat-data-source-row,
+.chat-data-source-empty {
+  width: 100%;
+  min-height: 56px;
+  overflow: hidden;
+}
+
+.chat-source-copy strong {
+  max-width: 100%;
+}
+
+.chat-source-pager {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  justify-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.chat-source-pager small {
+  grid-column: 1 / -1;
+  color: #94a3b8;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 12px;
+}
+
+.chat-source-pager button {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  place-items: center;
+  border-radius: 7px;
+  padding: 0;
+  color: #64748b;
+  background: #f1f5f9;
+}
+
+.chat-source-pager button:hover:not(:disabled) {
+  color: #0f172a;
+  background: #e2e8f0;
+}
+
+.chat-source-pager button:disabled {
+  opacity: 0.42;
+}
+
+.chat-source-pager .app-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-data-source-empty {
+  cursor: default;
+  color: #64748b;
+  background: #f8fafc;
+}
+
+.chat-data-source-empty .chat-source-copy span {
+  color: #94a3b8;
+}
+
+.excelai-app.chat-mode .analysis-page {
+  grid-template-columns: 280px minmax(0, 1fr) var(--chat-column-width, 420px);
+}
+
+.assistant-column {
+  position: relative;
+  flex-basis: var(--chat-column-width, 420px);
+  width: var(--chat-column-width, 420px);
+  min-width: 360px;
+  max-width: 560px;
+}
+
+.chat-column-resizer {
+  position: absolute;
+  top: 0;
+  left: -7px;
+  z-index: 12;
+  display: grid;
+  width: 14px;
+  height: 100%;
+  min-height: 0;
+  place-items: center;
+  border-radius: 0;
+  padding: 0;
+  color: transparent;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.chat-column-resizer::before {
+  width: 3px;
+  height: 46px;
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+  transition: background 160ms ease;
+}
+
+.chat-column-resizer .app-icon {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  color: #94a3b8;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.chat-column-resizer:hover::before,
+.assistant-column.resizing .chat-column-resizer::before {
+  background: #cbd5e1;
+}
+
+.chat-column-resizer:hover .app-icon,
+.assistant-column.resizing .chat-column-resizer .app-icon {
+  opacity: 1;
+}
+
+.excel-focus-bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex: 0 0 auto;
+  min-height: 56px;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 10px 22px;
+  background: rgb(255 255 255 / 0.72);
+}
+
+.active-cell-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  padding: 7px 12px;
+  color: #0f172a;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+}
+
+.active-cell-pill .app-icon {
+  color: #94a3b8;
+  width: 16px;
+  height: 16px;
+}
+
+.active-cell-pill strong,
+.active-cell-value {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.focus-divider {
+  width: 1px;
+  height: 24px;
+  background: #e2e8f0;
+}
+
+.value-label {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.active-cell-value {
+  overflow: hidden;
+  min-width: 0;
+  max-width: min(260px, 28vw);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.excel-size-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.excel-size-controls label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.excel-size-controls input {
+  width: 86px;
+  min-height: 0;
+  padding: 0;
+  accent-color: #0f172a;
+}
+
+.excel-grid-shell {
+  padding: 22px;
+}
+
+.excel-grid-card {
+  grid-template-columns: 48px repeat(var(--excel-column-count, 6), minmax(var(--excel-cell-width, 120px), var(--excel-cell-width, 120px)));
+}
+
+.excel-grid-corner,
+.excel-grid-column-head {
+  min-height: 48px;
+}
+
+.excel-grid-row {
+  min-height: var(--excel-row-height, 42px);
+}
+
+.excel-grid-row-number,
+.excel-grid-cell {
+  min-height: var(--excel-row-height, 42px);
+}
+
+.excel-grid-cell.cell-selected {
+  z-index: 2;
+  border-color: #86efac;
+  background: #dcfce7;
+  box-shadow: inset 0 0 0 2px #34d399;
+}
+
+.excel-grid-cell.cell-selected::after {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #10b981;
+  content: "";
+}
+
+@media (max-width: 1180px) {
+  .excelai-app.chat-mode .analysis-page {
+    grid-template-columns: 280px minmax(0, 1fr) var(--chat-column-width, 420px);
+  }
+
+  .excelai-app.chat-mode .assistant-column {
+    flex-basis: var(--chat-column-width, 420px);
+    width: var(--chat-column-width, 420px);
+    min-width: 360px;
+    max-width: 560px;
+  }
+}
+
 @media (max-width: 840px) {
   .excelai-app {
     grid-template-columns: 1fr;
@@ -3215,7 +4111,7 @@ label > span {
 
 .excelai-app.chat-mode .analysis-page {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 420px;
+  grid-template-columns: 280px minmax(0, 1fr) var(--chat-column-width, 420px);
   flex: 1 1 auto;
   min-width: 1280px;
   min-height: 0;
@@ -3684,22 +4580,6 @@ label > span {
   background: rgb(236 253 245 / 0.35);
 }
 
-.excel-grid-cell.cell-cited {
-  border-color: #a7f3d0;
-  background: #ecfdf5;
-  box-shadow: inset 0 0 0 1px #a7f3d0;
-}
-
-.excel-grid-cell.cell-cited > span {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: #10b981;
-}
-
 .excel-grid-row.filler {
   opacity: 0.2;
 }
@@ -3777,9 +4657,10 @@ label > span {
 }
 
 .assistant-column {
-  flex: 0 0 420px;
-  width: 420px;
-  min-width: 420px;
+  flex: 0 0 var(--chat-column-width, 420px);
+  width: var(--chat-column-width, 420px);
+  min-width: 360px;
+  max-width: 560px;
   border-left: 1px solid #e2e8f0;
   background: #ffffff;
 }
@@ -4425,7 +5306,7 @@ label > span {
   }
 
   .excelai-app.chat-mode .analysis-page {
-    grid-template-columns: 280px minmax(0, 1fr) 420px;
+    grid-template-columns: 280px minmax(0, 1fr) var(--chat-column-width, 420px);
     align-content: stretch;
     min-width: 1280px;
     height: 100vh;
@@ -4451,12 +5332,472 @@ label > span {
   }
 
   .excelai-app.chat-mode .assistant-column {
-    flex: 0 0 420px;
-    width: 420px;
-    min-width: 420px;
+    flex: 0 0 var(--chat-column-width, 420px);
+    width: var(--chat-column-width, 420px);
+    min-width: 360px;
+    max-width: 560px;
     height: 100%;
     min-height: 0;
     border-top: 0;
     border-left: 1px solid #e2e8f0;
   }
+}
+
+/* 2026-06-09 interaction fixes */
+.primary-nav .nav-item:not(.muted-nav) {
+  cursor: pointer;
+}
+
+.file-sources-pane,
+.file-list-panel,
+.file-card-list {
+  overflow: visible;
+}
+
+.file-sources-pane .file-card-list {
+  overflow-x: visible;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.file-library-card.menu-open {
+  z-index: 2;
+}
+
+.file-sources-pane .file-library-card.menu-open {
+  border-color: #0f172a;
+  background: #f8fafc;
+  box-shadow: 0 14px 32px rgb(15 23 42 / 0.1);
+}
+
+.file-sources-pane .file-card-menu {
+  position: static;
+  display: flex;
+  grid-column: 1 / -1;
+  justify-self: end;
+  gap: 4px;
+  width: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-top: -4px;
+  padding: 4px;
+  background: #ffffff;
+  box-shadow: none;
+  transform: none;
+}
+
+.file-sources-pane .file-card-menu button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.excelai-app.chat-mode .excel-grid-card,
+.excel-grid-card {
+  grid-template-columns: var(--excel-grid-columns, 48px repeat(6, 120px));
+}
+
+.excel-grid-header-row {
+  height: 36px;
+}
+
+.excel-grid-row {
+  height: var(--excel-row-height-current, var(--excel-row-height, 42px));
+  min-height: var(--excel-row-height-current, var(--excel-row-height, 42px));
+}
+
+.excel-grid-corner,
+.excel-grid-column-head {
+  position: relative;
+  min-height: 36px;
+}
+
+.excel-grid-row-number,
+.excel-grid-cell {
+  min-height: var(--excel-row-height-current, var(--excel-row-height, 42px));
+}
+
+.excel-grid-column-head,
+.excel-grid-row-number {
+  user-select: none;
+}
+
+.excel-grid-column-head {
+  justify-content: center;
+  padding-right: 16px;
+}
+
+.excel-column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 8;
+  width: 12px;
+  height: 100%;
+  cursor: col-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.excel-row-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: -4px;
+  left: 0;
+  z-index: 4;
+  height: 8px;
+  cursor: row-resize;
+}
+
+.excel-grid-row-number {
+  position: relative;
+}
+
+.excel-grid-cell {
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: clip;
+}
+
+.excel-grid-cell-value {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.excel-grid-row.header-like .excel-grid-cell-value {
+  font-weight: 700;
+}
+
+.active-cell-value-scroll {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: #ffffff;
+}
+
+.active-cell-value {
+  display: inline-block;
+  min-width: max-content;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.sheet-file-selector {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.sheet-file-selector .app-icon:last-child {
+  color: #64748b;
+}
+
+.sheet-file-selector span:nth-child(2) {
+  max-width: min(420px, 42vw);
+}
+
+.file-chat-fab {
+  display: none;
+}
+
+/* Frontend design system consolidation */
+.excelai-app,
+.excelai-app:not(.chat-mode) {
+  background: #fcf8fa;
+}
+
+.excelai-app:not(.chat-mode) .app-sidebar {
+  width: 260px;
+  border-right: 1px solid #e2e8f0;
+  padding: 24px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .nav-item {
+  min-height: 40px;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.excelai-app:not(.chat-mode) .nav-item.active,
+.excelai-app:not(.chat-mode) .nav-item:hover:not(:disabled) {
+  color: #0f172a;
+  background: #f1f5f9;
+}
+
+.excelai-app:not(.chat-mode) .nav-glyph {
+  width: 20px;
+  height: 20px;
+  color: inherit;
+  background: transparent;
+}
+
+.excelai-app:not(.chat-mode) .file-management-shell {
+  grid-template-columns: minmax(360px, 0.82fr) minmax(520px, 1.18fr);
+  border-top: 1px solid #e2e8f0;
+  background: #fcf8fa;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane {
+  gap: 18px;
+  border-right: 1px solid #e2e8f0;
+  padding: 24px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .file-insight-pane {
+  background: #fcf8fa;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .panel-heading {
+  align-items: center;
+  min-height: 34px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .panel-heading h3 {
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 24px;
+}
+
+.excelai-app:not(.chat-mode) .files-found-label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone {
+  gap: 6px;
+  min-height: 150px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  padding: 22px 18px;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone:hover:not(:disabled),
+.excelai-app:not(.chat-mode) .knowledge-upload-zone.dragging {
+  border-color: #0f172a;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-icon {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 6px;
+  color: #64748b;
+  background: #e2e8f0;
+  font-size: 22px;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone strong {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 20px;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone > span:last-child {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-card-list {
+  gap: 10px;
+  padding-right: 6px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card {
+  grid-template-columns: 44px minmax(0, 1fr) 34px;
+  gap: 12px;
+  min-height: 76px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 8px 22px rgb(15 23 42 / 0.06);
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card.selected,
+.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card.menu-open {
+  border: 1px solid #0f172a;
+  background: #f8fafc;
+  box-shadow: none;
+}
+
+.excelai-app:not(.chat-mode) .file-badge.large {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  color: #059669;
+  background: #ecfdf5;
+  font-size: 20px;
+}
+
+.excelai-app:not(.chat-mode) .file-card-main {
+  min-width: 0;
+  gap: 2px;
+}
+
+.excelai-app:not(.chat-mode) .file-card-main strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: #0f172a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+}
+
+.excelai-app:not(.chat-mode) .file-meta-line {
+  min-width: 0;
+  overflow: hidden;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-card-menu {
+  max-width: 100%;
+  justify-self: stretch;
+  justify-content: flex-end;
+  overflow-x: auto;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-card-menu button {
+  flex: 0 0 auto;
+}
+
+.workbook-title-bar {
+  display: flex;
+  flex: 0 0 58px;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 10px 32px;
+  background: #ffffff;
+}
+
+.workbook-title-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 8px;
+  color: #059669;
+  background: #ecfdf5;
+}
+
+.workbook-title-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.workbook-title-copy span,
+.workbook-title-meta {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.workbook-title-copy strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: #0f172a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 19px;
+}
+
+.workbook-title-meta {
+  flex: 0 0 auto;
+  max-width: 38%;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.excel-focus-bar {
+  flex: 0 0 48px;
+}
+
+.excelai-app.chat-mode .sheet-topbar {
+  flex: 0 0 58px;
+}
+
+.excel-grid-empty {
+  min-height: 360px;
+}
+
+.excel-grid-cell.cell-selected {
+  z-index: 2;
+  border-color: #10b981;
+  background: #dcfce7;
+  box-shadow: inset 0 0 0 2px #10b981;
+}
+
+.excel-grid-row.highlighted .excel-grid-row-number,
+.excel-grid-row.highlighted .excel-grid-cell {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+  box-shadow: inset 0 0 0 1px #a7f3d0;
+}
+
+.excel-grid-row.highlighted .excel-grid-row-number {
+  color: #047857;
+}
+
+.excel-grid-row.highlighted .excel-grid-cell-value {
+  color: #064e3b;
+  font-weight: 600;
+}
+
+.sheet-tabs {
+  min-width: 0;
+}
+
+.excelai-app.chat-mode .sheet-tabs {
+  gap: 8px;
+  padding: 0 32px;
+}
+
+.excelai-app.chat-mode .sheet-tabs button {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

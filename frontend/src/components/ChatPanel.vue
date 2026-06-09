@@ -42,6 +42,7 @@ const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
 const chatScrollRegion = ref<HTMLElement | null>(null)
 const chatInput = ref<HTMLTextAreaElement | null>(null)
+const activeSourceIndex = ref<number>(0)
 let nextHistoryEntryId = 0
 
 const currentSessionKey = computed(() => props.sessionId || draftSessionKey)
@@ -65,15 +66,32 @@ const activeSourceDocuments = computed<SelectedDocument[]>(() => {
 })
 
 const dataSourceDocuments = computed<SelectedDocument[]>(() => {
-  if (activeSourceDocuments.value.length > 0) {
-    return activeSourceDocuments.value
+  return activeSourceDocuments.value
+})
+
+const activeDataSourceDocument = computed<SelectedDocument | null>(() => {
+  return dataSourceDocuments.value[normalizedSourceIndex.value] ?? null
+})
+
+const normalizedSourceIndex = computed(() => {
+  const count = dataSourceDocuments.value.length
+  if (count === 0) {
+    return 0
   }
-  return props.activeDocument ? [props.activeDocument] : []
+  return Math.min(activeSourceIndex.value, count - 1)
 })
 
 const sourceCountLabel = computed(() => {
   const count = dataSourceDocuments.value.length
   return `${count} ${count === 1 ? 'File' : 'Files'}`
+})
+
+const sourcePositionLabel = computed(() => {
+  const count = dataSourceDocuments.value.length
+  if (count <= 1) {
+    return ''
+  }
+  return `${normalizedSourceIndex.value + 1}/${count}`
 })
 
 watch(currentSessionKey, () => {
@@ -91,6 +109,13 @@ watch(
 watch(question, () => {
   void nextTick(resizeChatInput)
 })
+
+watch(
+  () => dataSourceDocuments.value.map(documentKey).join('|'),
+  () => {
+    activeSourceIndex.value = 0
+  },
+)
 
 async function scrollChatToBottom(): Promise<void> {
   await nextTick()
@@ -197,6 +222,14 @@ function selectDocument(document: SelectedDocument): void {
   emit('selectDocument', document)
 }
 
+function stepDataSource(direction: -1 | 1): void {
+  const count = dataSourceDocuments.value.length
+  if (count <= 1) {
+    return
+  }
+  activeSourceIndex.value = (normalizedSourceIndex.value + direction + count) % count
+}
+
 function titleFromQuestion(value: string): string {
   const normalized = value.replace(/\s+/g, ' ').trim()
   return normalized.length > 56 ? `${normalized.slice(0, 53)}...` : normalized
@@ -264,24 +297,61 @@ function resizeChatInput(): void {
         </div>
         <div class="chat-data-source-list">
           <button
-            v-for="document in dataSourceDocuments"
-            :key="documentKey(document)"
+            v-if="activeDataSourceDocument"
+            :key="documentKey(activeDataSourceDocument)"
             type="button"
             class="chat-data-source-row"
-            @click="selectDocument(document)"
+            @click="selectDocument(activeDataSourceDocument)"
           >
             <span class="chat-source-file-icon">
               <AppIcon name="description" />
             </span>
             <span class="chat-source-copy">
-              <strong>{{ documentTitle(document) }}</strong>
+              <strong :title="documentTitle(activeDataSourceDocument)">
+                {{ documentTitle(activeDataSourceDocument) }}
+              </strong>
               <span>Active Source</span>
             </span>
             <span class="chat-source-status" aria-hidden="true">
               <span></span>
             </span>
-            <span class="chat-source-expand"><AppIcon name="keyboard_arrow_down" /></span>
+            <span class="chat-source-pager" @click.stop>
+              <small v-if="sourcePositionLabel">{{ sourcePositionLabel }}</small>
+              <button
+                type="button"
+                aria-label="Previous data source"
+                :disabled="dataSourceDocuments.length <= 1"
+                @click="stepDataSource(-1)"
+              >
+                <AppIcon name="keyboard_arrow_up" />
+              </button>
+              <button
+                type="button"
+                aria-label="Next data source"
+                :disabled="dataSourceDocuments.length <= 1"
+                @click="stepDataSource(1)"
+              >
+                <AppIcon name="keyboard_arrow_down" />
+              </button>
+            </span>
           </button>
+          <div v-else class="chat-data-source-empty">
+            <span class="chat-source-file-icon muted">
+              <AppIcon name="description" />
+            </span>
+            <span class="chat-source-copy">
+              <strong>No active source</strong>
+              <span>Select or ask about a workbook</span>
+            </span>
+            <span class="chat-source-pager disabled" aria-hidden="true">
+              <button type="button" disabled>
+                <AppIcon name="keyboard_arrow_up" />
+              </button>
+              <button type="button" disabled>
+                <AppIcon name="keyboard_arrow_down" />
+              </button>
+            </span>
+          </div>
         </div>
       </section>
 
