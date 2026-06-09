@@ -25,6 +25,7 @@ class WorkbookProfileBuilder:
                     column_count=self._column_count(sheet.rows),
                     sample_rows=sheet.rows[:10],
                     candidate_header=self._candidate_header(sheet.rows),
+                    profile_rows=sheet.rows,
                 )
                 for sheet_id, sheet_code, sheet in sheets
             ],
@@ -45,6 +46,7 @@ class WorkbookProfileBuilder:
                     "column_count": sheet.column_count,
                     "candidate_header": sheet.candidate_header,
                     "sample_rows": sheet.sample_rows,
+                    "profile_rows": sheet.profile_rows,
                 }
                 for sheet in profile.sheets
             ],

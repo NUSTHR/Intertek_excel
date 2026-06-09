@@ -190,6 +190,48 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=3,
+        name="add_document_routing_summary_fields",
+        statements=(
+            """
+            ALTER TABLE document_summaries
+            ADD COLUMN document_title TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE document_summaries
+            ADD COLUMN document_type TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            """
+            ALTER TABLE document_summaries
+            ADD COLUMN coverage_scope_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            """
+            ALTER TABLE document_summaries
+            ADD COLUMN positive_routing_terms_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE document_summaries
+            ADD COLUMN negative_routing_terms_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE document_summaries
+            ADD COLUMN exact_identifiers_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE document_summaries
+            ADD COLUMN routing_notes TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE document_sheet_summaries
+            ADD COLUMN header_terms_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE document_sheet_summaries
+            ADD COLUMN sampled_identifiers_json TEXT NOT NULL DEFAULT '[]'
+            """,
+        ),
+    ),
 )
 
 
@@ -695,21 +737,31 @@ class SQLiteExcelAssetRepository:
                 """
                 INSERT INTO document_summaries
                   (
-                    summary_id, file_id, version_id, summary_text, business_domain,
-                    key_topics_json, suitable_questions_json,
-                    unsuitable_questions_json, created_at
+                    summary_id, file_id, version_id, document_title, document_type,
+                    summary_text, business_domain, coverage_scope_json,
+                    key_topics_json, positive_routing_terms_json,
+                    negative_routing_terms_json, exact_identifiers_json,
+                    suitable_questions_json, unsuitable_questions_json,
+                    routing_notes, created_at
                   )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     summary.summary_id,
                     summary.file_id,
                     summary.version_id,
+                    summary.document_title,
+                    summary.document_type,
                     summary.summary_text,
                     summary.business_domain,
+                    self._dump_json(summary.coverage_scope),
                     self._dump_json(summary.key_topics),
+                    self._dump_json(summary.positive_routing_terms),
+                    self._dump_json(summary.negative_routing_terms),
+                    self._dump_json(summary.exact_identifiers),
                     self._dump_json(summary.suitable_questions),
                     self._dump_json(summary.unsuitable_questions),
+                    summary.routing_notes,
                     summary.created_at,
                 ),
             )
@@ -718,9 +770,10 @@ class SQLiteExcelAssetRepository:
                 INSERT INTO document_sheet_summaries
                   (
                     summary_id, sheet_id, sheet_name, summary,
-                    important_columns_json, likely_question_types_json
+                    important_columns_json, likely_question_types_json,
+                    header_terms_json, sampled_identifiers_json
                   )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -730,6 +783,8 @@ class SQLiteExcelAssetRepository:
                         sheet.summary,
                         self._dump_json(sheet.important_columns),
                         self._dump_json(sheet.likely_question_types),
+                        self._dump_json(sheet.header_terms),
+                        self._dump_json(sheet.sampled_identifiers),
                     )
                     for sheet in summary.sheet_summaries
                 ],
@@ -1053,9 +1108,21 @@ class SQLiteExcelAssetRepository:
             summary_id=str(row["summary_id"]),
             file_id=str(row["file_id"]),
             version_id=str(row["version_id"]),
+            document_title=self._row_str(row, "document_title"),
+            document_type=self._row_str(row, "document_type", "unknown") or "unknown",
             summary_text=str(row["summary_text"]),
             business_domain=str(row["business_domain"]),
+            coverage_scope=self._load_scope_map(self._row_value(row, "coverage_scope_json", "{}")),
             key_topics=self._load_string_list(row["key_topics_json"]),
+            positive_routing_terms=self._load_string_list(
+                self._row_value(row, "positive_routing_terms_json", "[]")
+            ),
+            negative_routing_terms=self._load_string_list(
+                self._row_value(row, "negative_routing_terms_json", "[]")
+            ),
+            exact_identifiers=self._load_string_list(
+                self._row_value(row, "exact_identifiers_json", "[]")
+            ),
             suitable_questions=self._load_string_list(row["suitable_questions_json"]),
             unsuitable_questions=self._load_string_list(
                 row["unsuitable_questions_json"]
@@ -1071,9 +1138,16 @@ class SQLiteExcelAssetRepository:
                     likely_question_types=self._load_string_list(
                         sheet_row["likely_question_types_json"]
                     ),
+                    header_terms=self._load_string_list(
+                        self._row_value(sheet_row, "header_terms_json", "[]")
+                    ),
+                    sampled_identifiers=self._load_string_list(
+                        self._row_value(sheet_row, "sampled_identifiers_json", "[]")
+                    ),
                 )
                 for sheet_row in sheet_rows
             ],
+            routing_notes=self._row_str(row, "routing_notes"),
             created_at=str(row["created_at"]),
         )
 
@@ -1139,6 +1213,23 @@ class SQLiteExcelAssetRepository:
             return []
         return [str(item) for item in parsed if str(item).strip()]
 
+    def _load_scope_map(self, value: object) -> dict[str, list[str]]:
+        try:
+            parsed = json.loads(str(value))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(key): [
+                str(item)
+                for item in items
+                if str(item).strip()
+            ]
+            for key, items in parsed.items()
+            if isinstance(items, list)
+        }
+
     def _load_object_list(self, value: object) -> list[dict]:
         try:
             parsed = json.loads(str(value))
@@ -1147,3 +1238,20 @@ class SQLiteExcelAssetRepository:
         if not isinstance(parsed, list):
             return []
         return [item for item in parsed if isinstance(item, dict)]
+
+    def _row_value(
+        self,
+        row: sqlite3.Row,
+        column: str,
+        default: object = None,
+    ) -> object:
+        return row[column] if column in row.keys() else default
+
+    def _row_str(
+        self,
+        row: sqlite3.Row,
+        column: str,
+        default: str = "",
+    ) -> str:
+        value = self._row_value(row, column, default)
+        return str(value) if value is not None else default

@@ -51,9 +51,15 @@ def _to_summary_response(summary: DocumentSummary) -> DocumentSummaryResponse:
         summary_id=summary.summary_id,
         file_id=summary.file_id,
         version_id=summary.version_id,
+        document_title=summary.document_title,
+        document_type=summary.document_type,
         summary_text=summary.summary_text,
         business_domain=summary.business_domain,
+        coverage_scope=summary.coverage_scope,
         key_topics=summary.key_topics,
+        positive_routing_terms=summary.positive_routing_terms,
+        negative_routing_terms=summary.negative_routing_terms,
+        exact_identifiers=summary.exact_identifiers,
         suitable_questions=summary.suitable_questions,
         unsuitable_questions=summary.unsuitable_questions,
         sheet_summaries=[
@@ -63,8 +69,11 @@ def _to_summary_response(summary: DocumentSummary) -> DocumentSummaryResponse:
                 summary=sheet.summary,
                 important_columns=sheet.important_columns,
                 likely_question_types=sheet.likely_question_types,
+                header_terms=sheet.header_terms,
+                sampled_identifiers=sheet.sampled_identifiers,
             )
             for sheet in summary.sheet_summaries
         ],
+        routing_notes=summary.routing_notes,
         created_at=summary.created_at,
     )

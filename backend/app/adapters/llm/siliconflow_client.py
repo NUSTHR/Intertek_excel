@@ -34,32 +34,54 @@ logger = logging.getLogger(__name__)
 
 DOCUMENT_SUMMARY_SYSTEM_PROMPT = "\n".join(
     [
-        "You are an enterprise Excel document profiling assistant.",
+        "You are an Excel document profiling assistant for a third-party testing, "
+        "inspection, and certification company.",
         "",
-        "Your task is to generate a structured metadata summary for one Excel workbook version.",
+        "Your task is to generate a compact routing index card for one Excel workbook "
+        "version in an enterprise knowledge base.",
         "",
         "You will receive only deterministic workbook profile data extracted by the backend:",
-        "filename, sheets, candidate headers, row counts, column counts, and sample rows.",
+        "filename, sheet metadata, candidate headers, row counts, column counts, and "
+        "all normalized workbook rows.",
+        "",
+        "Business context:",
+        "- Workbooks may describe products, models, materials, customers, suppliers, "
+        "test plans, test reports, certificates, standards, directives, regulations, "
+        "country requirements, lab capabilities, quotations, project trackers, or "
+        "compliance matrices.",
+        "- Common routing identifiers include product names, model numbers, standard "
+        "families such as IEC/EN/UL/CSA/GB/ISO/ASTM, regulation names, directives such "
+        "as LVD/EMC/RED/MD/RoHS/REACH, certificate/report numbers, countries, regions, "
+        "brands, factories, and business process terms.",
         "",
         "Rules:",
         "1. Use only the provided profile facts.",
-        "2. Do not invent rows, columns, business meanings, dates, standards, prices, "
+        "2. Do not invent rows, columns, business meanings, dates, standards, products, "
         "or conclusions that are not supported by the profile.",
-        "3. The summary is used for document routing, not as a factual answer source.",
+        "3. The result is used for document routing, not as a factual answer source.",
         "4. Keep all identifiers exactly as provided, especially file_id, version_id, "
         "sheet_id, and sheet_name.",
-        "5. Prefer short, searchable phrases in key_topics.",
-        "6. suitable_questions should be natural user questions this workbook is likely able "
-        "to help answer.",
-        "7. unsuitable_questions should describe questions this workbook likely cannot answer.",
-        "8. Return strict JSON only. Do not return markdown, explanation, comments, "
+        "5. Prefer short, searchable phrases. Avoid long prose.",
+        "6. exact_identifiers must contain only identifiers visible in the workbook, "
+        "for example standards, directives, model names, report numbers, regions, or "
+        "other exact lookup terms.",
+        "7. positive_routing_terms should contain terms that strongly suggest this "
+        "workbook should be selected.",
+        "8. negative_routing_terms should contain terms that help reject adjacent but "
+        "wrong questions.",
+        "9. suitable_questions should be natural user questions this workbook is likely "
+        "able to help answer.",
+        "10. unsuitable_questions should describe questions this workbook likely cannot "
+        "answer.",
+        "11. Return strict JSON only. Do not return markdown, explanation, comments, "
         "or code fences.",
     ]
 )
 
 DOCUMENT_ROUTER_SYSTEM_PROMPT = "\n".join(
     [
-        "You are a document router for an enterprise Excel question answering system.",
+        "You are a fast document router for an enterprise Excel question answering "
+        "system used by a third-party testing, inspection, and certification company.",
         "",
         "Your job is to choose the Excel workbook versions that should be used as "
         "evidence sources for the current user turn.",
@@ -72,25 +94,41 @@ DOCUMENT_ROUTER_SYSTEM_PROMPT = "\n".join(
         "1. Do not answer the user's question.",
         "2. Select only from the provided document catalog.",
         "3. Use version_id as the primary selection id.",
-        "4. Use routing memory only to resolve conversational context, such as follow-up "
+        "4. Work fast: classify documents from catalog metadata only. Do not perform "
+        "deep answer reasoning.",
+        "5. First extract the current turn's routing requirements: product/model, "
+        "standard or regulation family, region/country, business process, value type, "
+        "and any exact identifiers.",
+        "6. Use routing memory only to resolve conversational context, such as follow-up "
         "questions, pronouns, abbreviations, refinements, repeated product context, "
         "or references to previous turns.",
-        "5. If the current turn continues the same product, domain, region, regulation type, "
-        "standard family, document family, or business topic as recent turns, prefer "
-        "recently used attached documents when their catalog metadata remains likely "
-        "to contain evidence.",
-        "6. If the current turn introduces a new product, domain, region, regulation type, "
-        "standard family, document family, or business topic, choose additional candidate "
-        "documents only when their catalog metadata indicates likely evidence.",
-        "7. Do not keep old attached documents for the current turn just because they were "
+        "7. If the current turn still needs evidence from a document selected earlier, "
+        "include that document again in document_for_this_turn. Do not omit it merely "
+        "because it was selected before.",
+        "8. If the current turn introduces a new product, model, region, regulation type, "
+        "standard family, document family, or business topic, choose candidate documents "
+        "only when their routing card indicates likely evidence.",
+        "9. Do not keep old attached documents for the current turn just because they were "
         "used earlier. Include them only when they are useful for the current turn.",
-        "8. Do not add documents that are merely adjacent, generic, or weakly related.",
-        "9. If no catalog document is likely to contain evidence for the current turn, "
+        "10. Do not add documents that are merely adjacent, generic, or weakly related.",
+        "11. A strong match requires exact or near-exact overlap with filename, document "
+        "title, exact_identifiers, positive_routing_terms, coverage_scope, sheet names, "
+        "or important columns.",
+        "12. Generic words such as test, report, standard, file, product, value, date, "
+        "price, supplier, or certificate are not enough by themselves.",
+        "13. Use negative_routing_terms and unsuitable_questions to reject documents.",
+        "14. If no catalog document is likely to contain evidence for the current turn, "
         "return an empty document_for_this_turn array.",
-        "10. Default to empty: if you are not highly confident that a document contains direct evidence for the current turn, do NOT select it. Do not guess, do not expand, do not include adjacent or weakly related documents.",
-        "11. Exception only when missing would be dangerous: if the user's question asks about a specific known product, regulation, standard, region, or numerical value, and a document's metadata explicitly indicates it covers that exact identifier, you MUST include it even if that increases the document count slightly. Do not apply the 'empty default' here — missing this would break the system.",
-        "12. The reason field must indicate: (a) whether you applied the conservative default, (b) whether you used the dangerous-to-miss exception, and (c) what triggered your decision.",
-        "13. Return strict JSON only. Do not return markdown, explanation, comments, or code fences.",
+        "15. Default to empty: if you are not confident that a document contains direct "
+        "evidence for the current turn, do not select it.",
+        "16. Dangerous-to-miss exception: if the user asks about a specific product, "
+        "model, regulation, standard, region, certificate/report number, or numerical "
+        "value and a document routing card explicitly covers that exact identifier, "
+        "include it even if the question is terse.",
+        "17. Keep reasons short and diagnostic: cite the matched identifiers or say why "
+        "the conservative default was applied.",
+        "18. Return strict JSON only. Do not return markdown, explanation, comments, "
+        "or code fences.",
     ]
 )
 
@@ -180,12 +218,25 @@ class MultiProviderLlmClient:
             model=resolved_model,
             system_prompt=DOCUMENT_SUMMARY_SYSTEM_PROMPT,
             user_prompt=(
-                "Generate a structured document summary for this Excel workbook profile.\n\n"
+                "Generate a routing index card for this Excel workbook profile.\n\n"
                 "Return JSON in exactly this shape:\n\n"
                 "{\n"
+                '  "document_title": "string",\n'
+                '  "document_type": "string",\n'
                 '  "summary_text": "string",\n'
                 '  "business_domain": "string",\n'
+                '  "coverage_scope": {\n'
+                '    "products": ["string"],\n'
+                '    "models": ["string"],\n'
+                '    "regions": ["string"],\n'
+                '    "regulation_types": ["string"],\n'
+                '    "standards": ["string"],\n'
+                '    "business_processes": ["string"]\n'
+                "  },\n"
                 '  "key_topics": ["string"],\n'
+                '  "positive_routing_terms": ["string"],\n'
+                '  "negative_routing_terms": ["string"],\n'
+                '  "exact_identifiers": ["string"],\n'
                 '  "suitable_questions": ["string"],\n'
                 '  "unsuitable_questions": ["string"],\n'
                 '  "sheet_summaries": [\n'
@@ -194,10 +245,19 @@ class MultiProviderLlmClient:
                 '      "sheet_name": "string",\n'
                 '      "summary": "string",\n'
                 '      "important_columns": ["string"],\n'
-                '      "likely_question_types": ["string"]\n'
+                '      "likely_question_types": ["string"],\n'
+                '      "header_terms": ["string"],\n'
+                '      "sampled_identifiers": ["string"]\n'
                 "    }\n"
-                "  ]\n"
+                "  ],\n"
+                '  "routing_notes": "string"\n'
                 "}\n\n"
+                "Guidance:\n"
+                "- document_type should be a short category such as standard_matrix, "
+                "test_report, certificate_tracker, product_requirement_table, "
+                "quote_cost_table, project_tracker, supplier_list, or unknown.\n"
+                "- Keep summary_text under 80 words.\n"
+                "- Keep lists concise and searchable. Prefer exact strings from cells.\n\n"
                 "Workbook profile:\n"
                 f"{json.dumps(self._profile_payload(profile), ensure_ascii=False)}"
             ),
@@ -207,11 +267,19 @@ class MultiProviderLlmClient:
             summary_id=new_id("summary"),
             file_id=profile.file_id,
             version_id=profile.version_id,
+            document_title=str(payload.get("document_title", "")).strip()
+            or profile.original_filename,
+            document_type=str(payload.get("document_type", "unknown")).strip()
+            or "unknown",
             summary_text=str(payload.get("summary_text", "")).strip()
             or f"{profile.original_filename} contains {len(profile.sheets)} sheet(s).",
             business_domain=str(payload.get("business_domain", "excel workbook")).strip()
             or "excel workbook",
+            coverage_scope=self._scope_map(payload.get("coverage_scope")),
             key_topics=self._string_list(payload.get("key_topics")),
+            positive_routing_terms=self._string_list(payload.get("positive_routing_terms")),
+            negative_routing_terms=self._string_list(payload.get("negative_routing_terms")),
+            exact_identifiers=self._string_list(payload.get("exact_identifiers")),
             suitable_questions=self._string_list(payload.get("suitable_questions")),
             unsuitable_questions=self._string_list(payload.get("unsuitable_questions")),
             sheet_summaries=[
@@ -221,10 +289,13 @@ class MultiProviderLlmClient:
                     summary=str(sheet.get("summary", "")),
                     important_columns=self._string_list(sheet.get("important_columns")),
                     likely_question_types=self._string_list(sheet.get("likely_question_types")),
+                    header_terms=self._string_list(sheet.get("header_terms")),
+                    sampled_identifiers=self._string_list(sheet.get("sampled_identifiers")),
                 )
                 for sheet in self._object_list(payload.get("sheet_summaries"))
                 if str(sheet.get("sheet_id", "")) in allowed_sheet_ids
             ],
+            routing_notes=str(payload.get("routing_notes", "")).strip(),
             created_at=utc_now_iso(),
         )
 
@@ -275,18 +346,43 @@ class MultiProviderLlmClient:
                     "content": (
                         "Route the current user turn.\n\n"
                         f"Maximum documents for this turn: {max_documents}\n\n"
+                        "Use this fast process:\n"
+                        "1. Extract routing_requirements from the current question and "
+                        "routing memory.\n"
+                        "2. Classify each candidate as strong_match, weak_match, or "
+                        "no_match.\n"
+                        "3. Return only strong matches. Use weak matches only when no "
+                        "strong match exists and the reason is explicit.\n\n"
                         "Current question:\n"
                         f"{question}\n\n"
                         "Return JSON in exactly this shape:\n\n"
                         "{\n"
+                        '  "routing_requirements": {\n'
+                        '    "products": ["string"],\n'
+                        '    "models": ["string"],\n'
+                        '    "regions": ["string"],\n'
+                        '    "regulation_types": ["string"],\n'
+                        '    "standards": ["string"],\n'
+                        '    "business_processes": ["string"],\n'
+                        '    "exact_identifiers": ["string"]\n'
+                        "  },\n"
                         '  "routing_decision": '
                         '"reuse_attached | attach_incrementally | no_match",\n'
                         '  "document_for_this_turn": [\n'
                         "    {\n"
                         '      "file_id": "string",\n'
                         '      "version_id": "string",\n'
+                        '      "match_level": "strong_match | weak_match",\n'
+                        '      "matched_terms": ["string"],\n'
+                        '      "missing_terms": ["string"],\n'
                         '      "reason": "string",\n'
                         '      "confidence": 0.0\n'
+                        "    }\n"
+                        "  ],\n"
+                        '  "rejected_documents": [\n'
+                        "    {\n"
+                        '      "version_id": "string",\n'
+                        '      "reason": "string"\n'
                         "    }\n"
                         "  ],\n"
                         '  "decision_reason": "string",\n'
@@ -307,6 +403,14 @@ class MultiProviderLlmClient:
                 payload.get("document_for_this_turn", payload.get("selected_documents"))
             )
         ]
+        raw_selected_items = self._object_list(
+            payload.get("document_for_this_turn", payload.get("selected_documents"))
+        )
+        selected = self._filter_router_selection(
+            selected=selected,
+            raw_items=raw_selected_items,
+            max_documents=max_documents,
+        )
         allowed = {summary.version_id: summary.file_id for summary in summaries}
         unique_selected: list[SelectedDocument] = []
         seen_version_ids: set[str] = set()
@@ -452,8 +556,11 @@ class MultiProviderLlmClient:
                 user_prompt=user_prompt,
                 messages=messages,
             ),
-            "temperature": 0.2,
+            "temperature": self._temperature_for_stage(stage),
         }
+        max_tokens = self._max_tokens_for_stage(stage)
+        if max_tokens is not None:
+            request_payload["max_tokens"] = max_tokens
         provider_options = self._provider_request_options(provider_config.provider, model)
         request_payload.update(provider_options)
         logger.debug(
@@ -537,6 +644,7 @@ class MultiProviderLlmClient:
             "file_id": profile.file_id,
             "version_id": profile.version_id,
             "original_filename": profile.original_filename,
+            "file_hash": profile.file_hash,
             "sheets": [
                 {
                     "sheet_id": sheet.sheet_id,
@@ -546,6 +654,7 @@ class MultiProviderLlmClient:
                     "column_count": sheet.column_count,
                     "candidate_header": sheet.candidate_header,
                     "sample_rows": sheet.sample_rows[: self._config.summary_max_profile_rows],
+                    "all_rows": sheet.profile_rows or sheet.sample_rows,
                 }
                 for sheet in profile.sheets
             ],
@@ -555,11 +664,18 @@ class MultiProviderLlmClient:
         return {
             "file_id": summary.file_id,
             "version_id": summary.version_id,
+            "document_title": summary.document_title,
+            "document_type": summary.document_type,
             "summary_text": summary.summary_text,
             "business_domain": summary.business_domain,
+            "coverage_scope": summary.coverage_scope,
             "key_topics": summary.key_topics,
+            "positive_routing_terms": summary.positive_routing_terms,
+            "negative_routing_terms": summary.negative_routing_terms,
+            "exact_identifiers": summary.exact_identifiers,
             "suitable_questions": summary.suitable_questions,
             "unsuitable_questions": summary.unsuitable_questions,
+            "routing_notes": summary.routing_notes,
             "sheet_summaries": [sheet.__dict__ for sheet in summary.sheet_summaries],
         }
 
@@ -603,17 +719,31 @@ class MultiProviderLlmClient:
         return {
             "file_id": summary.file_id,
             "version_id": summary.version_id,
+            "document_title": summary.document_title,
+            "document_type": summary.document_type,
             "attachment_state": attachment_state,
             "selected_turn_count": selected_turn_count,
             "last_selected_turn_index": last_selected_turn_index,
             "selected_in_last_turn": selected_in_last_turn,
             "summary_text": summary.summary_text,
             "business_domain": summary.business_domain,
+            "coverage_scope": summary.coverage_scope,
             "key_topics": summary.key_topics,
+            "positive_routing_terms": summary.positive_routing_terms,
+            "negative_routing_terms": summary.negative_routing_terms,
+            "exact_identifiers": summary.exact_identifiers,
+            "suitable_questions": summary.suitable_questions,
+            "unsuitable_questions": summary.unsuitable_questions,
+            "routing_notes": summary.routing_notes,
             "sheet_summaries": [
                 {
+                    "sheet_id": sheet.sheet_id,
                     "sheet_name": sheet.sheet_name,
                     "summary": sheet.summary,
+                    "important_columns": sheet.important_columns,
+                    "likely_question_types": sheet.likely_question_types,
+                    "header_terms": sheet.header_terms,
+                    "sampled_identifiers": sheet.sampled_identifiers,
                 }
                 for sheet in summary.sheet_summaries
             ],
@@ -754,10 +884,30 @@ class MultiProviderLlmClient:
             }
         return {}
 
+    def _temperature_for_stage(self, stage: str) -> float:
+        if stage == "route_model":
+            return 0.0
+        return 0.2
+
+    def _max_tokens_for_stage(self, stage: str) -> int | None:
+        if stage == "route_model":
+            return 1200
+        return None
+
     def _string_list(self, value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
         return [str(item) for item in value if str(item).strip()]
+
+    def _scope_map(self, value: Any) -> dict[str, list[str]]:
+        if not isinstance(value, dict):
+            return {}
+        scope: dict[str, list[str]] = {}
+        for key, items in value.items():
+            values = self._string_list(items)
+            if values:
+                scope[str(key)] = values
+        return scope
 
     def _object_list(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):
@@ -769,6 +919,30 @@ class MultiProviderLlmClient:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    def _filter_router_selection(
+        self,
+        *,
+        selected: list[SelectedDocument],
+        raw_items: list[dict[str, Any]],
+        max_documents: int,
+    ) -> list[SelectedDocument]:
+        filtered: list[SelectedDocument] = []
+        for document, raw_item in zip(selected, raw_items, strict=False):
+            match_level = str(raw_item.get("match_level", "")).strip()
+            matched_terms = self._string_list(raw_item.get("matched_terms"))
+            if not match_level and not matched_terms:
+                filtered.append(document)
+                continue
+            confidence = document.confidence if document.confidence is not None else 0.0
+            if match_level == "weak_match" and confidence < 0.65:
+                continue
+            if match_level not in {"strong_match", "weak_match"}:
+                continue
+            if not matched_terms and confidence < 0.85:
+                continue
+            filtered.append(document)
+        return filtered[: max(0, max_documents)]
 
 
 SiliconFlowLlmClient = MultiProviderLlmClient

@@ -39,12 +39,20 @@ class FakeLlmClient:
             summary_id=new_id("summary"),
             file_id=profile.file_id,
             version_id=profile.version_id,
+            document_title=profile.original_filename,
+            document_type="excel_workbook",
             summary_text=(
                 f"{profile.original_filename} contains {len(profile.sheets)} "
                 f"sheet(s): {', '.join(sheet_names) or 'no sheets'}."
             ),
             business_domain="excel workbook",
+            coverage_scope={
+                "business_processes": ["rows", "sheet contents"],
+            },
             key_topics=key_topics,
+            positive_routing_terms=key_topics,
+            negative_routing_terms=[],
+            exact_identifiers=key_topics,
             suitable_questions=[
                 "Ask about rows, sheet contents, dates, remarks, and listed values.",
             ],
@@ -58,12 +66,22 @@ class FakeLlmClient:
                     ),
                     important_columns=sheet.candidate_header[:8],
                     likely_question_types=["row lookup", "sheet content summary"],
+                    header_terms=sheet.candidate_header[:8],
+                    sampled_identifiers=self._unique_values(
+                        [
+                            cell
+                            for row in (sheet.profile_rows or sheet.sample_rows)[:20]
+                            for cell in row
+                            if cell
+                        ]
+                    )[:20],
                 )
                 for sheet in profile.sheets
             ],
             unsuitable_questions=[
                 "Questions requiring information not present in this workbook.",
             ],
+            routing_notes="fake routing card generated from workbook profile",
             created_at=utc_now_iso(),
         )
 
@@ -132,8 +150,15 @@ class FakeLlmClient:
                 summary.summary_text,
                 summary.business_domain,
                 *summary.key_topics,
+                *summary.positive_routing_terms,
+                *summary.exact_identifiers,
                 *summary.suitable_questions,
                 *[sheet.summary for sheet in summary.sheet_summaries],
+                *[
+                    value
+                    for sheet in summary.sheet_summaries
+                    for value in [*sheet.header_terms, *sheet.sampled_identifiers]
+                ],
             ]
         ).lower()
         return sum(1 for token in self._tokens(question) if token in haystack)

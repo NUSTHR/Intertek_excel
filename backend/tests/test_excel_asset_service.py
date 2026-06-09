@@ -146,6 +146,11 @@ def test_profile_artifacts_active_version_and_paginated_rows(
 
     assert active_version.version_id == result.version.version_id
     assert profile.sheets[0].candidate_header == ["Supplier", "Status"]
+    assert profile.sheets[0].profile_rows == [
+        ["Supplier", "Status"],
+        ["Apex", "High"],
+        ["Beacon", "Low"],
+    ]
     assert {artifact.artifact_type for artifact in artifacts} == {
         ExcelArtifactType.ORIGINAL,
         ExcelArtifactType.RAW_CSV,
@@ -155,6 +160,20 @@ def test_profile_artifacts_active_version_and_paginated_rows(
     assert rows.total_rows == 3
     assert rows.mappings[0].row_id == "S001_R2"
     assert rows.rows[0] == ["S001_R2", "Apex", "High"]
+
+
+def test_summary_profile_loads_full_rows_without_internal_row_ids(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+
+    profile = service.get_summary_profile(result.version.version_id)
+
+    assert profile.sheets[0].profile_rows == [
+        ["Supplier", "Status"],
+        ["Apex", "High"],
+        ["Beacon", "Low"],
+    ]
 
 
 def test_delete_file_requires_confirmation_and_removes_related_data(

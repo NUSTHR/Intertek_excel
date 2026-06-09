@@ -217,6 +217,36 @@ class ExcelAssetService:
             raise AssetNotFoundError("workbook profile was not found")
         return self._read_profile(Path(profile_artifact.path), version=version)
 
+    def get_summary_profile(self, version_id: str) -> WorkbookProfile:
+        profile = self.get_profile(version_id)
+        sheets = {sheet.sheet_id: sheet for sheet in self._repository.list_sheets(version_id)}
+        return WorkbookProfile(
+            file_id=profile.file_id,
+            version_id=profile.version_id,
+            original_filename=profile.original_filename,
+            file_hash=profile.file_hash,
+            sheets=[
+                SheetProfile(
+                    sheet_id=sheet_profile.sheet_id,
+                    sheet_code=sheet_profile.sheet_code,
+                    sheet_name=sheet_profile.sheet_name,
+                    row_count=sheet_profile.row_count,
+                    column_count=sheet_profile.column_count,
+                    sample_rows=sheet_profile.sample_rows,
+                    candidate_header=sheet_profile.candidate_header,
+                    profile_rows=self._summary_profile_rows(
+                        sheet_profile,
+                        raw_csv_path=(
+                            Path(sheet.raw_csv_path)
+                            if (sheet := sheets.get(sheet_profile.sheet_id)) is not None
+                            else None
+                        ),
+                    ),
+                )
+                for sheet_profile in profile.sheets
+            ],
+        )
+
     def list_artifacts(self, version_id: str) -> list[ExcelArtifact]:
         self._require_version(version_id)
         return self._repository.list_artifacts(version_id)
@@ -453,6 +483,21 @@ class ExcelAssetService:
         with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
             return [row for row in csv.reader(csv_file)]
 
+    def _summary_profile_rows(
+        self,
+        sheet_profile: SheetProfile,
+        raw_csv_path: Path | None,
+    ) -> list[list[str]]:
+        if raw_csv_path is not None:
+            rows = self._read_csv_rows(raw_csv_path)
+            return [self._strip_internal_row_id(row, sheet_profile.sheet_code) for row in rows]
+        return sheet_profile.profile_rows or sheet_profile.sample_rows
+
+    def _strip_internal_row_id(self, row: list[str], sheet_code: str) -> list[str]:
+        if row and row[0].startswith(f"{sheet_code}_R"):
+            return row[1:]
+        return row
+
     def _read_profile(self, path: Path, version: ExcelFileVersion) -> WorkbookProfile:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -469,6 +514,10 @@ class ExcelAssetService:
                 sample_rows=[
                     [str(cell) for cell in row]
                     for row in sheet.get("sample_rows", [])
+                ],
+                profile_rows=[
+                    [str(cell) for cell in row]
+                    for row in sheet.get("profile_rows", sheet.get("sample_rows", []))
                 ],
             )
             for sheet in payload.get("sheets", [])

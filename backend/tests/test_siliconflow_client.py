@@ -25,9 +25,18 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     requests: list[dict[str, Any]] = []
     responses = [
         {
+            "document_title": "standards.xlsx",
+            "document_type": "standard_matrix",
             "summary_text": "A standards workbook.",
             "business_domain": "standards",
+            "coverage_scope": {
+                "products": ["household appliances"],
+                "standards": ["EN 1"],
+            },
             "key_topics": ["EN", "DOW"],
+            "positive_routing_terms": ["EN 1", "DOW"],
+            "negative_routing_terms": ["pricing"],
+            "exact_identifiers": ["EN 1"],
             "suitable_questions": ["Find standards dates"],
             "unsuitable_questions": ["Questions outside the workbook"],
             "sheet_summaries": [
@@ -37,14 +46,20 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
                     "summary": "EN standards and dates.",
                     "important_columns": ["Code", "DOW"],
                     "likely_question_types": ["date lookup"],
+                    "header_terms": ["Code", "DOW"],
+                    "sampled_identifiers": ["EN 1"],
                 }
             ],
+            "routing_notes": "Select for EN DOW lookups.",
         },
         {
             "document_for_this_turn": [
                 {
                     "file_id": "file_1",
                     "version_id": "version_1",
+                    "match_level": "strong_match",
+                    "matched_terms": ["EN", "DOW"],
+                    "missing_terms": [],
                     "reason": "Question mentions EN.",
                     "confidence": 0.9,
                 }
@@ -105,6 +120,11 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
                 column_count=2,
                 sample_rows=[["Code", "DOW"], ["EN 1", "2024-01-01"]],
                 candidate_header=["Code", "DOW"],
+                profile_rows=[
+                    ["Code", "DOW"],
+                    ["EN 1", "2024-01-01"],
+                    ["EN 2", "2025-01-01"],
+                ],
             )
         ],
     )
@@ -127,6 +147,11 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     )
 
     assert summary.business_domain == "standards"
+    assert summary.document_title == "standards.xlsx"
+    assert summary.document_type == "standard_matrix"
+    assert summary.coverage_scope["standards"] == ["EN 1"]
+    assert summary.positive_routing_terms == ["EN 1", "DOW"]
+    assert summary.exact_identifiers == ["EN 1"]
     assert summary.sheet_summaries == [
         SheetSummary(
             sheet_id="sheet_1",
@@ -134,6 +159,8 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
             summary="EN standards and dates.",
             important_columns=["Code", "DOW"],
             likely_question_types=["date lookup"],
+            header_terms=["Code", "DOW"],
+            sampled_identifiers=["EN 1"],
         )
     ]
     assert selected[0].version_id == "version_1"
@@ -150,6 +177,12 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     assert "enable_thinking" not in requests[0]
     assert "enable_thinking" not in requests[1]
     assert requests[2]["enable_thinking"] is False
+    summary_payload = json.loads(
+        requests[0]["messages"][1]["content"].split("Workbook profile:\n", 1)[1]
+    )
+    assert summary_payload["sheets"][0]["all_rows"][-1] == ["EN 2", "2025-01-01"]
+    assert requests[1]["temperature"] == 0.0
+    assert requests[1]["max_tokens"] == 1200
 
 
 def test_siliconflow_router_filters_unknown_version() -> None:
@@ -212,6 +245,70 @@ def test_siliconflow_router_filters_unknown_version() -> None:
     assert selected == []
 
 
+def test_siliconflow_router_filters_weak_low_confidence_matches() -> None:
+    def post(_url: str, **_kwargs: Any) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "document_for_this_turn": [
+                                        {
+                                            "file_id": "file_1",
+                                            "version_id": "version_1",
+                                            "match_level": "weak_match",
+                                            "matched_terms": ["standard"],
+                                            "reason": "Only generic overlap.",
+                                            "confidence": 0.4,
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+
+    selected = client.route_documents(
+        "Which standard applies?",
+        [
+            DocumentSummary(
+                summary_id="summary_1",
+                file_id="file_1",
+                version_id="version_1",
+                summary_text="summary",
+                business_domain="domain",
+                key_topics=[],
+                suitable_questions=[],
+                unsuitable_questions=[],
+                sheet_summaries=[],
+                created_at="now",
+            )
+        ],
+        max_documents=1,
+    )
+
+    assert selected == []
+
+
 def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
     requests: list[dict[str, Any]] = []
 
@@ -230,6 +327,9 @@ def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
                                         {
                                             "file_id": "file_2",
                                             "version_id": "version_2",
+                                            "match_level": "strong_match",
+                                            "matched_terms": ["regional standards"],
+                                            "missing_terms": [],
                                             "reason": "Current question matches catalog.",
                                             "confidence": 0.8,
                                         }
@@ -261,9 +361,18 @@ def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
                 summary_id="summary_1",
                 file_id="file_1",
                 version_id="version_1",
+                document_title="appliance-lvd.xlsx",
+                document_type="standard_matrix",
                 summary_text="Attached household appliance standards.",
                 business_domain="standards",
+                coverage_scope={
+                    "products": ["household appliances"],
+                    "standards": ["IEC 60335"],
+                },
                 key_topics=["household appliances"],
+                positive_routing_terms=["household appliances", "IEC 60335"],
+                negative_routing_terms=["pricing"],
+                exact_identifiers=["IEC 60335"],
                 suitable_questions=[],
                 unsuitable_questions=[],
                 sheet_summaries=[
@@ -271,22 +380,35 @@ def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
                         sheet_id="sheet_1",
                         sheet_name="IEC",
                         summary="IEC appliance standards.",
-                        important_columns=[],
-                        likely_question_types=[],
+                        important_columns=["Product", "Standard"],
+                        likely_question_types=["standard lookup"],
+                        header_terms=["Product", "Standard"],
+                        sampled_identifiers=["coffee maker"],
                     )
                 ],
+                routing_notes="Use for appliance safety standard routing.",
                 created_at="now",
             ),
             DocumentSummary(
                 summary_id="summary_2",
                 file_id="file_2",
                 version_id="version_2",
+                document_title="regional.xlsx",
+                document_type="regional_requirement_table",
                 summary_text="Candidate regional standards.",
                 business_domain="standards",
+                coverage_scope={
+                    "regions": ["EU"],
+                    "standards": ["regional standards"],
+                },
                 key_topics=["regional standards"],
+                positive_routing_terms=["regional standards"],
+                negative_routing_terms=[],
+                exact_identifiers=["EU"],
                 suitable_questions=[],
                 unsuitable_questions=[],
                 sheet_summaries=[],
+                routing_notes="Use for regional standards.",
                 created_at="now",
             ),
         ],
@@ -338,6 +460,11 @@ def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
 
     catalog = json.loads(messages[1]["content"].split("\n\n", 1)[1])
     assert catalog[0]["version_id"] == "version_1"
+    assert catalog[0]["document_title"] == "appliance-lvd.xlsx"
+    assert catalog[0]["document_type"] == "standard_matrix"
+    assert catalog[0]["coverage_scope"]["standards"] == ["IEC 60335"]
+    assert catalog[0]["positive_routing_terms"] == ["household appliances", "IEC 60335"]
+    assert catalog[0]["sheet_summaries"][0]["important_columns"] == ["Product", "Standard"]
     assert catalog[0]["attachment_state"] == "attached"
     assert catalog[0]["selected_turn_count"] == 1
     assert catalog[0]["selected_in_last_turn"] is True

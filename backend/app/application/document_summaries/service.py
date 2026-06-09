@@ -22,7 +22,7 @@ class DocumentSummaryService:
         model: str | None = None,
         provider: str | None = None,
     ) -> DocumentSummary:
-        profile = self._excel_assets.get_profile(version_id)
+        profile = self._excel_assets.get_summary_profile(version_id)
         summary = self._llm_client.generate_document_summary(
             profile,
             model=model,

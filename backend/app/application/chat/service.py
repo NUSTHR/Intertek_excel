@@ -279,9 +279,7 @@ class ChatService:
         selected_version_ids: list[str] | None,
     ) -> list[SelectedDocument]:
         if route_result is not None:
-            return route_result.selected_documents or self._attached_to_selected_documents(
-                attached_documents
-            )
+            return route_result.selected_documents
         if selected_version_ids:
             selected_version_id_set = set(selected_version_ids)
             return [

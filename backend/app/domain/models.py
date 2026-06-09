@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -80,6 +80,7 @@ class SheetProfile:
     column_count: int
     sample_rows: list[list[str]]
     candidate_header: list[str]
+    profile_rows: list[list[str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,8 @@ class SheetSummary:
     summary: str
     important_columns: list[str]
     likely_question_types: list[str]
+    header_terms: list[str] = field(default_factory=list)
+    sampled_identifiers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,13 @@ class DocumentSummary:
     unsuitable_questions: list[str]
     sheet_summaries: list[SheetSummary]
     created_at: str
+    document_title: str = ""
+    document_type: str = "unknown"
+    coverage_scope: dict[str, list[str]] = field(default_factory=dict)
+    positive_routing_terms: list[str] = field(default_factory=list)
+    negative_routing_terms: list[str] = field(default_factory=list)
+    exact_identifiers: list[str] = field(default_factory=list)
+    routing_notes: str = ""
 
 
 @dataclass(frozen=True)

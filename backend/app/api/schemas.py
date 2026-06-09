@@ -86,18 +86,27 @@ class SheetSummaryResponse(BaseModel):
     summary: str
     important_columns: list[str] = Field(default_factory=list)
     likely_question_types: list[str] = Field(default_factory=list)
+    header_terms: list[str] = Field(default_factory=list)
+    sampled_identifiers: list[str] = Field(default_factory=list)
 
 
 class DocumentSummaryResponse(BaseModel):
     summary_id: str
     file_id: str
     version_id: str
+    document_title: str = ""
+    document_type: str = "unknown"
     summary_text: str
     business_domain: str
+    coverage_scope: dict[str, list[str]] = Field(default_factory=dict)
     key_topics: list[str] = Field(default_factory=list)
+    positive_routing_terms: list[str] = Field(default_factory=list)
+    negative_routing_terms: list[str] = Field(default_factory=list)
+    exact_identifiers: list[str] = Field(default_factory=list)
     suitable_questions: list[str] = Field(default_factory=list)
     unsuitable_questions: list[str] = Field(default_factory=list)
     sheet_summaries: list[SheetSummaryResponse] = Field(default_factory=list)
+    routing_notes: str = ""
     created_at: str
 
 
