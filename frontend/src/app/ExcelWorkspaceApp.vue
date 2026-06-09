@@ -190,12 +190,17 @@ const documentTitleMap = computed<Record<string, string>>(() => {
 })
 
 const activeDocumentForChat = computed<SelectedDocument | null>(() => {
-  if (!selectedFileId.value || !selectedVersionId.value) {
+  const file = selectedFile.value
+  if (!file) {
+    return null
+  }
+  const versionId = selectedVersionId.value || file.active_version_id
+  if (!versionId) {
     return null
   }
   return {
-    file_id: selectedFileId.value,
-    version_id: selectedVersionId.value,
+    file_id: file.file_id,
+    version_id: versionId,
     reason: 'Current workbook',
     confidence: null,
   }

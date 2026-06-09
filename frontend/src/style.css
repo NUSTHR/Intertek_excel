@@ -3194,8 +3194,9 @@ label > span {
 /* Full chat workspace replica */
 .excelai-app.chat-mode {
   grid-template-columns: minmax(0, 1fr);
+  min-width: 1280px;
   height: 100vh;
-  overflow: hidden;
+  overflow: auto;
   background: #fcf8fa;
 }
 
@@ -3207,6 +3208,7 @@ label > span {
 
 .excelai-app.chat-mode .app-main {
   min-height: 0;
+  min-width: 1280px;
   height: 100vh;
   overflow: hidden;
 }
@@ -3215,6 +3217,7 @@ label > span {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr) 420px;
   flex: 1 1 auto;
+  min-width: 1280px;
   min-height: 0;
   height: 100vh;
   overflow: hidden;
@@ -4422,23 +4425,38 @@ label > span {
   }
 
   .excelai-app.chat-mode .analysis-page {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 280px minmax(0, 1fr) 420px;
     align-content: stretch;
-    height: calc(100vh - 64px);
+    min-width: 1280px;
+    height: 100vh;
     overflow: hidden;
   }
 
   .excelai-app.chat-mode .chat-session-rail,
   .excelai-app.chat-mode .sheet-stage {
-    display: none;
+    display: flex;
+  }
+
+  .excelai-app.chat-mode .chat-session-rail {
+    min-height: 100vh;
+    max-height: none;
+    height: 100vh;
+    border-right: 1px solid #e2e8f0;
+    border-bottom: 0;
+  }
+
+  .excelai-app.chat-mode .sheet-stage {
+    min-height: 0;
+    height: 100vh;
   }
 
   .excelai-app.chat-mode .assistant-column {
-    width: 100%;
-    min-width: 0;
+    flex: 0 0 420px;
+    width: 420px;
+    min-width: 420px;
     height: 100%;
     min-height: 0;
     border-top: 0;
-    border-left: 0;
+    border-left: 1px solid #e2e8f0;
   }
 }
