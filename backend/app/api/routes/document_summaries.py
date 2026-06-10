@@ -7,10 +7,12 @@ from app.api.schemas import (
     DocumentSummaryResponse,
     GenerateDocumentSummaryRequest,
     SheetSummaryResponse,
+    SheetSummaryUpdateRequest,
+    UpdateDocumentSummaryRequest,
 )
 from app.application.document_summaries.service import DocumentSummaryService
 from app.core.errors import AssetNotFoundError
-from app.domain.models import DocumentSummary
+from app.domain.models import DocumentSummary, SheetSummary
 
 router = APIRouter(prefix="/api/excel", tags=["document-summaries"])
 DocumentSummaryServiceDependency = Annotated[
@@ -44,6 +46,45 @@ def get_document_summary(
     if summary is None:
         raise AssetNotFoundError("document summary was not found")
     return _to_summary_response(summary)
+
+
+@router.patch("/versions/{version_id}/summary", response_model=DocumentSummaryResponse)
+def update_document_summary(
+    version_id: str,
+    request: UpdateDocumentSummaryRequest,
+    service: DocumentSummaryServiceDependency,
+) -> DocumentSummaryResponse:
+    return _to_summary_response(
+        service.update_summary(
+            version_id,
+            summary_text=request.summary_text,
+            business_domain=request.business_domain,
+            key_topics=request.key_topics,
+            positive_routing_terms=request.positive_routing_terms,
+            negative_routing_terms=request.negative_routing_terms,
+            exact_identifiers=request.exact_identifiers,
+            suitable_questions=request.suitable_questions,
+            unsuitable_questions=request.unsuitable_questions,
+            sheet_summaries=(
+                [_to_sheet_summary(sheet) for sheet in request.sheet_summaries]
+                if request.sheet_summaries is not None
+                else None
+            ),
+            routing_notes=request.routing_notes,
+        )
+    )
+
+
+def _to_sheet_summary(sheet: SheetSummaryUpdateRequest) -> SheetSummary:
+    return SheetSummary(
+        sheet_id=sheet.sheet_id,
+        sheet_name=sheet.sheet_name,
+        summary=sheet.summary,
+        important_columns=sheet.important_columns,
+        likely_question_types=sheet.likely_question_types,
+        header_terms=sheet.header_terms,
+        sampled_identifiers=sheet.sampled_identifiers,
+    )
 
 
 def _to_summary_response(summary: DocumentSummary) -> DocumentSummaryResponse:

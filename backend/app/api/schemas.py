@@ -90,6 +90,16 @@ class SheetSummaryResponse(BaseModel):
     sampled_identifiers: list[str] = Field(default_factory=list)
 
 
+class SheetSummaryUpdateRequest(BaseModel):
+    sheet_id: str = Field(min_length=1, max_length=120)
+    sheet_name: str = Field(min_length=1, max_length=255)
+    summary: str = Field(min_length=1, max_length=6000)
+    important_columns: list[str] = Field(default_factory=list)
+    likely_question_types: list[str] = Field(default_factory=list)
+    header_terms: list[str] = Field(default_factory=list)
+    sampled_identifiers: list[str] = Field(default_factory=list)
+
+
 class DocumentSummaryResponse(BaseModel):
     summary_id: str
     file_id: str
@@ -108,6 +118,19 @@ class DocumentSummaryResponse(BaseModel):
     sheet_summaries: list[SheetSummaryResponse] = Field(default_factory=list)
     routing_notes: str = ""
     created_at: str
+
+
+class UpdateDocumentSummaryRequest(BaseModel):
+    summary_text: str | None = Field(default=None, min_length=1, max_length=20000)
+    business_domain: str | None = Field(default=None, min_length=1, max_length=255)
+    key_topics: list[str] | None = None
+    positive_routing_terms: list[str] | None = None
+    negative_routing_terms: list[str] | None = None
+    exact_identifiers: list[str] | None = None
+    suitable_questions: list[str] | None = None
+    unsuitable_questions: list[str] | None = None
+    sheet_summaries: list[SheetSummaryUpdateRequest] | None = None
+    routing_notes: str | None = Field(default=None, max_length=6000)
 
 
 class UploadExcelResponse(BaseModel):

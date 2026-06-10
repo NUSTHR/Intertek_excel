@@ -1,0 +1,99 @@
+.app-icon {
+  display: inline-block;
+  width: var(--icon-size, 20px);
+  height: var(--icon-size, 20px);
+  min-width: var(--icon-size, 20px);
+  min-height: var(--icon-size, 20px);
+  flex: 0 0 var(--icon-size, 20px);
+  aspect-ratio: 1 / 1;
+  color: currentColor;
+  line-height: 1;
+  overflow: visible;
+  shape-rendering: geometricPrecision;
+}
+
+.app-icon path {
+  vector-effect: non-scaling-stroke;
+}
+
+.nav-glyph,
+.session-glyph,
+.rail-logo,
+.chat-source-file-icon,
+.file-badge,
+.knowledge-upload-icon,
+.topbar-icon-button,
+.icon-only-button,
+.menu-trigger,
+.chat-icon-button,
+.chat-source-menu,
+.chat-tool-button,
+.chat-send-button,
+.assistant-bot-icon,
+.workbook-title-icon,
+.active-cell-pill,
+.schema-card-head,
+.summary-icon,
+.config-icon,
+.insight-icon,
+.excel-grid-empty-icon,
+.dialog-icon-button {
+  --icon-size: 18px;
+}
+
+.nav-glyph {
+  --icon-size: 19px;
+}
+
+.rail-logo,
+.knowledge-upload-icon,
+.file-badge.large,
+.excel-grid-empty-icon {
+  --icon-size: 22px;
+}
+
+.assistant-bot-icon {
+  --icon-size: 14px;
+}
+
+.topbar-icon-button,
+.icon-only-button,
+.menu-trigger,
+.chat-source-menu,
+.dialog-icon-button {
+  --icon-size: 16px;
+}
+
+.active-cell-pill,
+.excel-grid-corner {
+  --icon-size: 16px;
+}
+
+.nav-glyph .app-icon,
+.session-glyph .app-icon,
+.rail-logo .app-icon,
+.chat-source-file-icon .app-icon,
+.file-badge .app-icon,
+.knowledge-upload-icon .app-icon,
+.topbar-icon-button .app-icon,
+.icon-only-button .app-icon,
+.menu-trigger .app-icon,
+.chat-icon-button .app-icon,
+.chat-source-menu .app-icon,
+.chat-tool-button .app-icon,
+.chat-send-button .app-icon,
+.assistant-bot-icon .app-icon,
+.workbook-title-icon .app-icon,
+.active-cell-pill .app-icon,
+.schema-card-head .app-icon,
+.summary-icon .app-icon,
+.config-icon .app-icon,
+.insight-icon .app-icon,
+.excel-grid-empty-icon .app-icon,
+.dialog-icon-button .app-icon {
+  width: var(--icon-size, 18px);
+  height: var(--icon-size, 18px);
+  min-width: var(--icon-size, 18px);
+  min-height: var(--icon-size, 18px);
+  flex-basis: var(--icon-size, 18px);
+}

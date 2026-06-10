@@ -1,0 +1,601 @@
+.excelai-app:not(.chat-mode) {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .app-main {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .file-page {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: calc(100vh - 64px);
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .file-management-shell {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.82fr) minmax(560px, 1.18fr);
+  min-height: 0;
+  height: 100%;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane,
+.excelai-app:not(.chat-mode) .file-insight-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane {
+  gap: 16px;
+  border-right: 1px solid #e2e8f0;
+  padding: 24px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .file-insight-pane {
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .file-insight-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 22px 24px;
+}
+
+.excelai-app:not(.chat-mode) .file-list-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.excelai-app:not(.chat-mode) .file-card-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 6px 10px 0;
+}
+
+.excelai-app:not(.chat-mode) .primary-nav {
+  gap: 4px;
+}
+
+.excelai-app:not(.chat-mode) .nav-item {
+  position: relative;
+  min-height: 42px;
+  border-radius: 10px;
+  padding: 9px 12px;
+  color: #64748b;
+  font-size: 14px;
+  font-weight: 700;
+  background: transparent;
+  transition:
+    background 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.excelai-app:not(.chat-mode) .nav-item:hover:not(:disabled) {
+  color: #0f172a;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .nav-item.active {
+  color: #0f172a;
+  border-right: 0;
+  background: #eef2f7;
+  box-shadow: inset 3px 0 0 #0f172a;
+}
+
+.excelai-app:not(.chat-mode) .nav-item.active .nav-glyph {
+  color: #0f172a;
+}
+
+.excelai-app:not(.chat-mode) .nav-glyph {
+  width: 22px;
+  height: 22px;
+  color: inherit;
+  background: transparent;
+}
+
+.excelai-app:not(.chat-mode) .panel-heading {
+  align-items: center;
+  padding: 0;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .panel-heading h3 {
+  color: #0f172a;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.excelai-app:not(.chat-mode) .files-found-label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone {
+  gap: 6px;
+  min-height: 132px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  padding: 20px 18px;
+  color: #0f172a;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone:hover:not(:disabled),
+.excelai-app:not(.chat-mode) .knowledge-upload-zone.dragging {
+  border-color: #0f172a;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-icon {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 4px;
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone strong {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.excelai-app:not(.chat-mode) .knowledge-upload-zone > span:last-child {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.excelai-app:not(.chat-mode) .file-library-card {
+  grid-template-columns: 42px minmax(0, 1fr) 34px;
+  gap: 12px;
+  min-height: 74px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.excelai-app:not(.chat-mode) .file-library-card:hover {
+  border-color: #cbd5e1;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgb(15 23 42 / 0.05);
+}
+
+.excelai-app:not(.chat-mode) .file-library-card.selected,
+.excelai-app:not(.chat-mode) .file-library-card.menu-open {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+  box-shadow: none;
+}
+
+.excelai-app:not(.chat-mode) .file-badge.large {
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.excelai-app:not(.chat-mode) .file-library-card.selected .file-badge.large,
+.excelai-app:not(.chat-mode) .file-library-card.menu-open .file-badge.large {
+  color: #334155;
+  background: #e2e8f0;
+}
+
+.excelai-app:not(.chat-mode) .file-card-main strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: #0f172a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.excelai-app:not(.chat-mode) .file-meta-line {
+  overflow: hidden;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.excelai-app:not(.chat-mode) .file-sources-pane .file-card-menu {
+  position: static;
+  display: flex;
+  grid-column: 1 / -1;
+  justify-self: stretch;
+  justify-content: flex-end;
+  gap: 6px;
+  width: auto;
+  max-width: 100%;
+  border: 0;
+  border-radius: 0;
+  margin-top: -2px;
+  padding: 2px 0 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  overflow: visible;
+}
+
+.excelai-app:not(.chat-mode) .item-action-menu button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: #334155;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.excelai-app:not(.chat-mode) .item-action-menu button:hover {
+  color: #0f172a;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .item-action-menu button.danger-text {
+  color: #b91c1c;
+}
+
+.excelai-app:not(.chat-mode) .item-action-menu button.danger-text:hover {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.excelai-app:not(.chat-mode) .file-insight-tabs {
+  flex: 0 0 52px;
+  align-items: stretch;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0 22px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .file-insight-tabs button {
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0 14px;
+  color: #64748b;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.excelai-app:not(.chat-mode) .file-insight-tabs button.active {
+  color: #0f172a;
+  border-bottom-color: #0f172a;
+}
+
+.excelai-app:not(.chat-mode) .file-summary-stack,
+.excelai-app:not(.chat-mode) .file-preview-panel,
+.excelai-app:not(.chat-mode) .file-schema-panel {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel {
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  height: 100%;
+  max-height: 100%;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(160px, 1fr) minmax(210px, 1.1fr);
+  gap: 12px;
+  min-width: 0;
+}
+
+.excelai-app:not(.chat-mode) .preview-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.excelai-app:not(.chat-mode) .preview-metrics div {
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .preview-metrics span {
+  display: block;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.excelai-app:not(.chat-mode) .preview-metrics strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #0f172a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel .preview-card {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  margin: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .preview-card .excel-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.excelai-app:not(.chat-mode) .excel-table {
+  min-width: 920px;
+}
+
+.excelai-app:not(.chat-mode) .excel-table th,
+.excelai-app:not(.chat-mode) .excel-table td {
+  height: 32px;
+  max-width: 260px;
+  min-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.excelai-app:not(.chat-mode) .sheet-tabs.compact {
+  min-height: 38px;
+  padding: 0;
+}
+
+.dialog-backdrop {
+  background: rgb(15 23 42 / 0.24);
+  backdrop-filter: blur(4px);
+}
+
+.app-dialog {
+  gap: 18px;
+  width: min(460px, calc(100vw - 40px));
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 22px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgb(15 23 42 / 0.24);
+}
+
+.dialog-heading {
+  align-items: center;
+}
+
+.dialog-heading h3 {
+  color: #0f172a;
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.dialog-copy {
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: #475569;
+  background: #f8fafc;
+  line-height: 1.55;
+}
+
+.dialog-field input {
+  min-height: 42px;
+  border-color: #cbd5e1;
+  border-radius: 10px;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.dialog-primary,
+.dialog-secondary,
+.dialog-danger {
+  min-height: 38px;
+  border-radius: 9px;
+  padding: 9px 14px;
+}
+
+.dialog-secondary {
+  color: #475569;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+}
+
+.dialog-secondary:hover {
+  color: #0f172a;
+  background: #f8fafc;
+}
+
+.dialog-primary {
+  color: #ffffff;
+  background: #0f172a;
+}
+
+.dialog-danger {
+  color: #ffffff;
+  background: #b91c1c;
+}
+
+.dialog-icon-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: #64748b;
+  background: #f8fafc;
+}
+
+.dialog-icon-button:hover {
+  color: #0f172a;
+  background: #e2e8f0;
+}
+
+@media (max-width: 980px) {
+  .excelai-app:not(.chat-mode) {
+    height: auto;
+    overflow: auto;
+  }
+
+  .excelai-app:not(.chat-mode) .file-page {
+    height: auto;
+    overflow: visible;
+  }
+
+  .excelai-app:not(.chat-mode) .file-management-shell {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: calc(100vh - 64px);
+    overflow: visible;
+  }
+
+  .excelai-app:not(.chat-mode) .file-sources-pane,
+  .excelai-app:not(.chat-mode) .file-insight-pane {
+    min-height: 520px;
+    height: auto;
+  }
+
+  .excelai-app:not(.chat-mode) .file-preview-controls,
+  .excelai-app:not(.chat-mode) .preview-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .excelai-app:not(.chat-mode) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  .excelai-app:not(.chat-mode) .app-sidebar {
+    position: relative;
+    top: auto;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 18px 16px 14px;
+  }
+
+  .excelai-app:not(.chat-mode) .brand-block {
+    padding: 0 0 14px;
+  }
+
+  .excelai-app:not(.chat-mode) .sidebar-upload-button {
+    margin: 0 0 14px;
+  }
+
+  .excelai-app:not(.chat-mode) .primary-nav {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .excelai-app:not(.chat-mode) .primary-nav .nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    min-height: 38px;
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+
+  .excelai-app:not(.chat-mode) .sidebar-footer {
+    display: none;
+  }
+
+  .excelai-app:not(.chat-mode) .topbar {
+    position: relative;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    min-height: 0;
+    padding: 14px 16px;
+  }
+
+  .excelai-app:not(.chat-mode) .file-topbar-meta {
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .excelai-app:not(.chat-mode) .file-topbar-meta strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .excelai-app:not(.chat-mode) .topbar-divider {
+    display: none;
+  }
+
+  .excelai-app:not(.chat-mode) .file-sources-pane,
+  .excelai-app:not(.chat-mode) .file-insight-pane {
+    min-height: auto;
+  }
+
+  .excelai-app:not(.chat-mode) .file-sources-pane {
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 18px 16px;
+  }
+
+  .excelai-app:not(.chat-mode) .file-insight-scroll {
+    padding: 16px;
+  }
+}

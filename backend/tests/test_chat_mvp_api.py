@@ -107,6 +107,52 @@ def test_summary_generation_and_chat_framework_flow(
     assert answer["citations"][0]["row"][1:] == ["Code", "Date"]
 
 
+def test_document_summary_can_be_updated(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_xlsx_fixture(workbook_path)
+    with workbook_path.open("rb") as workbook_file:
+        upload_response = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "standards.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+    assert upload_response.status_code == 200
+    version_id = upload_response.json()["version"]["version_id"]
+
+    summary_response = client.post(f"/api/excel/versions/{version_id}/summary/generate")
+    assert summary_response.status_code == 200
+
+    update_response = client.patch(
+        f"/api/excel/versions/{version_id}/summary",
+        json={
+            "summary_text": "Updated workbook summary.",
+            "business_domain": "standards operations",
+            "key_topics": ["Standards", "Standards", "DOW", ""],
+            "suitable_questions": ["Which standards are listed?"],
+            "routing_notes": "",
+        },
+    )
+    assert update_response.status_code == 200
+    updated_summary = update_response.json()
+    assert updated_summary["summary_text"] == "Updated workbook summary."
+    assert updated_summary["business_domain"] == "standards operations"
+    assert updated_summary["key_topics"] == ["Standards", "DOW"]
+    assert updated_summary["suitable_questions"] == ["Which standards are listed?"]
+    assert updated_summary["routing_notes"] == ""
+
+    persisted_response = client.get(f"/api/excel/versions/{version_id}/summary")
+    assert persisted_response.status_code == 200
+    assert persisted_response.json()["key_topics"] == ["Standards", "DOW"]
+
+
 def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
     tmp_path: Path,
 ) -> None:

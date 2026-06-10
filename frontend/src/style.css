@@ -596,8 +596,7 @@ h3 {
 }
 
 .upload-copy p,
-.empty-copy,
-.summary-text {
+.empty-copy {
   color: var(--muted);
   line-height: 1.55;
 }
@@ -608,15 +607,13 @@ h3 {
   font-size: 14px;
 }
 
-.format-pills,
-.topic-list {
+.format-pills {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.format-pills span,
-.topic-list span {
+.format-pills span {
   border-radius: 6px;
   padding: 5px 9px;
   color: var(--muted);
@@ -844,16 +841,7 @@ label > span {
   text-transform: uppercase;
 }
 
-.summary-text {
-  margin: 0;
-  padding: 0 16px 14px;
-}
-
 .document-summary-card .empty-copy {
-  padding: 0 16px 16px;
-}
-
-.topic-list {
   padding: 0 16px 16px;
 }
 
@@ -1963,7 +1951,6 @@ label > span {
 }
 
 .selected-workbook-head,
-.summary-card-head,
 .config-heading {
   display: flex;
   align-items: flex-start;
@@ -1971,19 +1958,17 @@ label > span {
   gap: 16px;
 }
 
-.selected-workbook-head,
-.summary-card-head {
+.selected-workbook-head {
   margin-bottom: 22px;
 }
 
 .selected-workbook-head h3,
-.summary-card-head h3,
 .config-heading h3 {
   margin: 0;
 }
 
 .config-heading > div,
-.summary-card-head > div {
+.config-heading > div {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1992,30 +1977,6 @@ label > span {
 .config-icon,
 .summary-icon {
   color: var(--secondary);
-}
-
-.summary-card-head .secondary-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  padding: 4px 8px;
-  background: transparent;
-}
-
-.summary-card-head .secondary-button .app-icon {
-  font-size: 17px;
-}
-
-.summary-edit-button {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  margin-left: -8px;
-  color: var(--muted);
-  background: transparent;
-  font-size: 18px;
 }
 
 .selected-workbook-head h3 {
@@ -2036,18 +1997,6 @@ label > span {
 
 .workbook-overview .form-grid.compact {
   margin-top: auto;
-  padding: 0;
-}
-
-.summary-content {
-  flex: 0 0 auto;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  padding: 18px;
-  background: var(--surface-low);
-}
-
-.summary-content .summary-text {
   padding: 0;
 }
 
@@ -2090,43 +2039,6 @@ label > span {
   margin: 0;
   color: var(--muted);
   line-height: 1.55;
-}
-
-.topic-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 16px;
-}
-
-.topic-toolbar span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.topic-toolbar button {
-  min-height: 0;
-  padding: 0;
-  color: #000000;
-  background: transparent;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.document-summary-card .topic-list {
-  padding: 14px 0 0;
-}
-
-.topic-list span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.topic-list .app-icon {
-  font-size: 14px;
 }
 
 .empty-state {
@@ -2195,11 +2107,6 @@ label > span {
 .referenced-docs {
   max-height: 120px;
   overflow-y: auto;
-}
-
-.summary-content {
-  max-height: none;
-  overflow: visible;
 }
 
 /* File management split workspace */
@@ -2724,7 +2631,7 @@ label > span {
   line-height: 17px;
 }
 
-/* Final interaction overrides */
+/* Interaction overrides */
 .knowledge-upload-zone.dragging {
   border-color: #0f172a;
   background: #ffffff;
@@ -2768,7 +2675,7 @@ label > span {
   white-space: nowrap;
 }
 
-/* Final refinement pass */
+/* File library refinements */
 .file-sources-pane {
   padding: 24px 28px 22px;
   background: #fcf8fa;
@@ -2995,42 +2902,6 @@ label > span {
   line-height: 19px;
 }
 
-/* Interaction polish requested on 2026-06-09 */
-.app-icon {
-  flex: 0 0 1em;
-  min-width: 1em;
-  min-height: 1em;
-  stroke-width: 2;
-}
-
-.nav-glyph,
-.session-glyph,
-.rail-logo,
-.chat-source-file-icon,
-.file-badge,
-.knowledge-upload-icon,
-.topbar-icon-button,
-.icon-only-button,
-.menu-trigger,
-.chat-icon-button,
-.chat-tool-button,
-.chat-send-button {
-  flex-shrink: 0;
-}
-
-.nav-glyph .app-icon,
-.session-glyph .app-icon,
-.rail-logo .app-icon,
-.topbar-icon-button .app-icon,
-.icon-only-button .app-icon,
-.menu-trigger .app-icon,
-.chat-icon-button .app-icon,
-.chat-tool-button .app-icon,
-.chat-send-button .app-icon {
-  width: 1em;
-  height: 1em;
-}
-
 .app-sidebar {
   padding-top: 24px;
 }
@@ -3210,23 +3081,6 @@ label > span {
   color: #ba1a1a;
 }
 
-.file-summary-stack .summary-head-actions {
-  align-items: center;
-}
-
-.file-summary-stack .summary-card-head .secondary-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 142px;
-  justify-content: center;
-}
-
-.file-summary-stack .summary-card-head .secondary-button .app-icon {
-  width: 17px;
-  height: 17px;
-}
-
 .file-summary-stack .insight-empty-state .primary-action {
   display: inline-flex;
   align-items: center;
@@ -3234,11 +3088,6 @@ label > span {
   gap: 8px;
   justify-self: center;
   min-width: 168px;
-}
-
-.file-summary-stack .topic-toolbar:empty,
-.file-summary-stack .topic-list:empty {
-  display: none;
 }
 
 .upload-confirm-dialog {
@@ -3614,7 +3463,7 @@ label > span {
   }
 }
 
-/* Final file workspace polish */
+/* File workspace polish */
 .file-summary-stack,
 .file-preview-panel,
 .file-schema-panel {
@@ -3625,8 +3474,6 @@ label > span {
   min-height: 0;
 }
 
-.file-summary-stack .model-config-card,
-.file-summary-stack .document-summary-card,
 .schema-overview-card,
 .schema-sheet-card,
 .schema-column-card {
@@ -3637,13 +3484,6 @@ label > span {
   box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
 }
 
-.file-summary-stack .model-config-card {
-  margin: 0;
-  padding: 0;
-}
-
-.file-summary-stack .config-heading,
-.file-summary-stack .summary-card-head,
 .schema-card-head {
   display: flex;
   align-items: center;
@@ -3656,8 +3496,6 @@ label > span {
   background: var(--surface-mid);
 }
 
-.file-summary-stack .config-heading > div,
-.file-summary-stack .summary-card-head > div,
 .schema-card-head > div {
   display: flex;
   align-items: center;
@@ -3665,8 +3503,6 @@ label > span {
   min-width: 0;
 }
 
-.file-summary-stack .config-heading h3,
-.file-summary-stack .summary-card-head h3,
 .schema-card-head h3 {
   overflow: hidden;
   margin: 0;
@@ -3676,51 +3512,8 @@ label > span {
   line-height: 20px;
 }
 
-.file-summary-stack .model-config-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
-  padding: 16px 18px;
-}
-
-.file-summary-stack .document-summary-card {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 0;
-}
-
-.summary-head-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 4px;
-}
-
-.file-summary-stack .summary-card-head .secondary-button {
-  min-height: 32px;
-  border: 0;
-  padding: 4px 8px;
-  background: transparent;
-}
-
-.file-summary-stack .summary-content {
-  max-height: none;
-  margin: 16px;
-  overflow: visible;
-}
-
 .file-summary-stack .insight-empty-state {
   margin: 16px;
-}
-
-.file-summary-stack .topic-toolbar,
-.file-summary-stack .topic-list {
-  margin-inline: 16px;
-}
-
-.file-summary-stack .topic-list {
-  padding-bottom: 16px;
 }
 
 .file-preview-panel {
@@ -4686,23 +4479,6 @@ label > span {
   min-width: 0;
 }
 
-.material-symbols-outlined {
-  font-family: "Material Symbols Outlined";
-  font-size: 20px;
-  font-style: normal;
-  font-weight: normal;
-  line-height: 1;
-  letter-spacing: normal;
-  text-transform: none;
-  white-space: nowrap;
-  word-wrap: normal;
-  direction: ltr;
-  font-feature-settings: "liga";
-  -webkit-font-feature-settings: "liga";
-  -webkit-font-smoothing: antialiased;
-  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 20;
-}
-
 .chat-panel-head {
   flex: 0 0 auto;
   display: flex;
@@ -5343,7 +5119,7 @@ label > span {
   }
 }
 
-/* 2026-06-09 interaction fixes */
+/* Interaction fixes */
 .primary-nav .nav-item:not(.muted-nav) {
   cursor: pointer;
 }
@@ -5523,174 +5299,6 @@ label > span {
   border-right: 1px solid #e2e8f0;
   padding: 24px;
   background: #ffffff;
-}
-
-.excelai-app:not(.chat-mode) .nav-item {
-  min-height: 40px;
-  border-radius: 8px;
-  padding: 9px 10px;
-  color: #64748b;
-  font-size: 14px;
-}
-
-.excelai-app:not(.chat-mode) .nav-item.active,
-.excelai-app:not(.chat-mode) .nav-item:hover:not(:disabled) {
-  color: #0f172a;
-  background: #f1f5f9;
-}
-
-.excelai-app:not(.chat-mode) .nav-glyph {
-  width: 20px;
-  height: 20px;
-  color: inherit;
-  background: transparent;
-}
-
-.excelai-app:not(.chat-mode) .file-management-shell {
-  grid-template-columns: minmax(360px, 0.82fr) minmax(520px, 1.18fr);
-  border-top: 1px solid #e2e8f0;
-  background: #fcf8fa;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane {
-  gap: 18px;
-  border-right: 1px solid #e2e8f0;
-  padding: 24px;
-  background: #ffffff;
-}
-
-.excelai-app:not(.chat-mode) .file-insight-pane {
-  background: #fcf8fa;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .panel-heading {
-  align-items: center;
-  min-height: 34px;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .panel-heading h3 {
-  color: #0f172a;
-  font-size: 18px;
-  font-weight: 800;
-  line-height: 24px;
-}
-
-.excelai-app:not(.chat-mode) .files-found-label {
-  flex: 0 0 auto;
-  color: #64748b;
-  font-size: 13px;
-  line-height: 18px;
-  white-space: nowrap;
-}
-
-.excelai-app:not(.chat-mode) .knowledge-upload-zone {
-  gap: 6px;
-  min-height: 150px;
-  border: 1px dashed #cbd5e1;
-  border-radius: 10px;
-  padding: 22px 18px;
-  background: #f8fafc;
-}
-
-.excelai-app:not(.chat-mode) .knowledge-upload-zone:hover:not(:disabled),
-.excelai-app:not(.chat-mode) .knowledge-upload-zone.dragging {
-  border-color: #0f172a;
-  background: #ffffff;
-}
-
-.excelai-app:not(.chat-mode) .knowledge-upload-icon {
-  width: 42px;
-  height: 42px;
-  margin-bottom: 6px;
-  color: #64748b;
-  background: #e2e8f0;
-  font-size: 22px;
-}
-
-.excelai-app:not(.chat-mode) .knowledge-upload-zone strong {
-  color: #0f172a;
-  font-size: 14px;
-  font-weight: 800;
-  line-height: 20px;
-}
-
-.excelai-app:not(.chat-mode) .knowledge-upload-zone > span:last-child {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 17px;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .file-card-list {
-  gap: 10px;
-  padding-right: 6px;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card {
-  grid-template-columns: 44px minmax(0, 1fr) 34px;
-  gap: 12px;
-  min-height: 76px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 12px;
-  background: #ffffff;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card:hover {
-  border-color: #cbd5e1;
-  box-shadow: 0 8px 22px rgb(15 23 42 / 0.06);
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card.selected,
-.excelai-app:not(.chat-mode) .file-sources-pane .file-library-card.menu-open {
-  border: 1px solid #0f172a;
-  background: #f8fafc;
-  box-shadow: none;
-}
-
-.excelai-app:not(.chat-mode) .file-badge.large {
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-  color: #059669;
-  background: #ecfdf5;
-  font-size: 20px;
-}
-
-.excelai-app:not(.chat-mode) .file-card-main {
-  min-width: 0;
-  gap: 2px;
-}
-
-.excelai-app:not(.chat-mode) .file-card-main strong {
-  max-width: 100%;
-  overflow: hidden;
-  color: #0f172a;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 20px;
-}
-
-.excelai-app:not(.chat-mode) .file-meta-line {
-  min-width: 0;
-  overflow: hidden;
-  color: #64748b;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  line-height: 17px;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .file-card-menu {
-  max-width: 100%;
-  justify-self: stretch;
-  justify-content: flex-end;
-  overflow-x: auto;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane .file-card-menu button {
-  flex: 0 0 auto;
 }
 
 .workbook-title-bar {

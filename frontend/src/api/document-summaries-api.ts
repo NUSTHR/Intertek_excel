@@ -1,4 +1,4 @@
-import type { DocumentSummary } from '../types/document-summary'
+import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
 
@@ -28,5 +28,18 @@ export async function generateDocumentSummary(
 export async function getDocumentSummary(versionId: string): Promise<DocumentSummary> {
   return requestSummary(`/api/excel/versions/${versionId}/summary`, {
     method: 'GET',
+  })
+}
+
+export async function updateDocumentSummary(
+  versionId: string,
+  summary: DocumentSummaryUpdate,
+): Promise<DocumentSummary> {
+  return requestSummary(`/api/excel/versions/${versionId}/summary`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(summary),
   })
 }

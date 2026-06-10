@@ -1,0 +1,18 @@
+.excel-grid-cell {
+  min-width: 0;
+}
+
+.excel-grid-cell-value {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.excel-grid-cell-value::-webkit-scrollbar {
+  display: none;
+}

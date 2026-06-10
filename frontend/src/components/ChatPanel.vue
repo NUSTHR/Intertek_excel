@@ -6,6 +6,7 @@ import {
   createChatSession,
 } from '../api/chat-api'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
+import { renderMarkdown } from '../utils/markdown'
 import AppIcon from './AppIcon.vue'
 
 interface ChatHistoryEntry {
@@ -379,7 +380,7 @@ function resizeChatInput(): void {
                   :key="`${entry.answer.created_at}-${blockIndex}`"
                   class="answer-block"
                 >
-                  <p>{{ block.text }}</p>
+                  <div class="markdown-body" v-html="renderMarkdown(block.text)"></div>
                   <button
                     v-for="citationId in block.citation_ids"
                     :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
@@ -415,7 +416,15 @@ function resizeChatInput(): void {
                 <strong>ExcelAI</strong>
               </div>
               <div class="assistant-bubble loading-message">
-                Waiting for model response.
+                <span class="loading-dots" aria-label="Waiting for model response">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+                <span class="loading-lines" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                </span>
               </div>
             </div>
           </article>

@@ -19,12 +19,17 @@ import {
   renameChatSession,
   setChatSessionPinned,
 } from '../api/chat-api'
-import { generateDocumentSummary, getDocumentSummary } from '../api/document-summaries-api'
+import {
+  generateDocumentSummary,
+  getDocumentSummary,
+  updateDocumentSummary,
+} from '../api/document-summaries-api'
 import { getLlmModelOptions } from '../api/llm-api'
 import AppIcon from '../components/AppIcon.vue'
 import ChatPanel from '../components/ChatPanel.vue'
+import DocumentSummaryCard from '../components/DocumentSummaryCard.vue'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
-import type { DocumentSummary } from '../types/document-summary'
+import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
 import type { LlmModelDefaults, LlmProviderOption } from '../types/llm'
 import type {
   ExcelFile,
@@ -106,6 +111,7 @@ const errorMessage = ref<string>('')
 const searchTerm = ref<string>('')
 const isWorkspaceBusy = ref<boolean>(false)
 const isSummaryLoading = ref<boolean>(false)
+const isSummarySaving = ref<boolean>(false)
 const isLookupLoading = ref<boolean>(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const availableLlmModels = ref<string[]>([])
@@ -271,15 +277,6 @@ const activeDocumentForChat = computed<SelectedDocument | null>(() => {
     reason: 'Current workbook',
     confidence: null,
   }
-})
-
-const visibleSummaryTopics = computed(() => {
-  if (documentSummary.value?.key_topics.length) {
-    return documentSummary.value.key_topics.map((topic) => (
-      topic.startsWith('#') ? topic : `#${topic.replace(/\s+/g, '_')}`
-    ))
-  }
-  return []
 })
 
 const activeChatSession = computed(() => {
@@ -709,6 +706,29 @@ async function generateSummaryForSelectedVersion(): Promise<void> {
     errorMessage.value = toErrorMessage(error)
   } finally {
     isSummaryLoading.value = false
+  }
+}
+
+async function saveDocumentSummary(
+  payload: DocumentSummaryUpdate,
+  onSaved: (saved: boolean) => void,
+): Promise<void> {
+  if (!selectedVersionId.value) {
+    errorMessage.value = 'Select a version first.'
+    onSaved(false)
+    return
+  }
+  errorMessage.value = ''
+  isSummarySaving.value = true
+  try {
+    documentSummary.value = await updateDocumentSummary(selectedVersionId.value, payload)
+    showOperationNotice('Document summary saved')
+    onSaved(true)
+  } catch (error: unknown) {
+    errorMessage.value = toErrorMessage(error)
+    onSaved(false)
+  } finally {
+    isSummarySaving.value = false
   }
 }
 
@@ -1749,67 +1769,14 @@ function toErrorMessage(error: unknown): string {
                   </div>
                 </article>
 
-                <article class="document-summary-card">
-                  <div class="summary-card-head">
-                    <div>
-                      <span class="summary-icon"><AppIcon name="auto_awesome" /></span>
-                      <h3>AI Executive Summary</h3>
-                    </div>
-                    <div class="summary-head-actions">
-                      <button
-                        type="button"
-                        class="secondary-button"
-                        :disabled="isSummaryLoading || !selectedVersionId"
-                        @click="generateSummaryForSelectedVersion"
-                      >
-                        <AppIcon :name="documentSummary ? 'refresh' : 'bolt'" />
-                        {{
-                          isSummaryLoading
-                            ? 'Generating...'
-                            : documentSummary
-                              ? 'Regenerate'
-                              : 'Generate Summary'
-                        }}
-                      </button>
-                      <button
-                        type="button"
-                        class="summary-edit-button"
-                        aria-label="Edit summary"
-                      >
-                        <AppIcon name="edit" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div v-if="documentSummary" class="summary-content">
-                    <p class="summary-text">{{ documentSummary.summary_text }}</p>
-                  </div>
-                  <div v-else class="insight-empty-state">
-                    <div class="insight-icon"><AppIcon name="auto_awesome" /></div>
-                    <h4>No summary generated</h4>
-                    <p>Select a file and click generate to see AI insights.</p>
-                    <button
-                      type="button"
-                      class="primary-action"
-                      :disabled="isSummaryLoading || !selectedVersionId"
-                      @click="generateSummaryForSelectedVersion"
-                    >
-                      <AppIcon name="bolt" />
-                      {{ isSummaryLoading ? 'Generating...' : 'Generate Summary' }}
-                    </button>
-                  </div>
-
-                  <div v-if="documentSummary" class="topic-toolbar">
-                    <span>Keywords & Tags</span>
-                    <button type="button">+ Add Tag</button>
-                  </div>
-                  <div v-if="documentSummary" class="topic-list">
-                    <span v-for="topic in visibleSummaryTopics" :key="topic">
-                      {{ topic }}
-                      <AppIcon name="close" />
-                    </span>
-                  </div>
-                </article>
+                <DocumentSummaryCard
+                  :summary="documentSummary"
+                  :is-generating="isSummaryLoading"
+                  :is-saving="isSummarySaving"
+                  :can-generate="Boolean(selectedVersionId)"
+                  @generate="generateSummaryForSelectedVersion"
+                  @save="saveDocumentSummary"
+                />
               </section>
 
               <section v-else-if="activeFileInsightTab === 'preview'" class="file-preview-panel">
@@ -2250,7 +2217,10 @@ function toErrorMessage(error: unknown): string {
                   }"
                   @click="selectGridCell(row, rowIndex, columnIndex)"
                 >
-                  <span class="excel-grid-cell-value custom-scrollbar">
+                  <span
+                    class="excel-grid-cell-value"
+                    :title="getGridCellValue(row, columnIndex)"
+                  >
                     {{ getGridCellValue(row, columnIndex) }}
                   </span>
                 </div>
