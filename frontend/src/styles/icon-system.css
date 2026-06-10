@@ -21,7 +21,7 @@
 .rail-logo,
 .chat-source-file-icon,
 .file-badge,
-.knowledge-upload-icon,
+.file-upload-icon,
 .topbar-icon-button,
 .icon-only-button,
 .menu-trigger,
@@ -46,7 +46,7 @@
 }
 
 .rail-logo,
-.knowledge-upload-icon,
+.file-upload-icon,
 .file-badge.large,
 .excel-grid-empty-icon {
   --icon-size: 22px;
@@ -74,7 +74,7 @@
 .rail-logo .app-icon,
 .chat-source-file-icon .app-icon,
 .file-badge .app-icon,
-.knowledge-upload-icon .app-icon,
+.file-upload-icon .app-icon,
 .topbar-icon-button .app-icon,
 .icon-only-button .app-icon,
 .menu-trigger .app-icon,

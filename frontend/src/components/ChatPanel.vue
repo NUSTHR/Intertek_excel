@@ -84,7 +84,7 @@ const normalizedSourceIndex = computed(() => {
 
 const sourceCountLabel = computed(() => {
   const count = dataSourceDocuments.value.length
-  return `${count} ${count === 1 ? 'File' : 'Files'}`
+  return `${count} ${count === 1 ? 'Document' : 'Documents'}`
 })
 
 const sourcePositionLabel = computed(() => {
@@ -342,7 +342,7 @@ function resizeChatInput(): void {
             </span>
             <span class="chat-source-copy">
               <strong>No active source</strong>
-              <span>Select or ask about a workbook</span>
+              <span>Select or ask about a document</span>
             </span>
             <span class="chat-source-pager disabled" aria-hidden="true">
               <button type="button" disabled>
@@ -460,7 +460,7 @@ function resizeChatInput(): void {
             :disabled="isAsking || !question.trim()"
             aria-label="Send message"
           >
-            <AppIcon :name="isAsking ? 'history' : 'arrow_upward'" />
+            <AppIcon :name="isAsking ? 'refresh' : 'arrow_upward'" />
           </button>
         </div>
       </div>

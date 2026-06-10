@@ -42,6 +42,7 @@ import type {
 type ActiveView = 'files' | 'chat'
 type FileInsightTab = 'summary' | 'preview' | 'schema'
 type ModelStage = 'summary' | 'router' | 'answer'
+type PrimaryNavKey = ActiveView | 'settings'
 type RenameDialog =
   | { kind: 'file'; file: ExcelFile }
   | { kind: 'session'; session: ChatSession }
@@ -59,6 +60,13 @@ interface SelectedCell {
   value: string
 }
 
+interface PrimaryNavItem {
+  key: PrimaryNavKey
+  label: string
+  icon: string
+  disabled?: boolean
+}
+
 const previewLimit = 250
 const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm', '.csv']
 const pinnedFileStorageKey = 'excelai-pinned-file-ids'
@@ -73,9 +81,14 @@ const minExcelCellWidth = 92
 const maxExcelCellWidth = 260
 const minExcelRowHeight = 30
 const maxExcelRowHeight = 86
+const primaryNavItems: PrimaryNavItem[] = [
+  { key: 'chat', label: 'Chat', icon: 'chat_bubble' },
+  { key: 'files', label: 'Files', icon: 'folder_open' },
+  { key: 'settings', label: 'Settings', icon: 'settings', disabled: true },
+]
 
 const initialActiveView: ActiveView =
-  typeof window !== 'undefined' && window.location.hash === '#chat' ? 'chat' : 'files'
+  typeof window !== 'undefined' && window.location.hash === '#files' ? 'files' : 'chat'
 
 const activeView = ref<ActiveView>(initialActiveView)
 const activeFileInsightTab = ref<FileInsightTab>('summary')
@@ -190,12 +203,12 @@ const excelFillerRowCount = computed(() => {
 })
 
 const selectedFileDisplayName = computed(() => {
-  return selectedFile.value?.display_name ?? 'No workbook selected'
+  return selectedFile.value?.display_name ?? 'No document selected'
 })
 
 const workbookStatusLabel = computed(() => {
   if (!selectedFile.value) {
-    return 'No active workbook'
+    return 'No active document'
   }
   const sheetLabel = selectedSheet.value?.sheet_name ?? 'No sheet selected'
   return `${sheetLabel} / ${previewRangeLabel.value}`
@@ -274,7 +287,7 @@ const activeDocumentForChat = computed<SelectedDocument | null>(() => {
   return {
     file_id: file.file_id,
     version_id: versionId,
-    reason: 'Current workbook',
+    reason: 'Current document',
     confidence: null,
   }
 })
@@ -341,11 +354,18 @@ function setActiveView(view: ActiveView): void {
   }
 }
 
+function selectPrimaryNavItem(item: PrimaryNavItem): void {
+  if (item.disabled || item.key === 'settings') {
+    return
+  }
+  setActiveView(item.key)
+}
+
 function syncActiveViewFromLocation(): void {
   if (typeof window === 'undefined') {
     return
   }
-  const nextView: ActiveView = window.location.hash === '#chat' ? 'chat' : 'files'
+  const nextView: ActiveView = window.location.hash === '#files' ? 'files' : 'chat'
   if (activeView.value === nextView) {
     return
   }
@@ -1434,39 +1454,18 @@ function toErrorMessage(error: unknown): string {
       </div>
 
       <nav class="primary-nav" aria-label="Primary">
-        <button type="button" class="nav-item muted-nav">
-          <span class="nav-glyph"><AppIcon name="dashboard" /></span>
-          <span>Dashboard</span>
-        </button>
         <button
+          v-for="item in primaryNavItems"
+          :key="item.key"
           type="button"
           class="nav-item"
-          :class="{ active: activeView === 'files' }"
-          @click="setActiveView('files')"
+          :class="{ active: activeView === item.key, 'muted-nav': item.disabled }"
+          :disabled="item.disabled"
+          :aria-disabled="item.disabled ? 'true' : undefined"
+          @click="selectPrimaryNavItem(item)"
         >
-          <span class="nav-glyph"><AppIcon name="folder_open" /></span>
-          <span>Files</span>
-        </button>
-        <button
-          type="button"
-          class="nav-item"
-          :class="{ active: activeView === 'chat' }"
-          @click="setActiveView('chat')"
-        >
-          <span class="nav-glyph"><AppIcon name="chat_bubble" /></span>
-          <span>Chat</span>
-        </button>
-        <button type="button" class="nav-item muted-nav">
-          <span class="nav-glyph"><AppIcon name="query_stats" /></span>
-          <span>Analytics</span>
-        </button>
-        <button type="button" class="nav-item muted-nav">
-          <span class="nav-glyph"><AppIcon name="auto_awesome" /></span>
-          <span>Knowledge Base</span>
-        </button>
-        <button type="button" class="nav-item muted-nav">
-          <span class="nav-glyph"><AppIcon name="settings" /></span>
-          <span>Settings</span>
+          <span class="nav-glyph"><AppIcon :name="item.icon" /></span>
+          <span>{{ item.label }}</span>
         </button>
       </nav>
 
@@ -1493,16 +1492,13 @@ function toErrorMessage(error: unknown): string {
         <template v-if="activeView === 'files'">
           <label class="search-field file-search-field">
             <span class="search-icon"><AppIcon name="search" /></span>
-            <input v-model="searchTerm" type="search" placeholder="Search knowledge base..." />
+            <input v-model="searchTerm" type="search" placeholder="Search files..." />
           </label>
           <div class="file-topbar-meta">
-            <strong>Knowledge Interface</strong>
+            <strong>File Workspace</strong>
             <span class="topbar-divider"></span>
             <button type="button" class="topbar-icon-button" aria-label="Notifications">
               <AppIcon name="notifications" />
-            </button>
-            <button type="button" class="topbar-icon-button" aria-label="History">
-              <AppIcon name="history" />
             </button>
             <div class="topbar-avatar">A</div>
           </div>
@@ -1515,7 +1511,7 @@ function toErrorMessage(error: unknown): string {
           <div class="topbar-actions">
             <label class="search-field">
               <span class="search-icon"><AppIcon name="search" /></span>
-              <input v-model="searchTerm" type="search" placeholder="Search workbooks..." />
+              <input v-model="searchTerm" type="search" placeholder="Search documents..." />
             </label>
             <button
               type="button"
@@ -1549,14 +1545,14 @@ function toErrorMessage(error: unknown): string {
         <section class="file-list-panel">
           <div class="panel-heading">
             <div>
-              <h3>Knowledge Sources</h3>
+              <h3>File Sources</h3>
             </div>
             <span class="files-found-label">{{ filteredFiles.length }} Files Found</span>
           </div>
 
           <button
             type="button"
-            class="knowledge-upload-zone"
+            class="file-upload-zone"
             :class="{ dragging: isUploadDragging }"
             :disabled="isWorkspaceBusy"
             @click="openUploadDialog"
@@ -1565,7 +1561,7 @@ function toErrorMessage(error: unknown): string {
             @dragleave.prevent="handleUploadDragLeave"
             @drop.prevent="handleUploadDrop"
           >
-            <span class="knowledge-upload-icon">
+            <span class="file-upload-icon">
               <AppIcon name="upload_file" />
             </span>
             <strong>Click or drag files to upload</strong>
@@ -2094,17 +2090,9 @@ function toErrorMessage(error: unknown): string {
           <p v-if="chatSessionError" class="error-note session-error">{{ chatSessionError }}</p>
 
           <div class="rail-system-links">
-            <button type="button" disabled>
-              <AppIcon name="history" />
-              <span>History</span>
-            </button>
             <button type="button" @click="setActiveView('files')">
               <AppIcon name="folder_open" />
               <span>Files</span>
-            </button>
-            <button type="button" disabled>
-              <AppIcon name="settings" />
-              <span>Settings</span>
             </button>
           </div>
 
@@ -2121,12 +2109,12 @@ function toErrorMessage(error: unknown): string {
         </aside>
 
         <section class="sheet-stage">
-          <div class="workbook-title-bar" aria-label="Current workbook">
+          <div class="workbook-title-bar" aria-label="Current document">
             <span class="workbook-title-icon">
               <AppIcon name="description" />
             </span>
             <div class="workbook-title-copy">
-              <span>Current Workbook</span>
+              <span>Current Document</span>
               <strong :title="selectedFileDisplayName">{{ selectedFileDisplayName }}</strong>
             </div>
             <span class="workbook-title-meta">{{ workbookStatusLabel }}</span>

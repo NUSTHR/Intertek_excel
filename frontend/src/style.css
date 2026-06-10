@@ -2490,20 +2490,6 @@ label > span {
     width: 100%;
   }
 
-  .file-sources-pane .file-library-card {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .file-sources-pane .file-card-actions {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
-    max-width: none;
-  }
-
-  .file-card-menu {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .file-insight-scroll {
     padding: 16px;
   }
@@ -2575,7 +2561,7 @@ label > span {
   line-height: 22px;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-zone {
+.excelai-app:not(.chat-mode) .file-upload-zone {
   min-height: 154px;
   border-width: 1.5px;
   border-radius: 14px;
@@ -2583,19 +2569,19 @@ label > span {
   background: rgb(255 255 255 / 0.72);
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-icon {
+.excelai-app:not(.chat-mode) .file-upload-icon {
   width: 48px;
   height: 48px;
   margin-bottom: 6px;
   font-size: 23px;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-zone strong {
+.excelai-app:not(.chat-mode) .file-upload-zone strong {
   font-size: 16px;
   line-height: 22px;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-zone > span:last-child {
+.excelai-app:not(.chat-mode) .file-upload-zone > span:last-child {
   font-size: 13px;
   line-height: 18px;
 }
@@ -2632,7 +2618,7 @@ label > span {
 }
 
 /* Interaction overrides */
-.knowledge-upload-zone.dragging {
+.file-upload-zone.dragging {
   border-color: #0f172a;
   background: #ffffff;
   box-shadow: inset 0 0 0 1px rgb(15 23 42 / 0.08);
@@ -2696,7 +2682,7 @@ label > span {
   line-height: 22px;
 }
 
-.knowledge-upload-zone {
+.file-upload-zone {
   min-height: 154px;
   border-width: 1.5px;
   border-radius: 14px;
@@ -2704,7 +2690,7 @@ label > span {
   background: rgb(255 255 255 / 0.62);
 }
 
-.knowledge-upload-icon {
+.file-upload-icon {
   width: 48px;
   height: 48px;
   margin-bottom: 6px;
@@ -2713,12 +2699,12 @@ label > span {
   font-size: 23px;
 }
 
-.knowledge-upload-zone strong {
+.file-upload-zone strong {
   font-size: 16px;
   line-height: 22px;
 }
 
-.knowledge-upload-zone > span:last-child {
+.file-upload-zone > span:last-child {
   color: #64748b;
   font-size: 13px;
   line-height: 18px;
@@ -2937,7 +2923,7 @@ label > span {
   line-height: 28px;
 }
 
-.knowledge-upload-zone {
+.file-upload-zone {
   display: grid;
   justify-items: center;
   align-content: center;
@@ -2955,16 +2941,16 @@ label > span {
     transform 160ms ease;
 }
 
-.knowledge-upload-zone:hover:not(:disabled) {
+.file-upload-zone:hover:not(:disabled) {
   border-color: #0f172a;
   background: #ffffff;
 }
 
-.knowledge-upload-zone:active:not(:disabled) {
+.file-upload-zone:active:not(:disabled) {
   transform: scale(0.995);
 }
 
-.knowledge-upload-icon {
+.file-upload-icon {
   display: grid;
   width: 64px;
   height: 64px;
@@ -2976,13 +2962,13 @@ label > span {
   font-size: 30px;
 }
 
-.knowledge-upload-zone strong {
+.file-upload-zone strong {
   font-size: 20px;
   font-weight: 800;
   line-height: 28px;
 }
 
-.knowledge-upload-zone > span:last-child {
+.file-upload-zone > span:last-child {
   color: #45464d;
   font-size: 18px;
   line-height: 26px;
@@ -5124,18 +5110,6 @@ label > span {
   cursor: pointer;
 }
 
-.file-sources-pane,
-.file-list-panel,
-.file-card-list {
-  overflow: visible;
-}
-
-.file-sources-pane .file-card-list {
-  overflow-x: visible;
-  overflow-y: auto;
-  padding-right: 8px;
-}
-
 .file-library-card.menu-open {
   z-index: 2;
 }
@@ -5144,32 +5118,6 @@ label > span {
   border-color: #0f172a;
   background: #f8fafc;
   box-shadow: 0 14px 32px rgb(15 23 42 / 0.1);
-}
-
-.file-sources-pane .file-card-menu {
-  position: static;
-  display: flex;
-  grid-column: 1 / -1;
-  justify-self: end;
-  gap: 4px;
-  width: auto;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  margin-top: -4px;
-  padding: 4px;
-  background: #ffffff;
-  box-shadow: none;
-  transform: none;
-}
-
-.file-sources-pane .file-card-menu button {
-  min-height: 30px;
-  border: 0;
-  border-radius: 7px;
-  padding: 6px 9px;
-  font-size: 12px;
-  line-height: 16px;
-  white-space: nowrap;
 }
 
 .excelai-app.chat-mode .excel-grid-card,

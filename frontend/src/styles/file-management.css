@@ -74,7 +74,7 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 0 6px 10px 0;
+  padding: 0 6px 96px 0;
 }
 
 .excelai-app:not(.chat-mode) .primary-nav {
@@ -113,6 +113,12 @@
   color: #0f172a;
 }
 
+.excelai-app:not(.chat-mode) .nav-item:disabled {
+  color: #94a3b8;
+  cursor: default;
+  opacity: 1;
+}
+
 .excelai-app:not(.chat-mode) .nav-glyph {
   width: 22px;
   height: 22px;
@@ -139,7 +145,7 @@
   white-space: nowrap;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-zone {
+.excelai-app:not(.chat-mode) .file-upload-zone {
   gap: 6px;
   min-height: 132px;
   border: 1px dashed #cbd5e1;
@@ -149,13 +155,13 @@
   background: #f8fafc;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-zone:hover:not(:disabled),
-.excelai-app:not(.chat-mode) .knowledge-upload-zone.dragging {
+.excelai-app:not(.chat-mode) .file-upload-zone:hover:not(:disabled),
+.excelai-app:not(.chat-mode) .file-upload-zone.dragging {
   border-color: #0f172a;
   background: #ffffff;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-icon {
+.excelai-app:not(.chat-mode) .file-upload-icon {
   width: 42px;
   height: 42px;
   margin-bottom: 4px;
@@ -163,19 +169,20 @@
   background: #e2e8f0;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-zone strong {
+.excelai-app:not(.chat-mode) .file-upload-zone strong {
   color: #0f172a;
   font-size: 14px;
   line-height: 20px;
 }
 
-.excelai-app:not(.chat-mode) .knowledge-upload-zone > span:last-child {
+.excelai-app:not(.chat-mode) .file-upload-zone > span:last-child {
   color: #64748b;
   font-size: 12px;
   line-height: 17px;
 }
 
 .excelai-app:not(.chat-mode) .file-library-card {
+  position: relative;
   grid-template-columns: 42px minmax(0, 1fr) 34px;
   gap: 12px;
   min-height: 74px;
@@ -184,6 +191,7 @@
   padding: 12px;
   background: #ffffff;
   box-shadow: none;
+  overflow: visible;
 }
 
 .excelai-app:not(.chat-mode) .file-library-card:hover {
@@ -233,20 +241,23 @@
 }
 
 .excelai-app:not(.chat-mode) .file-sources-pane .file-card-menu {
-  position: static;
-  display: flex;
-  grid-column: 1 / -1;
-  justify-self: stretch;
-  justify-content: flex-end;
+  position: absolute;
+  top: 54px;
+  right: 12px;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-self: auto;
+  justify-content: stretch;
   gap: 6px;
-  width: auto;
-  max-width: 100%;
-  border: 0;
-  border-radius: 0;
-  margin-top: -2px;
-  padding: 2px 0 0;
-  background: transparent;
-  box-shadow: none;
+  width: 168px;
+  max-width: min(168px, calc(100% - 24px));
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-top: 0;
+  padding: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 42px rgb(15 23 42 / 0.16);
   transform: none;
   overflow: visible;
 }
@@ -264,6 +275,15 @@
   background: #ffffff;
   font-size: 12px;
   font-weight: 700;
+}
+
+.excelai-app:not(.chat-mode) .file-card-menu button {
+  justify-content: flex-start;
+  width: 100%;
+  border: 0;
+  padding: 7px 9px;
+  background: transparent;
+  text-align: left;
 }
 
 .excelai-app:not(.chat-mode) .item-action-menu button:hover {
@@ -593,6 +613,22 @@
     border-right: 0;
     border-bottom: 1px solid #e2e8f0;
     padding: 18px 16px;
+  }
+
+  .excelai-app:not(.chat-mode) .file-sources-pane .file-library-card {
+    grid-template-columns: 42px minmax(0, 1fr) 34px;
+  }
+
+  .excelai-app:not(.chat-mode) .file-sources-pane .file-card-actions {
+    grid-column: auto;
+    justify-content: flex-end;
+    max-width: 34px;
+  }
+
+  .excelai-app:not(.chat-mode) .file-sources-pane .file-card-menu {
+    top: 54px;
+    right: 12px;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .excelai-app:not(.chat-mode) .file-insight-scroll {
