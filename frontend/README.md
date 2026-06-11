@@ -1,7 +1,17 @@
 # Excel Workspace Frontend
 
 Independent Vue/Vite app for Excel asset upload, version inspection, sheet
-preview, and row highlighting.
+preview, document summaries, session chat, citation navigation, and row
+highlighting.
+
+## Current Scope
+
+- Authenticated workspace shell.
+- Admin file management and model preference controls.
+- Member chat-first workspace with shared file inspection.
+- Role-specific default avatars.
+- Floating toast notifications for non-blocking file workspace feedback.
+- Excel preview, schema inspection, row lookup, and citation click-through.
 
 ## Run
 

@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     deepseek_answer_model: str = DEFAULT_DEEPSEEK_ANSWER_MODEL
     llm_request_timeout_seconds: float = 60.0
     llm_summary_max_profile_rows: int = 10
+    llm_answer_max_rows: int = 20_000
+    maintenance_interval_seconds: float = 300.0
+    maintenance_auth_session_retention_days: int = 30
+    maintenance_password_reset_token_retention_days: int = 7
     auth_admin_email: str = "969348539@qq.com"
     auth_admin_password: str = "Intertek_AI"
     auth_session_ttl_hours: int = 24 * 14

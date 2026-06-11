@@ -1,7 +1,25 @@
 # Excel Workspace Backend
 
 Independent FastAPI service for Excel asset versioning and row-level
-provenance.
+provenance. It also owns authentication, document summaries, session-based
+chat, LLM model preferences, and SQLite-backed runtime state.
+
+## Structure
+
+```text
+app/api/          FastAPI routes and schemas
+app/application/  business services and chat policies
+app/domain/       framework-free dataclasses
+app/ports/        repository, storage, workbook, LLM, and workflow protocols
+app/adapters/     SQLite, filesystem, workbook reader, LLM, and LangGraph adapters
+app/core/         config, auth helpers, IDs, errors, time, model catalog
+```
+
+SQLite internals are split under `app/adapters/repositories/sqlite/`:
+
+- `schema.py`: ordered migrations
+- `policies.py`: connection and retention defaults
+- `maintenance.py`: checkpoint/cleanup support
 
 ## Run
 
@@ -48,6 +66,15 @@ excel_workspace/storage/
 ```
 
 Override with `EXCEL_STORAGE_ROOT` and `EXCEL_DATABASE_PATH`.
+
+Long-running controls:
+
+```text
+LLM_ANSWER_MAX_ROWS=20000
+MAINTENANCE_INTERVAL_SECONDS=300
+MAINTENANCE_AUTH_SESSION_RETENTION_DAYS=30
+MAINTENANCE_PASSWORD_RESET_TOKEN_RETENTION_DAYS=7
+```
 
 ## LLM Providers
 

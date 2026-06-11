@@ -478,8 +478,14 @@ core/         config, IDs, time, supported-model catalog, application errors
 Current orchestration details:
 
 - `ChatService` owns business behavior.
+- `application/chat/policy.py` centralizes chat runtime limits such as routed
+  document count, row page size, and answer row cap.
 - `ports/chat_workflow.py` defines the route -> answer workflow contract.
 - `adapters/dialogue/langgraph_chat_workflow.py` runs the production chat chain with LangGraph.
+- `adapters/repositories/sqlite/schema.py` owns ordered SQLite migrations.
+- `adapters/repositories/sqlite/policies.py` owns SQLite connection and
+  retention policy defaults.
+- `adapters/repositories/sqlite/maintenance.py` owns SQLite runtime cleanup.
 - Application services still depend on `ports/`, not concrete adapters.
 
 ## Current Features
@@ -528,6 +534,9 @@ Current orchestration details:
   - delete
 - Frontend workspace:
   - file and chat views
+  - admin/member-aware navigation
+  - role-specific default avatars
+  - centered floating notifications for non-blocking file workspace feedback
   - file search
   - local file pinning
   - summary editing UI
@@ -611,6 +620,8 @@ Chat and LLM:
 
 ```text
 GET    /api/excel/llm/options
+GET    /api/excel/llm/preferences
+PATCH  /api/excel/llm/preferences
 POST   /api/excel/chat
 
 POST   /api/excel/chat/sessions
@@ -644,6 +655,9 @@ Important invariants:
 - `row_id` is deterministic within each sheet.
 - failed processing must not replace the previously active version.
 - citations are accepted only after backend row-ID verification.
+- admin users manage file mutations and workspace model preferences.
+- member users can authenticate, view shared files, inspect data, and manage
+  their own chat sessions.
 
 Generated artifacts currently include:
 
@@ -653,30 +667,42 @@ Generated artifacts currently include:
 - workbook profile JSON
 - SQLite summary and chat state
 
+Long-running safeguards:
+
+- SQLite connections use WAL mode, a busy timeout, periodic `PRAGMA optimize`,
+  and passive WAL checkpoints.
+- Expired or old revoked auth sessions are cleaned after
+  `MAINTENANCE_AUTH_SESSION_RETENTION_DAYS` days.
+- Expired or old used password reset tokens are cleaned after
+  `MAINTENANCE_PASSWORD_RESET_TOKEN_RETENTION_DAYS` days.
+- Answer generation inspects at most `LLM_ANSWER_MAX_ROWS` rows per request by
+  default, returning a warning when this guardrail truncates the row set.
+- The chat UI keeps only recent per-session histories in browser memory; durable
+  history remains in SQLite and reloads from the backend.
+
 ## Current Risks
 
 - Chat scope:
   - router still considers active summaries across the knowledge base
   - there is still no explicit per-chat file scope in the API
 - Context size:
-  - answer stage still sends full selected-document rows
-  - large selections can increase latency or exceed provider token limits
+  - answer stage now has a configurable row guardrail
+  - large selections can still increase latency until semantic retrieval is added
 - Confirmed model limit:
   - `Pro/deepseek-ai/DeepSeek-V3.2` can fail with provider `400` at answer time when prompt tokens exceed that model's limit
 - Citation semantics:
   - backend verifies row IDs exist
   - it does not yet prove semantic claim support beyond existence and attachment scope
-- Frontend layout:
-  - long chat sessions can still crowd the right-side evidence/chat area
-- Frontend/backend upload mismatch:
-  - the frontend upload picker currently allows `.csv`
-  - the backend upload API only accepts Excel extensions
+- Frontend maintainability:
+  - `ExcelWorkspaceApp.vue` and global CSS are still large and should be split
+    into smaller components/composables over time
 
 ## Current Priorities
 
 - Add explicit chat file scope.
-- Add answer-stage context and token guardrails.
-- Improve long-session chat and citation layout.
+- Replace answer-stage broad row loading with retrieval or deterministic row
+  narrowing before model calls.
+- Split large frontend app and CSS surfaces into smaller owned modules.
 - Improve chat-stage observability and error diagnostics.
 - Extend session inspection beyond metadata-only responses.
 
@@ -694,8 +720,10 @@ frontend: npm run build
 Latest recorded local status already documented in the repository:
 
 ```text
-pytest: 22 passed
-npm run build: passed
+backend ruff: passed
+backend pytest: 56 passed
+frontend vue-tsc: passed
+frontend vite build: passed
 ```
 
 ## Operational Notes
@@ -705,6 +733,15 @@ npm run build: passed
 - Keep frontend TypeScript types and backend schemas synchronized.
 - Keep changes inside this project boundary unless a task explicitly requires integration work elsewhere.
 - Backend `.env` supports both SiliconFlow and DeepSeek Official credentials plus per-stage default providers/models.
+- Backend `.env` also supports long-running controls:
+
+```text
+LLM_ANSWER_MAX_ROWS
+MAINTENANCE_INTERVAL_SECONDS
+MAINTENANCE_AUTH_SESSION_RETENTION_DAYS
+MAINTENANCE_PASSWORD_RESET_TOKEN_RETENTION_DAYS
+```
+
 - Frontend `.env` supports:
 
 ```text

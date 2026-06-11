@@ -24,6 +24,8 @@ interface RenderedAnswerBlock {
 
 const draftSessionKey = '__draft__'
 const renderedBlockCacheLimit = 180
+const cachedSessionHistoryLimit = 8
+const cachedEntriesPerSessionLimit = 120
 
 const props = defineProps<{
   routerProvider: string | null
@@ -340,10 +342,60 @@ function historyForSession(sessionKey: string): ChatHistoryEntry[] {
 }
 
 function setHistory(sessionKey: string, entries: ChatHistoryEntry[]): void {
-  historiesBySession.value = {
+  const nextHistories = {
     ...historiesBySession.value,
-    [sessionKey]: entries,
+    [sessionKey]: trimHistoryEntries(entries),
   }
+  historiesBySession.value = trimHistorySessionCache(nextHistories, sessionKey)
+}
+
+function trimHistoryEntries(entries: ChatHistoryEntry[]): ChatHistoryEntry[] {
+  if (entries.length <= cachedEntriesPerSessionLimit) {
+    return entries
+  }
+  return entries.slice(-cachedEntriesPerSessionLimit)
+}
+
+function trimHistorySessionCache(
+  histories: Record<string, ChatHistoryEntry[]>,
+  preferredSessionKey: string,
+): Record<string, ChatHistoryEntry[]> {
+  const keys = Object.keys(histories)
+  if (keys.length <= cachedSessionHistoryLimit) {
+    return histories
+  }
+
+  const keepKeys = new Set([preferredSessionKey, currentSessionKey.value, draftSessionKey])
+  const rankedKeys = keys.sort((left, right) => (
+    latestHistoryTimestamp(histories[right]) - latestHistoryTimestamp(histories[left])
+  ))
+  const retainedKeys = new Set<string>()
+  for (const key of rankedKeys) {
+    if (retainedKeys.size < cachedSessionHistoryLimit || keepKeys.has(key)) {
+      retainedKeys.add(key)
+    }
+  }
+  for (const key of [...rankedKeys].reverse()) {
+    if (retainedKeys.size <= cachedSessionHistoryLimit) {
+      break
+    }
+    if (!keepKeys.has(key)) {
+      retainedKeys.delete(key)
+    }
+  }
+
+  return Object.fromEntries(
+    Object.entries(histories).filter(([key]) => retainedKeys.has(key)),
+  )
+}
+
+function latestHistoryTimestamp(entries: ChatHistoryEntry[] | undefined): number {
+  const value = entries?.at(-1)?.createdAt
+  if (!value) {
+    return 0
+  }
+  const timestamp = Date.parse(value)
+  return Number.isNaN(timestamp) ? 0 : timestamp
 }
 
 function selectCitationById(answer: ChatAnswer, citationId: string): void {

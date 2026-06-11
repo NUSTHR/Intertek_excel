@@ -2,9 +2,20 @@ import hashlib
 import json
 import sqlite3
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
+from app.adapters.repositories.sqlite.maintenance import SQLiteOperationalMaintenance
+from app.adapters.repositories.sqlite.policies import (
+    AUTH_SESSION_RETENTION_DAYS,
+    PASSWORD_RESET_TOKEN_RETENTION_DAYS,
+    SQLITE_BUSY_TIMEOUT_MS,
+    SQLITE_CONNECTION_TIMEOUT_SECONDS,
+    SQLITE_MAINTENANCE_INTERVAL_SECONDS,
+    SQLITE_WAL_AUTOCHECKPOINT_PAGES,
+    SQLiteConnectionPolicy,
+    SQLiteMaintenancePolicy,
+)
+from app.adapters.repositories.sqlite.schema import SCHEMA_MIGRATIONS, SchemaMigration
 from app.core.time import utc_now_iso
 from app.domain.models import (
     AttachedDocument,
@@ -30,343 +41,47 @@ from app.domain.models import (
     UserRole,
 )
 
-
-@dataclass(frozen=True)
-class SchemaMigration:
-    version: int
-    name: str
-    statements: tuple[str, ...]
-
-
-SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
-    SchemaMigration(
-        version=1,
-        name="initial_excel_workspace_schema",
-        statements=(
-            """
-            CREATE TABLE IF NOT EXISTS excel_files (
-              file_id TEXT PRIMARY KEY,
-              display_name TEXT NOT NULL UNIQUE,
-              active_version_id TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS excel_file_versions (
-              version_id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              original_filename TEXT NOT NULL,
-              file_hash TEXT NOT NULL,
-              status TEXT NOT NULL,
-              error_message TEXT,
-              created_at TEXT NOT NULL,
-              activated_at TEXT,
-              FOREIGN KEY(file_id) REFERENCES excel_files(file_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS excel_sheets (
-              sheet_id TEXT PRIMARY KEY,
-              version_id TEXT NOT NULL,
-              sheet_index INTEGER NOT NULL,
-              sheet_code TEXT NOT NULL,
-              sheet_name TEXT NOT NULL,
-              row_count INTEGER NOT NULL,
-              column_count INTEGER NOT NULL,
-              raw_csv_path TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS excel_artifacts (
-              artifact_id TEXT PRIMARY KEY,
-              version_id TEXT NOT NULL,
-              artifact_type TEXT NOT NULL,
-              path TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS excel_row_mappings (
-              mapping_id TEXT PRIMARY KEY,
-              version_id TEXT NOT NULL,
-              sheet_id TEXT NOT NULL,
-              row_id TEXT NOT NULL,
-              original_row_number INTEGER NOT NULL,
-              raw_csv_row_number INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id),
-              FOREIGN KEY(sheet_id) REFERENCES excel_sheets(sheet_id),
-              UNIQUE(sheet_id, row_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS document_summaries (
-              summary_id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              version_id TEXT NOT NULL UNIQUE,
-              summary_text TEXT NOT NULL,
-              business_domain TEXT NOT NULL,
-              key_topics_json TEXT NOT NULL,
-              suitable_questions_json TEXT NOT NULL,
-              unsuitable_questions_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS document_sheet_summaries (
-              summary_id TEXT NOT NULL,
-              sheet_id TEXT NOT NULL,
-              sheet_name TEXT NOT NULL,
-              summary TEXT NOT NULL,
-              important_columns_json TEXT NOT NULL,
-              likely_question_types_json TEXT NOT NULL,
-              PRIMARY KEY(summary_id, sheet_id),
-              FOREIGN KEY(summary_id) REFERENCES document_summaries(summary_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_sessions (
-              session_id TEXT PRIMARY KEY,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              status TEXT NOT NULL
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_session_documents (
-              session_id TEXT NOT NULL,
-              file_id TEXT NOT NULL,
-              version_id TEXT NOT NULL,
-              attached_at TEXT NOT NULL,
-              row_count INTEGER NOT NULL,
-              context_hash TEXT NOT NULL,
-              status TEXT NOT NULL,
-              PRIMARY KEY(session_id, version_id),
-              FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id),
-              FOREIGN KEY(version_id) REFERENCES excel_file_versions(version_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS chat_turns (
-              turn_id TEXT PRIMARY KEY,
-              session_id TEXT NOT NULL,
-              question TEXT NOT NULL,
-              answer_text TEXT NOT NULL,
-              citation_ids_json TEXT NOT NULL,
-              selected_documents_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id)
-            )
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_versions_file_id
-              ON excel_file_versions(file_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_sheets_version_id
-              ON excel_sheets(version_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_mappings_sheet_row
-              ON excel_row_mappings(sheet_id, row_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_sheet_summaries_summary_id
-              ON document_sheet_summaries(summary_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_turns_session_id
-              ON chat_turns(session_id, created_at)
-            """,
-        ),
-    ),
-    SchemaMigration(
-        version=2,
-        name="add_chat_session_metadata",
-        statements=(
-            """
-            ALTER TABLE chat_sessions
-            ADD COLUMN title TEXT NOT NULL DEFAULT 'New chat'
-            """,
-            """
-            ALTER TABLE chat_sessions
-            ADD COLUMN pinned_at TEXT
-            """,
-        ),
-    ),
-    SchemaMigration(
-        version=3,
-        name="add_document_routing_summary_fields",
-        statements=(
-            """
-            ALTER TABLE document_summaries
-            ADD COLUMN document_title TEXT NOT NULL DEFAULT ''
-            """,
-            """
-            ALTER TABLE document_summaries
-            ADD COLUMN document_type TEXT NOT NULL DEFAULT 'unknown'
-            """,
-            """
-            ALTER TABLE document_summaries
-            ADD COLUMN coverage_scope_json TEXT NOT NULL DEFAULT '{}'
-            """,
-            """
-            ALTER TABLE document_summaries
-            ADD COLUMN positive_routing_terms_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE document_summaries
-            ADD COLUMN negative_routing_terms_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE document_summaries
-            ADD COLUMN exact_identifiers_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE document_summaries
-            ADD COLUMN routing_notes TEXT NOT NULL DEFAULT ''
-            """,
-            """
-            ALTER TABLE document_sheet_summaries
-            ADD COLUMN header_terms_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE document_sheet_summaries
-            ADD COLUMN sampled_identifiers_json TEXT NOT NULL DEFAULT '[]'
-            """,
-        ),
-    ),
-    SchemaMigration(
-        version=4,
-        name="persist_chat_turn_snapshots_and_llm_preferences",
-        statements=(
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN answer_blocks_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN newly_attached_documents_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN attached_documents_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN citations_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN insufficient_evidence INTEGER NOT NULL DEFAULT 0
-            """,
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN follow_up_suggestions_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            ALTER TABLE chat_turns
-            ADD COLUMN timings_json TEXT NOT NULL DEFAULT '[]'
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS llm_preferences (
-              scope TEXT PRIMARY KEY,
-              summary_provider TEXT NOT NULL,
-              summary_model TEXT NOT NULL,
-              router_provider TEXT NOT NULL,
-              router_model TEXT NOT NULL,
-              answer_provider TEXT NOT NULL,
-              answer_model TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            )
-            """,
-        ),
-    ),
-    SchemaMigration(
-        version=5,
-        name="add_authentication_and_session_ownership",
-        statements=(
-            """
-            CREATE TABLE IF NOT EXISTS user_accounts (
-              user_id TEXT PRIMARY KEY,
-              email TEXT NOT NULL UNIQUE,
-              password_hash TEXT NOT NULL,
-              role TEXT NOT NULL,
-              is_active INTEGER NOT NULL DEFAULT 1,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              last_login_at TEXT
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS auth_sessions (
-              session_id TEXT PRIMARY KEY,
-              user_id TEXT NOT NULL,
-              session_token_hash TEXT NOT NULL UNIQUE,
-              created_at TEXT NOT NULL,
-              expires_at TEXT NOT NULL,
-              revoked_at TEXT,
-              FOREIGN KEY(user_id) REFERENCES user_accounts(user_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS password_reset_tokens (
-              reset_token_id TEXT PRIMARY KEY,
-              user_id TEXT NOT NULL,
-              token_hash TEXT NOT NULL UNIQUE,
-              created_at TEXT NOT NULL,
-              expires_at TEXT NOT NULL,
-              used_at TEXT,
-              FOREIGN KEY(user_id) REFERENCES user_accounts(user_id)
-            )
-            """,
-            """
-            ALTER TABLE chat_sessions
-            ADD COLUMN user_id TEXT NOT NULL DEFAULT ''
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
-              ON auth_sessions(user_id)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_auth_sessions_token_hash
-              ON auth_sessions(session_token_hash)
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
-              ON password_reset_tokens(user_id)
-            """,
-        ),
-    ),
-)
-
-
-SQLITE_CONNECTION_TIMEOUT_SECONDS = 30.0
-SQLITE_BUSY_TIMEOUT_MS = 30000
-SQLITE_WAL_AUTOCHECKPOINT_PAGES = 1000
-SQLITE_MAINTENANCE_INTERVAL_SECONDS = 300.0
+__all__ = [
+    "AUTH_SESSION_RETENTION_DAYS",
+    "PASSWORD_RESET_TOKEN_RETENTION_DAYS",
+    "SCHEMA_MIGRATIONS",
+    "SQLITE_BUSY_TIMEOUT_MS",
+    "SQLITE_CONNECTION_TIMEOUT_SECONDS",
+    "SQLITE_MAINTENANCE_INTERVAL_SECONDS",
+    "SQLITE_WAL_AUTOCHECKPOINT_PAGES",
+    "SQLiteExcelAssetRepository",
+    "SchemaMigration",
+]
 
 
 class SQLiteExcelAssetRepository:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        maintenance_interval_seconds: float = SQLITE_MAINTENANCE_INTERVAL_SECONDS,
+        auth_session_retention_days: int = AUTH_SESSION_RETENTION_DAYS,
+        password_reset_token_retention_days: int = PASSWORD_RESET_TOKEN_RETENTION_DAYS,
+        connection_policy: SQLiteConnectionPolicy | None = None,
+        maintenance_policy: SQLiteMaintenancePolicy | None = None,
+    ) -> None:
         self._database_path = database_path
         self._last_maintenance_at = 0.0
+        self._connection_policy = connection_policy or SQLiteConnectionPolicy(
+            maintenance_interval_seconds=maintenance_interval_seconds,
+        )
+        self._maintenance_policy = maintenance_policy or SQLiteMaintenancePolicy(
+            auth_session_retention_days=auth_session_retention_days,
+            password_reset_token_retention_days=password_reset_token_retention_days,
+        )
+        self._maintenance = SQLiteOperationalMaintenance(self._maintenance_policy)
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with self._connect(run_maintenance=False) as connection:
             self._ensure_migration_table(connection)
             self._apply_migrations(connection)
+        self.run_operational_maintenance()
 
     def _ensure_migration_table(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -1385,35 +1100,66 @@ class SQLiteExcelAssetRepository:
                 (used_at, reset_token_id),
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def run_operational_maintenance(self, now_iso: str | None = None) -> dict[str, int]:
+        with self._connect(run_maintenance=False) as connection:
+            result = self._run_connection_maintenance(connection, now_iso=now_iso)
+            self._last_maintenance_at = time.monotonic()
+        return result
+
+    def _connect(self, *, run_maintenance: bool = True) -> sqlite3.Connection:
         connection = sqlite3.connect(
             self._database_path,
-            timeout=SQLITE_CONNECTION_TIMEOUT_SECONDS,
+            timeout=self._connection_policy.timeout_seconds,
         )
         connection.row_factory = sqlite3.Row
         self._configure_connection(connection)
-        self._maybe_run_connection_maintenance(connection)
+        if run_maintenance:
+            self._maybe_run_connection_maintenance(connection)
         return connection
 
     def _configure_connection(self, connection: sqlite3.Connection) -> None:
-        connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        connection.execute(f"PRAGMA busy_timeout = {self._connection_policy.busy_timeout_ms}")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.execute(
-            f"PRAGMA wal_autocheckpoint = {SQLITE_WAL_AUTOCHECKPOINT_PAGES}"
+            f"PRAGMA wal_autocheckpoint = {self._connection_policy.wal_autocheckpoint_pages}"
         )
 
     def _maybe_run_connection_maintenance(self, connection: sqlite3.Connection) -> None:
         now = time.monotonic()
-        if now - self._last_maintenance_at < SQLITE_MAINTENANCE_INTERVAL_SECONDS:
+        if (
+            self._connection_policy.maintenance_interval_seconds > 0
+            and now - self._last_maintenance_at
+            < self._connection_policy.maintenance_interval_seconds
+        ):
             return
         self._run_connection_maintenance(connection)
         self._last_maintenance_at = now
 
-    def _run_connection_maintenance(self, connection: sqlite3.Connection) -> None:
+    def _run_connection_maintenance(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        now_iso: str | None = None,
+    ) -> dict[str, int]:
         connection.execute("PRAGMA optimize")
         connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        return self._cleanup_expired_operational_records(
+            connection,
+            now_iso=now_iso or utc_now_iso(),
+        )
+
+    def _cleanup_expired_operational_records(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        now_iso: str,
+    ) -> dict[str, int]:
+        return self._maintenance.cleanup_expired_operational_records(
+            connection,
+            now_iso=now_iso,
+        )
 
     def _to_file(self, row: sqlite3.Row | None) -> ExcelFile | None:
         if row is None:

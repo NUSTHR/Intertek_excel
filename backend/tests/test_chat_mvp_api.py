@@ -273,6 +273,53 @@ def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
         )
 
 
+def test_chat_answer_row_limit_caps_loaded_rows_and_persists_warning(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client, max_answer_rows=3) as client:
+        workbook_path = tmp_path / "standards.xlsx"
+        _write_large_xlsx_fixture(workbook_path, rows=10)
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "standards.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        assert upload_response.status_code == 200
+        version_id = upload_response.json()["version"]["version_id"]
+        summary_response = client.post(f"/api/excel/versions/{version_id}/summary/generate")
+        assert summary_response.status_code == 200
+
+        session_response = client.post("/api/excel/chat/sessions")
+        assert session_response.status_code == 200
+        session_id = session_response.json()["session_id"]
+
+        answer_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/messages",
+            json={"question": "What standards are listed?"},
+        )
+
+        assert answer_response.status_code == 200
+        answer = answer_response.json()
+        assert len(llm_client.answer_calls[0]["rows"]) == 3
+        assert answer["warnings"] == [
+            (
+                "Only the first 3 row(s) were inspected to keep the answer request "
+                "within the long-running safety limit."
+            )
+        ]
+
+        history_response = client.get(f"/api/excel/chat/sessions/{session_id}/turns")
+        assert history_response.status_code == 200
+        assert history_response.json()["turns"][0]["answer"]["warnings"] == answer["warnings"]
+
+
 def test_chat_session_can_be_listed_renamed_pinned_and_deleted(
     tmp_path: Path,
 ) -> None:
@@ -802,6 +849,7 @@ def _client_with_llm(
     tmp_path: Path,
     llm_client: FakeLlmClient,
     workflow: ChatWorkflow | None = None,
+    max_answer_rows: int = 20_000,
 ) -> Iterator[TestClient]:
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
     excel_assets = ExcelAssetService(
@@ -820,6 +868,7 @@ def _client_with_llm(
         summaries=summaries,
         llm_client=llm_client,
         sessions=repository,
+        max_answer_rows=max_answer_rows,
         workflow=workflow,
     )
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets

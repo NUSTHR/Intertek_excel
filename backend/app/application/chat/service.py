@@ -2,6 +2,7 @@ import hashlib
 import logging
 from time import perf_counter
 
+from app.application.chat.policy import ChatServicePolicy
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.core.errors import AssetNotFoundError
@@ -37,14 +38,19 @@ class ChatService:
         sessions: ChatSessionRepository,
         max_routed_documents: int = 3,
         row_page_size: int = 5000,
+        max_answer_rows: int = 20_000,
+        policy: ChatServicePolicy | None = None,
         workflow: ChatWorkflow | None = None,
     ) -> None:
+        self._policy = policy or ChatServicePolicy(
+            max_routed_documents=max_routed_documents,
+            row_page_size=row_page_size,
+            max_answer_rows=max_answer_rows,
+        )
         self._excel_assets = excel_assets
         self._summaries = summaries
         self._llm_client = llm_client
         self._sessions = sessions
-        self._max_routed_documents = max_routed_documents
-        self._row_page_size = row_page_size
         self._workflow = workflow
 
     def create_session(self) -> ChatSession:
@@ -208,7 +214,7 @@ class ChatService:
             selected_documents = self._llm_client.route_documents(
                 question=question,
                 summaries=summaries,
-                max_documents=self._max_routed_documents,
+                max_documents=self._policy.max_routed_documents,
                 user_questions=[turn.question for turn in existing_turns] + [question],
                 attached_documents=attached_before,
                 previous_turns=existing_turns,
@@ -265,7 +271,9 @@ class ChatService:
             selected_version_ids=selected_version_ids,
         )
         with total_timer.measure("load_rows"):
-            rows, citation_index = self._load_rows_for_documents(documents_for_answer)
+            rows, citation_index, rows_truncated = self._load_rows_for_documents(
+                documents_for_answer
+            )
         with total_timer.measure("answer_model"):
             draft_answer = self._llm_client.answer_with_rows(
                 question=question,
@@ -282,11 +290,17 @@ class ChatService:
             for evidence_id in block.evidence_ids
         ]
         with total_timer.measure("verify_citations"):
-            citations, evidence_id_to_citation_id, warnings = self._build_verified_citations(
-                draft_answer.citations,
-                cited_evidence_ids,
-                citation_index,
+            citations, evidence_id_to_citation_id, citation_warnings = (
+                self._build_verified_citations(
+                    draft_answer.citations,
+                    cited_evidence_ids,
+                    citation_index,
+                )
             )
+        warnings = [
+            *self._row_limit_warnings(rows_truncated),
+            *citation_warnings,
+        ]
         answer_blocks = [
             ChatAnswerBlock(
                 text=block.text,
@@ -429,7 +443,7 @@ class ChatService:
     def _load_rows_for_attached_documents(
         self,
         attached_documents: list[AttachedDocument],
-    ) -> tuple[list[dict], dict[str, ExcelCitation]]:
+    ) -> tuple[list[dict], dict[str, ExcelCitation], bool]:
         return self._load_rows_for_documents(
             self._attached_to_selected_documents(attached_documents)
         )
@@ -437,9 +451,10 @@ class ChatService:
     def _load_rows_for_documents(
         self,
         documents: list[SelectedDocument],
-    ) -> tuple[list[dict], dict[str, ExcelCitation]]:
+    ) -> tuple[list[dict], dict[str, ExcelCitation], bool]:
         rows: list[dict] = []
         citation_index: dict[str, ExcelCitation] = {}
+        rows_truncated = False
         for document in documents:
             for sheet in self._excel_assets.list_sheets(document.version_id):
                 offset = 0
@@ -447,9 +462,15 @@ class ChatService:
                     result = self._excel_assets.list_sheet_rows(
                         sheet_id=sheet.sheet_id,
                         offset=offset,
-                        limit=self._row_page_size,
+                        limit=self._policy.row_page_size,
                     )
                     for row_response in result.rows:
+                        if (
+                            self._policy.effective_max_answer_rows is not None
+                            and len(rows) >= self._policy.effective_max_answer_rows
+                        ):
+                            rows_truncated = True
+                            break
                         if not row_response:
                             continue
                         row_id = row_response[0]
@@ -480,9 +501,21 @@ class ChatService:
                             row=row_response,
                         )
                     offset += len(result.rows)
+                    if rows_truncated:
+                        return rows, citation_index, rows_truncated
                     if offset >= result.total_rows or not result.rows:
                         break
-        return rows, citation_index
+        return rows, citation_index, rows_truncated
+
+    def _row_limit_warnings(self, rows_truncated: bool) -> list[str]:
+        if not rows_truncated or self._policy.effective_max_answer_rows is None:
+            return []
+        return [
+            (
+                f"Only the first {self._policy.effective_max_answer_rows} row(s) were inspected "
+                "to keep the answer request within the long-running safety limit."
+            )
+        ]
 
     def _build_verified_citations(
         self,

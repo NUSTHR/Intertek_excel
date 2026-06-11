@@ -11,10 +11,15 @@ from app.adapters.llm.siliconflow_client import (
     MultiProviderLlmClient,
     SiliconFlowConfig,
 )
+from app.adapters.repositories.sqlite.policies import (
+    SQLiteConnectionPolicy,
+    SQLiteMaintenancePolicy,
+)
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
 from app.application.auth.service import AuthService
+from app.application.chat.policy import ChatServicePolicy
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
@@ -35,7 +40,18 @@ AuthCredentialsDependency = Annotated[
 @lru_cache(maxsize=1)
 def get_excel_repository() -> SQLiteExcelAssetRepository:
     settings = get_settings()
-    repository = SQLiteExcelAssetRepository(settings.database_path)
+    repository = SQLiteExcelAssetRepository(
+        settings.database_path,
+        connection_policy=SQLiteConnectionPolicy(
+            maintenance_interval_seconds=settings.maintenance_interval_seconds,
+        ),
+        maintenance_policy=SQLiteMaintenancePolicy(
+            auth_session_retention_days=settings.maintenance_auth_session_retention_days,
+            password_reset_token_retention_days=(
+                settings.maintenance_password_reset_token_retention_days
+            ),
+        ),
+    )
     repository.initialize()
     return repository
 
@@ -61,11 +77,13 @@ def get_document_summary_service() -> DocumentSummaryService:
 
 @lru_cache(maxsize=1)
 def get_chat_service() -> ChatService:
+    settings = get_settings()
     return ChatService(
         excel_assets=get_excel_asset_service(),
         summaries=get_document_summary_service(),
         llm_client=get_llm_client(),
         sessions=get_excel_repository(),
+        policy=ChatServicePolicy(max_answer_rows=settings.llm_answer_max_rows),
         workflow=get_chat_workflow(),
     )
 

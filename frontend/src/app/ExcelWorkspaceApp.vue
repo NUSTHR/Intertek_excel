@@ -378,11 +378,6 @@ const visiblePrimaryNavItems = computed(() => {
   return primaryNavItems.filter((item) => item.key !== 'files' || isAdmin.value)
 })
 
-const userInitial = computed(() => {
-  const email = currentUser.value?.email ?? ''
-  return email.trim().charAt(0).toUpperCase() || 'U'
-})
-
 const userEmail = computed(() => currentUser.value?.email ?? '')
 
 const userRoleLabel = computed(() => (isAdmin.value ? 'Administrator' : 'Workspace user'))
@@ -2018,7 +2013,9 @@ function toErrorMessage(error: unknown): string {
           <span>Support</span>
         </button>
         <div class="user-mini">
-          <div class="avatar">{{ userInitial }}</div>
+          <div class="avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+            <AppIcon :name="isAdmin ? 'verified' : 'user'" />
+          </div>
           <div>
             <strong>{{ userRoleLabel }}</strong>
             <span>{{ userEmail }}</span>
@@ -2057,7 +2054,9 @@ function toErrorMessage(error: unknown): string {
             >
               <AppIcon name="notifications" />
             </button>
-            <div class="topbar-avatar">A</div>
+            <div class="topbar-avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+              <AppIcon :name="isAdmin ? 'verified' : 'user'" />
+            </div>
           </div>
         </template>
         <template v-else>
@@ -2082,15 +2081,17 @@ function toErrorMessage(error: unknown): string {
         </template>
       </header>
 
-      <div v-if="errorMessage || (activeView === 'files' && operationFeedback)" class="notice-row">
-        <p
-          v-if="activeView === 'files' && operationFeedback"
-          class="status-note"
-          :class="`tone-${operationFeedback.tone}`"
-        >
-          {{ operationFeedback.message }}
-        </p>
+      <div v-if="errorMessage" class="notice-row">
         <p v-if="errorMessage" class="error-note tone-error">{{ errorMessage }}</p>
+      </div>
+
+      <div
+        v-if="activeView === 'files' && operationFeedback"
+        class="floating-toast"
+        :class="`tone-${operationFeedback.tone}`"
+        role="status"
+      >
+        {{ operationFeedback.message }}
       </div>
 
       <section v-if="activeView === 'files'" class="file-page">
@@ -2607,7 +2608,10 @@ function toErrorMessage(error: unknown): string {
         :class="chatWorkspaceClasses"
         :style="chatWorkspaceStyle"
       >
-        <aside class="chat-session-rail excelai-side-nav">
+        <aside
+          class="chat-session-rail excelai-side-nav"
+          :class="{ 'member-session-rail': !isAdmin }"
+        >
           <div class="chat-rail-brand">
             <div class="rail-logo">
               <AppIcon name="analytics" />
@@ -2700,15 +2704,17 @@ function toErrorMessage(error: unknown): string {
             {{ chatSessionError }}
           </p>
 
-          <div class="rail-system-links">
-            <button v-if="isAdmin" type="button" @click="setActiveView('files')">
+          <div v-if="isAdmin" class="rail-system-links">
+            <button type="button" @click="setActiveView('files')">
               <AppIcon name="folder_open" />
               <span>Files</span>
             </button>
           </div>
 
           <div class="chat-rail-user">
-            <div class="avatar">{{ userInitial }}</div>
+            <div class="avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+              <AppIcon :name="isAdmin ? 'verified' : 'user'" />
+            </div>
             <div>
               <strong>{{ userEmail }}</strong>
               <span>{{ userRoleLabel }}</span>

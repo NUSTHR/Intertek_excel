@@ -25,17 +25,19 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
             """
         ).fetchall()
 
-    assert [int(row["version"]) for row in rows] == [1, 2, 3, 4, 5]
+    assert [int(row["version"]) for row in rows] == [1, 2, 3, 4, 5, 6]
     assert rows[0]["name"] == "initial_excel_workspace_schema"
     assert rows[1]["name"] == "add_chat_session_metadata"
     assert rows[2]["name"] == "add_document_routing_summary_fields"
     assert rows[3]["name"] == "persist_chat_turn_snapshots_and_llm_preferences"
     assert rows[4]["name"] == "add_authentication_and_session_ownership"
+    assert rows[5]["name"] == "add_operational_maintenance_indexes"
     assert rows[0]["checksum"]
     assert rows[1]["checksum"]
     assert rows[2]["checksum"]
     assert rows[3]["checksum"]
     assert rows[4]["checksum"]
+    assert rows[5]["checksum"]
 
 
 def test_repository_configures_connections_for_long_running_use(tmp_path: Path) -> None:
@@ -81,6 +83,140 @@ def test_repository_throttles_periodic_sqlite_maintenance(tmp_path: Path) -> Non
         pass
 
     assert calls == 2
+
+
+def test_repository_operational_maintenance_removes_expired_runtime_records(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(
+        database_path,
+        auth_session_retention_days=30,
+        password_reset_token_retention_days=7,
+    )
+    repository.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_accounts
+              (user_id, email, password_hash, role, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "user_cleanup",
+                "cleanup@example.com",
+                "hash",
+                "member",
+                1,
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO auth_sessions
+              (session_id, user_id, session_token_hash, created_at, expires_at, revoked_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "auth_old_expired",
+                    "user_cleanup",
+                    "token_old_expired",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-04-01T00:00:00+00:00",
+                    None,
+                ),
+                (
+                    "auth_recent_expired",
+                    "user_cleanup",
+                    "token_recent_expired",
+                    "2026-05-20T00:00:00+00:00",
+                    "2026-06-01T00:00:00+00:00",
+                    None,
+                ),
+                (
+                    "auth_old_revoked",
+                    "user_cleanup",
+                    "token_old_revoked",
+                    "2026-05-01T00:00:00+00:00",
+                    "2026-07-01T00:00:00+00:00",
+                    "2026-04-01T00:00:00+00:00",
+                ),
+                (
+                    "auth_active",
+                    "user_cleanup",
+                    "token_active",
+                    "2026-06-01T00:00:00+00:00",
+                    "2026-07-01T00:00:00+00:00",
+                    None,
+                ),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO password_reset_tokens
+              (reset_token_id, user_id, token_hash, created_at, expires_at, used_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "reset_old_expired",
+                    "user_cleanup",
+                    "reset_token_old_expired",
+                    "2026-05-01T00:00:00+00:00",
+                    "2026-05-01T01:00:00+00:00",
+                    None,
+                ),
+                (
+                    "reset_recent_expired",
+                    "user_cleanup",
+                    "reset_token_recent_expired",
+                    "2026-06-08T00:00:00+00:00",
+                    "2026-06-08T01:00:00+00:00",
+                    None,
+                ),
+                (
+                    "reset_old_used",
+                    "user_cleanup",
+                    "reset_token_old_used",
+                    "2026-06-01T00:00:00+00:00",
+                    "2026-07-01T00:00:00+00:00",
+                    "2026-05-01T00:00:00+00:00",
+                ),
+                (
+                    "reset_active",
+                    "user_cleanup",
+                    "reset_token_active",
+                    "2026-06-10T00:00:00+00:00",
+                    "2026-07-01T00:00:00+00:00",
+                    None,
+                ),
+            ],
+        )
+
+    deleted = repository.run_operational_maintenance(
+        now_iso="2026-06-11T00:00:00+00:00"
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        auth_session_ids = {
+            row[0]
+            for row in connection.execute(
+                "SELECT session_id FROM auth_sessions ORDER BY session_id"
+            )
+        }
+        reset_token_ids = {
+            row[0]
+            for row in connection.execute(
+                "SELECT reset_token_id FROM password_reset_tokens ORDER BY reset_token_id"
+            )
+        }
+
+    assert deleted == {"auth_sessions": 2, "password_reset_tokens": 2}
+    assert auth_session_ids == {"auth_active", "auth_recent_expired"}
+    assert reset_token_ids == {"reset_active", "reset_recent_expired"}
 
 
 def test_repository_initialization_detects_changed_applied_migration(
