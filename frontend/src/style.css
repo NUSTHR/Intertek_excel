@@ -1928,20 +1928,32 @@ label > span {
   gap: 18px;
 }
 
-.pagination-pages span {
+.pagination-pages button {
   display: grid;
   width: 36px;
   height: 36px;
   place-items: center;
   border-radius: 8px;
   color: var(--text);
+  background: transparent;
   font-weight: 600;
 }
 
-.pagination-pages span.active {
+.pagination-pages button.active {
   color: #ffffff;
   background: #000000;
   font-weight: 800;
+}
+
+.pagination-pages button:hover:not(.active) {
+  background: var(--surface-low);
+}
+
+.pagination-range {
+  color: var(--muted-soft);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .pagination-link {
@@ -1951,6 +1963,14 @@ label > span {
   color: var(--muted);
   background: transparent;
   font-size: 14px;
+}
+
+.pagination-link:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.pagination-link:disabled {
+  opacity: 0.45;
 }
 
 .workbook-overview,
@@ -3202,12 +3222,67 @@ label > span {
   grid-template-columns: 280px minmax(0, 1fr) var(--chat-column-width, 420px);
 }
 
+.excelai-app.chat-mode .analysis-page.chat-panel-collapsed {
+  grid-template-columns: 280px minmax(0, 1fr) 0;
+}
+
 .assistant-column {
   position: relative;
   flex-basis: var(--chat-column-width, 420px);
   width: var(--chat-column-width, 420px);
   min-width: 360px;
   max-width: 560px;
+}
+
+.assistant-column.collapsed {
+  flex-basis: 0;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  border-left: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.excelai-app.chat-mode .assistant-column.collapsed {
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  border-left: 0;
+  border-top: 0;
+}
+
+.chat-panel-expand-button {
+  position: fixed;
+  right: 18px;
+  bottom: 22px;
+  z-index: 80;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  color: #ffffff;
+  background: #0f172a;
+  box-shadow: 0 14px 34px rgb(15 23 42 / 0.18);
+  transition:
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.chat-panel-expand-button:hover {
+  background: #1e293b;
+}
+
+.chat-panel-expand-button:active {
+  transform: scale(0.96);
+}
+
+.chat-panel-expand-button .app-icon {
+  width: 20px;
+  height: 20px;
 }
 
 .chat-column-resizer {
@@ -4466,8 +4541,9 @@ label > span {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-height: 58px;
   border-bottom: 1px solid #e2e8f0;
-  padding: 16px 24px;
+  padding: 0 24px;
   background: #ffffff;
 }
 

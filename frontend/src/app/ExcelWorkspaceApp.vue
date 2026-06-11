@@ -75,6 +75,7 @@ interface PrimaryNavItem {
 }
 
 const previewLimit = 250
+const filePageSize = 6
 const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm', '.csv']
 const pinnedFileStorageKey = 'excelai-pinned-file-ids'
 const defaultRouterProvider = 'deepseek'
@@ -151,6 +152,8 @@ const isChatResizing = ref<boolean>(false)
 const isUploadDragging = ref<boolean>(false)
 const isExcelColumnResizing = ref<boolean>(false)
 const isExcelRowResizing = ref<boolean>(false)
+const isChatPanelCollapsed = ref<boolean>(false)
+const filePage = ref<number>(1)
 let operationFeedbackTimer: number | null = null
 let chatSessionFeedbackTimer: number | null = null
 let modelPreferenceSaveTimer: number | null = null
@@ -181,6 +184,40 @@ const filteredFiles = computed(() => {
     ? files.value
     : files.value.filter((file) => file.display_name.toLowerCase().includes(query))
   return sortFilesForDisplay(visibleFiles)
+})
+
+const filePageCount = computed(() => {
+  return Math.max(1, Math.ceil(filteredFiles.value.length / filePageSize))
+})
+
+const paginatedFiles = computed(() => {
+  const start = (normalizedFilePage.value - 1) * filePageSize
+  return filteredFiles.value.slice(start, start + filePageSize)
+})
+
+const normalizedFilePage = computed(() => {
+  return clamp(filePage.value, 1, filePageCount.value)
+})
+
+const visibleFilePages = computed(() => {
+  if (filteredFiles.value.length === 0) {
+    return []
+  }
+  const total = filePageCount.value
+  const current = normalizedFilePage.value
+  const start = clamp(current - 1, 1, Math.max(1, total - 2))
+  const end = Math.min(total, start + 2)
+  return Array.from({ length: end - start + 1 }, (_value, index) => start + index)
+})
+
+const filePaginationLabel = computed(() => {
+  const total = filteredFiles.value.length
+  if (total === 0) {
+    return '0 of 0'
+  }
+  const start = (normalizedFilePage.value - 1) * filePageSize + 1
+  const end = Math.min(total, start + filePageSize - 1)
+  return `${start}-${end} of ${total}`
 })
 
 const previewHeaders = computed(() => {
@@ -230,6 +267,10 @@ const selectedCellValue = computed(() => selectedCell.value?.value || '-')
 
 const chatWorkspaceStyle = computed(() => ({
   '--chat-column-width': `${chatColumnWidth.value}px`,
+}))
+
+const chatWorkspaceClasses = computed(() => ({
+  'chat-panel-collapsed': isChatPanelCollapsed.value,
 }))
 
 const excelGridStyle = computed(() => ({
@@ -350,6 +391,14 @@ watch(
   },
 )
 
+watch(
+  () => filteredFiles.value.length,
+  () => {
+    filePage.value = 1
+    closeActionMenus()
+  },
+)
+
 async function initializeWorkspace(): Promise<void> {
   await loadLlmModelOptions()
   await loadChatSessions()
@@ -444,6 +493,28 @@ function toggleChatSessionActionMenu(sessionId: string): void {
 function closeActionMenus(): void {
   openFileActionMenuId.value = ''
   openChatSessionActionMenuId.value = ''
+}
+
+function setFilePage(page: number): void {
+  filePage.value = clamp(page, 1, filePageCount.value)
+  closeActionMenus()
+}
+
+function stepFilePage(direction: -1 | 1): void {
+  setFilePage(normalizedFilePage.value + direction)
+}
+
+function collapseChatPanel(): void {
+  stopChatResize()
+  isChatPanelCollapsed.value = true
+}
+
+function expandChatPanel(): void {
+  isChatPanelCollapsed.value = false
+}
+
+function showNotificationsNotice(): void {
+  showOperationFeedback('info', 'No new file notifications.')
 }
 
 async function loadChatSessions(preferredSessionId: string | null = null): Promise<void> {
@@ -1617,7 +1688,21 @@ function toErrorMessage(error: unknown): string {
           <div class="file-topbar-meta">
             <strong>File Workspace</strong>
             <span class="topbar-divider"></span>
-            <button type="button" class="topbar-icon-button" aria-label="Notifications">
+            <button
+              type="button"
+              class="topbar-icon-button"
+              aria-label="Refresh files"
+              :disabled="isWorkspaceBusy"
+              @click="refreshFiles"
+            >
+              <AppIcon name="refresh" />
+            </button>
+            <button
+              type="button"
+              class="topbar-icon-button"
+              aria-label="Notifications"
+              @click="showNotificationsNotice"
+            >
               <AppIcon name="notifications" />
             </button>
             <div class="topbar-avatar">A</div>
@@ -1694,7 +1779,7 @@ function toErrorMessage(error: unknown): string {
 
           <div class="file-card-list">
             <article
-              v-for="file in filteredFiles"
+              v-for="file in paginatedFiles"
               :key="file.file_id"
               role="button"
               tabindex="0"
@@ -1747,21 +1832,39 @@ function toErrorMessage(error: unknown): string {
             </article>
 
             <div v-if="filteredFiles.length === 0" class="file-empty-panel">
-              No matching workbooks.
+              {{ searchTerm.trim() ? 'No matching workbooks.' : 'Upload a workbook to get started.' }}
             </div>
           </div>
 
           <div class="file-pagination">
-            <button type="button" class="pagination-link">
+            <button
+              type="button"
+              class="pagination-link"
+              :disabled="normalizedFilePage <= 1"
+              @click="stepFilePage(-1)"
+            >
               <AppIcon name="chevron_left" />
               Previous
             </button>
             <div class="pagination-pages">
-              <span class="active">1</span>
-              <span>2</span>
-              <span>3</span>
+              <button
+                v-for="pageNumber in visibleFilePages"
+                :key="pageNumber"
+                type="button"
+                :class="{ active: pageNumber === normalizedFilePage }"
+                :aria-current="pageNumber === normalizedFilePage ? 'page' : undefined"
+                @click="setFilePage(pageNumber)"
+              >
+                {{ pageNumber }}
+              </button>
             </div>
-            <button type="button" class="pagination-link">
+            <span class="pagination-range">{{ filePaginationLabel }}</span>
+            <button
+              type="button"
+              class="pagination-link"
+              :disabled="normalizedFilePage >= filePageCount"
+              @click="stepFilePage(1)"
+            >
               Next
               <AppIcon name="chevron_right" />
             </button>
@@ -2128,7 +2231,12 @@ function toErrorMessage(error: unknown): string {
         </div>
       </section>
 
-      <section v-else class="analysis-page" :style="chatWorkspaceStyle">
+      <section
+        v-else
+        class="analysis-page"
+        :class="chatWorkspaceClasses"
+        :style="chatWorkspaceStyle"
+      >
         <aside class="chat-session-rail excelai-side-nav">
           <div class="chat-rail-brand">
             <div class="rail-logo">
@@ -2389,11 +2497,27 @@ function toErrorMessage(error: unknown): string {
           </div>
         </section>
 
-        <aside class="assistant-column" :class="{ resizing: isChatResizing }">
+        <button
+          v-if="isChatPanelCollapsed"
+          type="button"
+          class="chat-panel-expand-button"
+          aria-label="Expand chat panel"
+          title="Expand chat panel"
+          @click="expandChatPanel"
+        >
+          <AppIcon name="chat_bubble" />
+        </button>
+
+        <aside
+          class="assistant-column"
+          :class="{ resizing: isChatResizing, collapsed: isChatPanelCollapsed }"
+          :aria-hidden="isChatPanelCollapsed ? 'true' : undefined"
+        >
           <button
             type="button"
             class="chat-column-resizer"
             aria-label="Resize chat panel"
+            :tabindex="isChatPanelCollapsed ? -1 : 0"
             @pointerdown="startChatResize"
           >
             <AppIcon name="drag_handle" />
@@ -2413,6 +2537,7 @@ function toErrorMessage(error: unknown): string {
             @select-document="openReferencedDocument"
             @session-created="handleChatSessionCreated"
             @session-title-suggested="handleChatSessionTitleSuggested"
+            @collapse="collapseChatPanel"
           />
         </aside>
       </section>

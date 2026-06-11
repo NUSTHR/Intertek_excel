@@ -39,6 +39,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   answerReceived: [answer: ChatAnswer]
+  collapse: []
   selectCitation: [citation: ExcelCitation]
   selectDocument: [document: SelectedDocument]
   sessionCreated: [session: ChatSession]
@@ -509,7 +510,13 @@ function resizeChatInput(): void {
   <section class="chat-panel" aria-label="Chat and citations">
     <header class="chat-panel-head">
       <h3>Chat &amp; Citations</h3>
-      <button type="button" class="chat-icon-button" aria-label="Collapse chat panel">
+      <button
+        type="button"
+        class="chat-icon-button"
+        aria-label="Collapse chat panel"
+        title="Collapse chat panel"
+        @click="emit('collapse')"
+      >
         <AppIcon name="close_fullscreen" />
       </button>
     </header>
