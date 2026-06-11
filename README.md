@@ -456,6 +456,7 @@ Current scope:
 - Run session-based multi-turn chat with route and answer stages.
 - Manage chat sessions with listing, renaming, pinning, and deletion.
 - Verify cited row IDs in the backend and let the frontend jump to the source row.
+- Search sheet data from the frontend and jump to backend-verified matching rows.
 - Hard-delete workbooks together with derived artifacts, summaries, and related chat attachments.
 
 The chat and LLM workflow are now first-class product functionality rather than
@@ -469,7 +470,7 @@ layer:
 ```text
 api/          HTTP routes, request DTOs, response DTOs, error mapping
 domain/       pure dataclasses, no framework dependencies
-application/  upload, summary, preview, lookup, deletion, chat services
+application/  upload, summary, preview, search, lookup, deletion, chat services
 ports/        repository, storage, workbook-reader, llm-client, chat-workflow protocols
 adapters/     SQLite, filesystem, workbook reader, LLM, LangGraph dialogue workflow
 core/         config, IDs, time, supported-model catalog, application errors
@@ -486,6 +487,8 @@ Current orchestration details:
 - `adapters/repositories/sqlite/policies.py` owns SQLite connection and
   retention policy defaults.
 - `adapters/repositories/sqlite/maintenance.py` owns SQLite runtime cleanup.
+- `application/excel_assets/search.py` owns sheet row search normalization,
+  result-limit, and matched-column policy.
 - Application services still depend on `ports/`, not concrete adapters.
 
 ## Current Features
@@ -511,6 +514,7 @@ Current orchestration details:
   - sheet list by version
   - paged sheet preview
   - paged row listing with mappings
+  - bounded sheet data search with matched-column reporting
   - row lookup by `row_id`
 - Document summaries:
   - generated from workbook profile only
@@ -538,6 +542,7 @@ Current orchestration details:
   - role-specific default avatars
   - centered floating notifications for non-blocking file workspace feedback
   - file search
+  - sheet data search from chat and preview workspaces
   - local file pinning
   - summary editing UI
   - schema inspection tab
@@ -602,9 +607,11 @@ POST   /api/excel/files/{file_id}/versions/{version_id}/activate
 GET    /api/excel/versions/{version_id}/sheets
 GET    /api/excel/versions/{version_id}/profile
 GET    /api/excel/versions/{version_id}/artifacts
+GET    /api/excel/versions/{version_id}/search
 
 GET    /api/excel/sheets/{sheet_id}/preview
 GET    /api/excel/sheets/{sheet_id}/rows
+GET    /api/excel/sheets/{sheet_id}/search
 GET    /api/excel/sheets/{sheet_id}/rows/{row_id}
 ```
 
@@ -694,15 +701,16 @@ Long-running safeguards:
   - backend verifies row IDs exist
   - it does not yet prove semantic claim support beyond existence and attachment scope
 - Frontend maintainability:
-  - `ExcelWorkspaceApp.vue` and global CSS are still large and should be split
-    into smaller components/composables over time
+  - search result rendering is now isolated in `SheetSearchResults.vue`
+  - `ExcelWorkspaceApp.vue` and global CSS are still large and should keep being
+    split into smaller components/composables over time
 
 ## Current Priorities
 
 - Add explicit chat file scope.
 - Replace answer-stage broad row loading with retrieval or deterministic row
   narrowing before model calls.
-- Split large frontend app and CSS surfaces into smaller owned modules.
+- Continue splitting large frontend app and CSS surfaces into smaller owned modules.
 - Improve chat-stage observability and error diagnostics.
 - Extend session inspection beyond metadata-only responses.
 
@@ -721,7 +729,7 @@ Latest recorded local status already documented in the repository:
 
 ```text
 backend ruff: passed
-backend pytest: 56 passed
+backend pytest: 57 passed
 frontend vue-tsc: passed
 frontend vite build: passed
 ```

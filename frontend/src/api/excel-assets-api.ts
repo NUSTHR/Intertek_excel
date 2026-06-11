@@ -9,9 +9,11 @@ import type {
   ListExcelSheetsResponse,
   ListExcelVersionsResponse,
   RowLookupResponse,
+  SheetSearchResponse,
   SheetRowsResponse,
   SheetPreviewResponse,
   UploadExcelResponse,
+  WorkbookSearchResponse,
   WorkbookProfile,
 } from '../types/excel-assets'
 export { ExcelWorkspaceApiError } from './errors'
@@ -163,6 +165,42 @@ export async function listExcelSheetRows(
   })
   return requestJson<SheetRowsResponse>(
     `/api/excel/sheets/${sheetId}/rows?${params.toString()}`,
+    {
+      method: 'GET',
+    },
+    requestOptions,
+  )
+}
+
+export async function searchExcelSheetRows(
+  sheetId: string,
+  query: string,
+  limit = 50,
+): Promise<SheetSearchResponse> {
+  const params = new URLSearchParams({
+    query,
+    limit: String(limit),
+  })
+  return requestJson<SheetSearchResponse>(
+    `/api/excel/sheets/${sheetId}/search?${params.toString()}`,
+    {
+      method: 'GET',
+    },
+    requestOptions,
+  )
+}
+
+export async function searchExcelVersionRows(
+  versionId: string,
+  query: string,
+  limit = 50,
+): Promise<WorkbookSearchResponse> {
+  const params = new URLSearchParams({
+    query,
+    limit: String(limit),
+  })
+  return requestJson<WorkbookSearchResponse>(
+    `/api/excel/versions/${versionId}/search?${params.toString()}`,
     {
       method: 'GET',
     },

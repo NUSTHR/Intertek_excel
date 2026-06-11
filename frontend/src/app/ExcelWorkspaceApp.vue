@@ -10,6 +10,7 @@ import {
   lookupExcelRow,
   previewExcelSheet,
   renameExcelFile,
+  searchExcelVersionRows,
   uploadExcelFile,
 } from '../api/excel-assets-api'
 import {
@@ -31,6 +32,7 @@ import AppIcon from '../components/AppIcon.vue'
 import AuthPanel from '../components/AuthPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import DocumentSummaryCard from '../components/DocumentSummaryCard.vue'
+import SheetSearchResults from '../components/SheetSearchResults.vue'
 import type { AuthResponse, AuthUser } from '../types/auth'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
@@ -40,6 +42,7 @@ import type {
   ExcelFileVersion,
   ExcelSheet,
   RowLookupResponse,
+  SheetSearchMatch,
   SheetPreviewResponse,
 } from '../types/excel-assets'
 
@@ -57,6 +60,10 @@ type UploadDialog =
   | { kind: 'new'; file: File }
   | { kind: 'replace'; file: File }
 type FeedbackTone = 'info' | 'success' | 'warning' | 'error'
+
+interface SelectSheetOptions {
+  preserveSheetSearch?: boolean
+}
 
 interface FeedbackMessage {
   tone: FeedbackTone
@@ -79,6 +86,7 @@ interface PrimaryNavItem {
 }
 
 const previewLimit = 250
+const sheetSearchLimit = 50
 const filePageSize = 6
 const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm']
 const pinnedFileStorageKey = 'excelai-pinned-file-ids'
@@ -132,15 +140,20 @@ const uploadDialog = ref<UploadDialog | null>(null)
 const dialogError = ref<string>('')
 const openFileActionMenuId = ref<string>('')
 const openChatSessionActionMenuId = ref<string>('')
-const lookupRowId = ref<string>('')
 const operationFeedback = ref<FeedbackMessage | null>(null)
 const chatSessionFeedback = ref<FeedbackMessage | null>(null)
 const errorMessage = ref<string>('')
-const searchTerm = ref<string>('')
+const fileSearchTerm = ref<string>('')
+const documentSearchTerm = ref<string>('')
+const sheetSearchTerm = ref<string>('')
+const sheetSearchResults = ref<SheetSearchMatch[]>([])
+const sheetSearchTotal = ref<number>(0)
+const sheetSearchError = ref<string>('')
 const isWorkspaceBusy = ref<boolean>(false)
 const isSummaryLoading = ref<boolean>(false)
 const isSummarySaving = ref<boolean>(false)
 const isLookupLoading = ref<boolean>(false)
+const isSheetSearchLoading = ref<boolean>(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const availableLlmModels = ref<string[]>([])
 const availableLlmProviders = ref<LlmProviderOption[]>([])
@@ -180,6 +193,7 @@ let summaryGenerationRequestId = 0
 let summarySaveRequestId = 0
 let chatSessionListRequestId = 0
 let workspaceBusyRequestId = 0
+let sheetSearchRequestId = 0
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -194,7 +208,7 @@ const selectedVersion = computed(() => {
 })
 
 const filteredFiles = computed(() => {
-  const query = searchTerm.value.trim().toLowerCase()
+  const query = fileSearchTerm.value.trim().toLowerCase()
   const visibleFiles = !query
     ? files.value
     : files.value.filter((file) => file.display_name.toLowerCase().includes(query))
@@ -303,6 +317,31 @@ const excelGridTemplateColumns = computed(() => {
 
 const workbookRowCount = computed(() => {
   return sheets.value.reduce((total, sheet) => total + sheet.row_count, 0)
+})
+
+const sheetSearchMatchColumnMap = computed(() => {
+  return new Map(
+    sheetSearchResults.value.map((match) => [
+      match.mapping.row_id,
+      new Set(match.matched_columns),
+    ]),
+  )
+})
+
+const sheetSearchSummary = computed(() => {
+  if (isSheetSearchLoading.value) {
+    return 'Searching...'
+  }
+  if (!sheetSearchTerm.value.trim()) {
+    return ''
+  }
+  if (sheetSearchError.value) {
+    return sheetSearchError.value
+  }
+  if (sheetSearchTotal.value === 0) {
+    return 'No matches'
+  }
+  return `${sheetSearchTotal.value} match${sheetSearchTotal.value === 1 ? '' : 'es'}`
 })
 
 const schemaColumns = computed(() => {
@@ -490,6 +529,7 @@ async function resetWorkspaceState(): Promise<void> {
   selectedVersionId.value = ''
   selectedSheetId.value = ''
   selectedCell.value = null
+  clearSheetSearch()
   errorMessage.value = ''
   chatSessionError.value = ''
   isChatAnswerPending.value = false
@@ -911,6 +951,7 @@ async function selectFile(
   rowLookup.value = null
   documentSummary.value = null
   selectedCell.value = null
+  clearSheetSearch()
   const nextVersions = await listExcelVersions(file.file_id)
   if (!isCurrentWorkspaceSelection(requestId) || selectedFileId.value !== file.file_id) {
     return
@@ -937,6 +978,7 @@ async function selectVersion(
     preview.value = null
     rowLookup.value = null
     documentSummary.value = null
+    clearSheetSearch()
     return
   }
   selectedVersionId.value = versionId
@@ -945,6 +987,7 @@ async function selectVersion(
   rowLookup.value = null
   documentSummary.value = null
   selectedCell.value = null
+  clearSheetSearch()
   const [nextSheets, nextSummary] = await Promise.all([
     listExcelSheets(versionId),
     getDocumentSummary(versionId).catch(() => null),
@@ -981,14 +1024,17 @@ async function selectCurrentSheet(): Promise<void> {
 async function selectSheet(
   sheet: ExcelSheet,
   requestId = nextWorkspaceSelectionRequestId(),
+  options: SelectSheetOptions = {},
 ): Promise<void> {
   if (!isCurrentWorkspaceSelection(requestId)) {
     return
   }
   selectedSheetId.value = sheet.sheet_id
   rowLookup.value = null
-  lookupRowId.value = ''
   selectedCell.value = null
+  if (!options.preserveSheetSearch) {
+    clearSheetSearch()
+  }
   const nextPreview = await previewExcelSheet(sheet.sheet_id, 0, previewLimit)
   if (!isCurrentWorkspaceSelection(requestId) || selectedSheetId.value !== sheet.sheet_id) {
     return
@@ -1020,6 +1066,94 @@ async function loadPreviewPage(offset: number): Promise<void> {
       errorMessage.value = toErrorMessage(error)
     }
   }
+}
+
+async function submitSheetSearch(): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
+  const query = sheetSearchTerm.value.trim()
+  if (!query) {
+    clearSheetSearch()
+    return
+  }
+  if (!selectedVersionId.value) {
+    sheetSearchError.value = 'Select a workbook first.'
+    return
+  }
+
+  const requestId = ++sheetSearchRequestId
+  const selectionRequestId = workspaceSelectionRequestId
+  const versionId = selectedVersionId.value
+  sheetSearchError.value = ''
+  isSheetSearchLoading.value = true
+  try {
+    const result = await searchExcelVersionRows(versionId, query, sheetSearchLimit)
+    if (!isCurrentSheetSearch(requestId, selectionRequestId, versionId)) {
+      return
+    }
+    sheetSearchTerm.value = result.query
+    sheetSearchResults.value = result.matches
+    sheetSearchTotal.value = result.total_matches
+    const firstMatch = result.matches[0]
+    if (firstMatch) {
+      await focusSheetSearchMatch(firstMatch)
+    }
+  } catch (error: unknown) {
+    if (isCurrentSheetSearch(requestId, selectionRequestId, versionId)) {
+      sheetSearchError.value = toErrorMessage(error)
+      sheetSearchResults.value = []
+      sheetSearchTotal.value = 0
+    }
+  } finally {
+    if (requestId === sheetSearchRequestId) {
+      isSheetSearchLoading.value = false
+    }
+  }
+}
+
+async function focusSheetSearchMatch(match: SheetSearchMatch): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
+  const sheet = sheets.value.find((item) => item.sheet_id === match.mapping.sheet_id)
+  if (!sheet) {
+    sheetSearchError.value = 'Matched sheet is no longer available.'
+    return
+  }
+  const requestId = workspaceSelectionRequestId
+  if (selectedSheetId.value !== sheet.sheet_id) {
+    await selectSheet(sheet, requestId, { preserveSheetSearch: true })
+  }
+  if (!isCurrentWorkspaceSelection(requestId) || selectedSheetId.value !== sheet.sheet_id) {
+    return
+  }
+  await lookupRowInSheet(match.mapping.sheet_id, match.mapping.row_id)
+}
+
+function clearSheetSearch(): void {
+  sheetSearchRequestId += 1
+  sheetSearchTerm.value = ''
+  clearSheetSearchResults()
+}
+
+function clearSheetSearchResults(): void {
+  sheetSearchResults.value = []
+  sheetSearchTotal.value = 0
+  sheetSearchError.value = ''
+  isSheetSearchLoading.value = false
+}
+
+function isCurrentSheetSearch(
+  requestId: number,
+  selectionRequestId: number,
+  versionId: string,
+): boolean {
+  return (
+    requestId === sheetSearchRequestId &&
+    isCurrentWorkspaceSelection(selectionRequestId) &&
+    selectedVersionId.value === versionId
+  )
 }
 
 async function generateSummaryForSelectedVersion(): Promise<void> {
@@ -1377,24 +1511,12 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
   }
 }
 
-async function lookupRow(): Promise<void> {
-  if (!ensureWorkspaceMutationAllowed()) {
-    return
-  }
-  if (!selectedSheetId.value || !lookupRowId.value.trim()) {
-    errorMessage.value = 'Enter a row id such as S001_R25.'
-    return
-  }
-  await lookupRowInSheet(selectedSheetId.value, lookupRowId.value.trim())
-}
-
 async function lookupVisibleRow(row: string[]): Promise<void> {
   const rowId = row[0]?.trim()
   if (!rowId || isLookupLoading.value || !ensureWorkspaceMutationAllowed()) {
     return
   }
-  lookupRowId.value = rowId
-  await lookupRow()
+  await lookupRowInSheet(selectedSheetId.value, rowId)
 }
 
 async function lookupRowInSheet(sheetId: string, rowId: string): Promise<void> {
@@ -1490,7 +1612,6 @@ async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
     if (!isCurrentWorkspaceSelection(requestId)) {
       return
     }
-    lookupRowId.value = citation.row_id
     await lookupRowInSheet(citation.sheet_id, citation.row_id)
   } catch (error: unknown) {
     if (isCurrentWorkspaceSelection(requestId)) {
@@ -1566,10 +1687,19 @@ function clearSelection(): void {
   rowLookup.value = null
   documentSummary.value = null
   selectedCell.value = null
+  clearSheetSearch()
 }
 
 function rowIsHighlighted(row: string[]): boolean {
   return Boolean(rowLookup.value && row[0] === rowLookup.value.mapping.row_id)
+}
+
+function isSheetSearchMatchedCell(row: string[], columnIndex: number): boolean {
+  const rowId = row[0]
+  if (!rowId) {
+    return false
+  }
+  return sheetSearchMatchColumnMap.value.get(rowId)?.has(columnIndex) ?? false
 }
 
 function selectGridCell(row: string[], rowIndex: number, columnIndex: number): void {
@@ -2032,7 +2162,7 @@ function toErrorMessage(error: unknown): string {
         <template v-if="activeView === 'files'">
           <label class="search-field file-search-field">
             <span class="search-icon"><AppIcon name="search" /></span>
-            <input v-model="searchTerm" type="search" placeholder="Search files..." />
+            <input v-model="fileSearchTerm" type="search" placeholder="Search files..." />
           </label>
           <div class="file-topbar-meta">
             <strong>File Workspace</strong>
@@ -2067,7 +2197,11 @@ function toErrorMessage(error: unknown): string {
           <div class="topbar-actions">
             <label class="search-field">
               <span class="search-icon"><AppIcon name="search" /></span>
-              <input v-model="searchTerm" type="search" placeholder="Search documents..." />
+              <input
+                v-model="documentSearchTerm"
+                type="search"
+                placeholder="Search documents..."
+              />
             </label>
             <button
               v-if="isAdmin"
@@ -2197,7 +2331,11 @@ function toErrorMessage(error: unknown): string {
             </article>
 
             <div v-if="filteredFiles.length === 0" class="file-empty-panel">
-              {{ searchTerm.trim() ? 'No matching workbooks.' : 'Upload a workbook to get started.' }}
+              {{
+                fileSearchTerm.trim()
+                  ? 'No matching workbooks.'
+                  : 'Upload a workbook to get started.'
+              }}
             </div>
           </div>
 
@@ -2403,24 +2541,26 @@ function toErrorMessage(error: unknown): string {
                       </option>
                     </select>
                   </label>
-                  <label class="row-jump">
-                    <span>Row ID</span>
+                  <form class="preview-search-control" @submit.prevent="submitSheetSearch">
+                    <span>Search data</span>
                     <div class="inline-control">
                       <input
-                        v-model="lookupRowId"
-                        placeholder="S001_R25"
-                        type="text"
-                        @keydown.enter="lookupRow"
+                        v-model="sheetSearchTerm"
+                        placeholder="Keyword"
+                        type="search"
+                        :disabled="!selectedVersionId || blocksWorkspaceMutation"
                       />
                       <button
-                        type="button"
-                        :disabled="isLookupLoading || blocksWorkspaceMutation"
-                        @click="lookupRow"
+                        type="submit"
+                        aria-label="Search data"
+                        :disabled="
+                          isSheetSearchLoading || !selectedVersionId || blocksWorkspaceMutation
+                        "
                       >
-                        Find
+                        <AppIcon name="search" />
                       </button>
                     </div>
-                  </label>
+                  </form>
                 </div>
 
                 <div class="preview-metrics">
@@ -2442,16 +2582,33 @@ function toErrorMessage(error: unknown): string {
                   </div>
                 </div>
 
-                <section v-if="rowLookup" class="evidence-strip compact">
-                  <div>
-                    <p class="eyebrow">Highlighted Evidence</p>
-                    <h3>{{ rowLookup.mapping.row_id }}</h3>
-                  </div>
-                  <p>
-                    {{ rowLookup.sheet.sheet_name }} / original row
-                    {{ rowLookup.mapping.original_row_number }}
-                  </p>
-                </section>
+                <div
+                  v-if="rowLookup || sheetSearchSummary || sheetSearchResults.length > 0"
+                  class="preview-feedback-stack"
+                >
+                  <section v-if="rowLookup" class="evidence-strip compact">
+                    <div>
+                      <p class="eyebrow">Highlighted Evidence</p>
+                      <h3>{{ rowLookup.mapping.row_id }}</h3>
+                    </div>
+                    <p>
+                      {{ rowLookup.sheet.sheet_name }} / original row
+                      {{ rowLookup.mapping.original_row_number }}
+                    </p>
+                  </section>
+
+                  <SheetSearchResults
+                    v-if="sheetSearchSummary || sheetSearchResults.length > 0"
+                    variant="file-preview"
+                    :summary="sheetSearchSummary"
+                    :matches="sheetSearchResults"
+                    :total-matches="sheetSearchTotal"
+                    :active-row-id="rowLookup?.mapping.row_id ?? ''"
+                    :has-error="Boolean(sheetSearchError)"
+                    :disabled="isLookupLoading || blocksWorkspaceMutation"
+                    @select="focusSheetSearchMatch"
+                  />
+                </div>
 
                 <section class="spreadsheet-card preview-card">
                   <div class="spreadsheet-header">
@@ -2497,7 +2654,11 @@ function toErrorMessage(error: unknown): string {
                           }"
                           @click="lookupVisibleRow(row)"
                         >
-                          <td v-for="(cell, cellIndex) in row" :key="`${row[0]}-${cellIndex}`">
+                          <td
+                            v-for="(cell, cellIndex) in row"
+                            :key="`${row[0]}-${cellIndex}`"
+                            :class="{ 'search-match': isSheetSearchMatchedCell(row, cellIndex) }"
+                          >
                             {{ cell || '-' }}
                           </td>
                         </tr>
@@ -2738,14 +2899,26 @@ function toErrorMessage(error: unknown): string {
           </div>
 
           <header class="sheet-topbar">
-            <div class="sheet-search-field">
-              <AppIcon name="search" />
+            <form class="sheet-search-field" @submit.prevent="submitSheetSearch">
+              <span class="sheet-search-icon" aria-hidden="true">
+                <AppIcon name="search" />
+              </span>
               <input
-                v-model="searchTerm"
+                v-model="sheetSearchTerm"
                 type="search"
                 placeholder="Search data..."
+                :disabled="!selectedVersionId || blocksWorkspaceMutation"
               />
-            </div>
+              <button
+                v-if="sheetSearchTerm || sheetSearchResults.length > 0 || sheetSearchError"
+                type="button"
+                class="sheet-search-clear"
+                aria-label="Clear sheet search"
+                @click="clearSheetSearch"
+              >
+                <AppIcon name="close" />
+              </button>
+            </form>
             <div class="sheet-topbar-actions">
               <button type="button" aria-label="Notifications">
                 <AppIcon name="notifications" />
@@ -2764,6 +2937,17 @@ function toErrorMessage(error: unknown): string {
               <strong class="active-cell-value">{{ selectedCellValue }}</strong>
             </div>
           </div>
+
+          <SheetSearchResults
+            v-if="sheetSearchSummary || sheetSearchResults.length > 0"
+            :summary="sheetSearchSummary"
+            :matches="sheetSearchResults"
+            :total-matches="sheetSearchTotal"
+            :active-row-id="rowLookup?.mapping.row_id ?? ''"
+            :has-error="Boolean(sheetSearchError)"
+            :disabled="isLookupLoading || blocksWorkspaceMutation"
+            @select="focusSheetSearchMatch"
+          />
 
           <div class="excel-grid-shell custom-scrollbar">
             <div
@@ -2819,6 +3003,7 @@ function toErrorMessage(error: unknown): string {
                   class="excel-grid-cell"
                   :class="{
                     'cell-selected': isGridCellSelected(row, rowIndex, columnIndex),
+                    'search-match': isSheetSearchMatchedCell(row, columnIndex),
                   }"
                   @click="selectGridCell(row, rowIndex, columnIndex)"
                 >

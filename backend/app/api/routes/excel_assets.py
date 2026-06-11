@@ -27,9 +27,13 @@ from app.api.schemas import (
     SheetProfileResponse,
     SheetRowResponse,
     SheetRowsResponse,
+    SheetSearchMatchResponse,
+    SheetSearchResponse,
     UploadExcelResponse,
     WorkbookProfileResponse,
+    WorkbookSearchResponse,
 )
+from app.application.excel_assets.models import SheetSearchMatch
 from app.application.excel_assets.service import ExcelAssetService
 from app.core.config import get_settings
 from app.core.errors import UploadValidationError
@@ -209,6 +213,24 @@ def list_excel_version_artifacts(
     )
 
 
+@router.get("/versions/{version_id}/search", response_model=WorkbookSearchResponse)
+def search_excel_version_rows(
+    version_id: str,
+    service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
+    query: Annotated[str, Query(min_length=1, max_length=200)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> WorkbookSearchResponse:
+    result = service.search_version_rows(version_id=version_id, query=query, limit=limit)
+    return WorkbookSearchResponse(
+        version_id=result.version_id,
+        query=result.query,
+        matches=[_to_search_match_response(match) for match in result.matches],
+        total_matches=result.total_matches,
+        limit=result.limit,
+    )
+
+
 @router.get("/sheets/{sheet_id}/preview", response_model=SheetPreviewResponse)
 def preview_excel_sheet(
     sheet_id: str,
@@ -247,6 +269,24 @@ def list_excel_sheet_rows(
         ],
         total_rows=result.total_rows,
         offset=result.offset,
+        limit=result.limit,
+    )
+
+
+@router.get("/sheets/{sheet_id}/search", response_model=SheetSearchResponse)
+def search_excel_sheet_rows(
+    sheet_id: str,
+    service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
+    query: Annotated[str, Query(min_length=1, max_length=200)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> SheetSearchResponse:
+    result = service.search_sheet_rows(sheet_id=sheet_id, query=query, limit=limit)
+    return SheetSearchResponse(
+        sheet=_to_sheet_response(result.sheet),
+        query=result.query,
+        matches=[_to_search_match_response(match) for match in result.matches],
+        total_matches=result.total_matches,
         limit=result.limit,
     )
 
@@ -331,6 +371,15 @@ def _to_mapping_response(mapping: ExcelRowMapping) -> RowMappingResponse:
         sheet_id=mapping.sheet_id,
         original_row_number=mapping.original_row_number,
         raw_csv_row_number=mapping.raw_csv_row_number,
+    )
+
+
+def _to_search_match_response(match: SheetSearchMatch) -> SheetSearchMatchResponse:
+    return SheetSearchMatchResponse(
+        sheet=_to_sheet_response(match.sheet),
+        mapping=_to_mapping_response(match.mapping),
+        row=match.row,
+        matched_columns=match.matched_columns,
     )
 
 

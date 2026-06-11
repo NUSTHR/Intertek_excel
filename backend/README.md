@@ -8,7 +8,7 @@ chat, LLM model preferences, and SQLite-backed runtime state.
 
 ```text
 app/api/          FastAPI routes and schemas
-app/application/  business services and chat policies
+app/application/  business services, chat policies, and sheet search policy
 app/domain/       framework-free dataclasses
 app/ports/        repository, storage, workbook, LLM, and workflow protocols
 app/adapters/     SQLite, filesystem, workbook reader, LLM, and LangGraph adapters
@@ -20,6 +20,31 @@ SQLite internals are split under `app/adapters/repositories/sqlite/`:
 - `schema.py`: ordered migrations
 - `policies.py`: connection and retention defaults
 - `maintenance.py`: checkpoint/cleanup support
+
+Excel asset application policies:
+
+- `app/application/excel_assets/search.py`: query normalization, bounded result
+  limits, and matched-column detection for sheet data search
+- `app/application/chat/policy.py`: routed document, row page, and answer row
+  caps for chat runtime behavior
+
+## Key APIs
+
+Sheet inspection endpoints include:
+
+```text
+GET /api/excel/versions/{version_id}/search
+GET /api/excel/sheets/{sheet_id}/preview
+GET /api/excel/sheets/{sheet_id}/rows
+GET /api/excel/sheets/{sheet_id}/search
+GET /api/excel/sheets/{sheet_id}/rows/{row_id}
+```
+
+The search endpoints are read-only, authenticated, bounded by `limit <= 200`,
+and return matching rows with matched column indexes. Version-level search is
+used by the frontend workbook search so the current displayed workbook is
+searched across all sheets. Existing preview, row listing, lookup, chat, and
+upload flows keep their original behavior.
 
 ## Run
 

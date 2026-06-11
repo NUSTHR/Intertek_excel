@@ -370,6 +370,23 @@ h3 {
   max-width: 420px;
 }
 
+.file-search-field.search-field {
+  max-width: 360px;
+}
+
+.file-search-field input {
+  min-height: 36px;
+  border-color: var(--border-soft);
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+}
+
+.file-search-field input:focus {
+  border-color: #94a3b8;
+  box-shadow: 0 0 0 3px rgb(148 163 184 / 0.18);
+}
+
 .file-topbar-meta {
   display: flex;
   align-items: center;
@@ -460,9 +477,10 @@ h3 {
   position: absolute;
   top: 50%;
   left: 14px;
-  width: auto;
-  height: auto;
-  overflow: visible;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
   clip: auto;
   color: var(--muted);
   font-size: 18px;
@@ -1194,11 +1212,18 @@ label > span {
 }
 
 .inline-control button {
+  display: grid;
+  width: 38px;
   min-height: 38px;
-  padding: 8px 12px;
+  place-items: center;
+  padding: 0;
   color: #ffffff;
   background: var(--primary);
   font-weight: 800;
+}
+
+.inline-control button .app-icon {
+  font-size: 17px;
 }
 
 .sheet-stats {
@@ -1364,6 +1389,13 @@ label > span {
 .excel-table tbody tr.highlighted td:first-child {
   color: var(--secondary);
   background: var(--secondary-mid);
+}
+
+.excel-table td.search-match {
+  background: #fff7ed;
+  box-shadow: inset 0 0 0 1px #fed7aa;
+  color: #9a3412;
+  font-weight: 800;
 }
 
 .sheet-tabs {
@@ -2542,10 +2574,6 @@ label > span {
     grid-template-columns: repeat(2, minmax(160px, 1fr));
     width: 100%;
   }
-
-  .sheet-controls .row-jump {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (max-width: 760px) {
@@ -3638,9 +3666,46 @@ label > span {
 
 .file-preview-controls {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(160px, 1fr) minmax(210px, 1.1fr);
+  grid-template-columns:
+    minmax(140px, 0.75fr)
+    minmax(150px, 0.9fr)
+    minmax(220px, 1.1fr);
   gap: 12px;
   min-width: 0;
+}
+
+.preview-search-control {
+  min-width: 0;
+}
+
+.preview-search-control > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.preview-search-control input {
+  border-color: var(--border-soft);
+  background: var(--surface-low);
+}
+
+.preview-search-control button {
+  color: #1e293b;
+  background: #e2e8f0;
+}
+
+.preview-search-control button:hover:not(:disabled) {
+  background: #cbd5e1;
+}
+
+.preview-feedback-stack {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .preview-metrics,
@@ -4316,7 +4381,6 @@ label > span {
   align-items: center;
   justify-content: space-between;
   gap: 32px;
-  border-bottom: 1px solid #e2e8f0;
   padding: 0 32px;
   background: rgb(255 255 255 / 0.8);
   backdrop-filter: blur(12px);
@@ -4324,23 +4388,29 @@ label > span {
 
 .sheet-search-field {
   position: relative;
-  width: 256px;
+  display: flex;
+  align-items: center;
+  width: min(320px, 100%);
 }
 
-.sheet-search-field .app-icon {
+.sheet-search-icon {
   position: absolute;
   top: 50%;
-  left: 12px;
-  color: rgb(100 116 139 / 0.5);
-  font-size: 18px;
+  left: 13px;
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
+  font-size: 17px;
+  pointer-events: none;
   transform: translateY(-50%);
 }
 
 .sheet-search-field input {
+  width: 100%;
   min-height: 34px;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 6px 14px 6px 36px;
+  border-radius: 10px;
+  padding: 6px 42px 6px 40px;
   color: #1e293b;
   background: #f8fafc;
   font-size: 14px;
@@ -4353,6 +4423,29 @@ label > span {
 
 .sheet-search-field input::placeholder {
   color: #94a3b8;
+}
+
+.sheet-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 7px;
+  color: #475569;
+  background: transparent;
+  transform: translateY(-50%);
+}
+
+.sheet-search-clear:hover {
+  color: #0f172a;
+  background: #e2e8f0;
+}
+
+.sheet-search-clear .app-icon {
+  font-size: 16px;
 }
 
 .sheet-topbar-actions {
@@ -4375,6 +4468,122 @@ label > span {
 
 .sheet-topbar-actions button:hover {
   background: #f1f5f9;
+}
+
+.sheet-search-results {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 8px 32px;
+  background: #fff7ed;
+  overflow: hidden;
+}
+
+.sheet-search-results--file-preview {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.sheet-search-results--file-preview .sheet-search-summary {
+  flex: 0 0 auto;
+  max-width: 150px;
+}
+
+.sheet-search-results.error {
+  background: #fef2f2;
+}
+
+.sheet-search-summary {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #9a3412;
+  font-size: 12px;
+}
+
+.sheet-search-results.error .sheet-search-summary {
+  color: #b91c1c;
+}
+
+.sheet-search-summary .app-icon {
+  font-size: 16px;
+}
+
+.sheet-search-summary strong {
+  overflow: hidden;
+  max-width: 180px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet-search-result-list {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+
+.sheet-search-result-list button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: min(360px, 72vw);
+  min-width: 0;
+  min-height: 28px;
+  border: 1px solid #fed7aa;
+  padding: 4px 10px;
+  color: #7c2d12;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.sheet-search-result-list button.active {
+  border-color: #fb923c;
+  background: #ffedd5;
+}
+
+.sheet-search-result-list button span {
+  flex: 0 0 auto;
+  overflow: hidden;
+  max-width: 170px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-weight: 800;
+}
+
+.sheet-search-result-list button strong {
+  flex: 1 1 auto;
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.sheet-search-more {
+  flex: 0 0 auto;
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .excel-grid-shell {
@@ -4480,6 +4689,20 @@ label > span {
 
 .excel-grid-row.highlighted .excel-grid-cell {
   background: rgb(236 253 245 / 0.35);
+}
+
+.excel-grid-cell.search-match {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.excel-grid-cell.search-match .excel-grid-cell-value {
+  color: #9a3412;
+  font-weight: 800;
+}
+
+.excel-grid-cell.cell-selected.search-match {
+  background: #dcfce7;
 }
 
 .excel-grid-row.filler {

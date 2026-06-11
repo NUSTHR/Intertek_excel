@@ -162,6 +162,35 @@ def test_profile_artifacts_active_version_and_paginated_rows(
     assert rows.rows[0] == ["S001_R2", "Apex", "High"]
 
 
+def test_search_sheet_rows_returns_bounded_matches_with_columns(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+
+    search = service.search_sheet_rows(result.sheets[0].sheet_id, query="apex", limit=10)
+
+    assert search.sheet.sheet_id == result.sheets[0].sheet_id
+    assert search.query == "apex"
+    assert search.total_matches == 1
+    assert search.matches[0].mapping.row_id == "S001_R2"
+    assert search.matches[0].row == ["S001_R2", "Apex", "High"]
+    assert search.matches[0].matched_columns == [1]
+
+
+def test_search_version_rows_searches_all_sheets(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+
+    search = service.search_version_rows(result.version.version_id, query="liu", limit=10)
+
+    assert search.version_id == result.version.version_id
+    assert search.total_matches == 1
+    assert search.matches[0].sheet.sheet_name == "Regions"
+    assert search.matches[0].mapping.row_id == "S002_R2"
+    assert search.matches[0].matched_columns == [2]
+
+
 def test_summary_profile_loads_full_rows_without_internal_row_ids(
     service: ExcelAssetService,
 ) -> None:

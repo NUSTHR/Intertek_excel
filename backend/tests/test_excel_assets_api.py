@@ -100,6 +100,12 @@ def test_api_upload_and_near_term_read_endpoints(client: TestClient, tmp_path: P
     profile_response = client.get(f"/api/excel/versions/{version_id}/profile")
     artifacts_response = client.get(f"/api/excel/versions/{version_id}/artifacts")
     rows_response = client.get(f"/api/excel/sheets/{sheet_id}/rows?offset=1&limit=1")
+    search_response = client.get(
+        f"/api/excel/sheets/{sheet_id}/search?query=60335&limit=5"
+    )
+    version_search_response = client.get(
+        f"/api/excel/versions/{version_id}/search?query=narration&limit=5"
+    )
 
     assert active_response.status_code == 200
     assert active_response.json()["version"]["version_id"] == version_id
@@ -121,6 +127,18 @@ def test_api_upload_and_near_term_read_endpoints(client: TestClient, tmp_path: P
     assert rows["total_rows"] == 2
     assert rows["rows"][0]["mapping"]["row_id"] == "S001_R2"
     assert rows["rows"][0]["row"] == ["S001_R2", "EN 60335-1:2023", "2024-01-01"]
+
+    assert search_response.status_code == 200
+    search = search_response.json()
+    assert search["total_matches"] == 1
+    assert search["matches"][0]["mapping"]["row_id"] == "S001_R2"
+    assert search["matches"][0]["matched_columns"] == [1]
+
+    assert version_search_response.status_code == 200
+    version_search = version_search_response.json()
+    assert version_search["total_matches"] == 1
+    assert version_search["matches"][0]["sheet"]["sheet_name"] == "Script"
+    assert version_search["matches"][0]["matched_columns"] == [2]
 
 
 def test_api_failed_replacement_keeps_previous_active_version(
@@ -237,8 +255,8 @@ def test_api_delete_file_requires_confirmation_and_hard_deletes(
     deleted = delete_response.json()
     assert deleted["file_id"] == file_id
     assert deleted["deleted_versions"] == 1
-    assert deleted["deleted_sheets"] == 1
-    assert deleted["deleted_artifacts"] == 4
+    assert deleted["deleted_sheets"] == 2
+    assert deleted["deleted_artifacts"] == 5
 
     missing_response = client.get(f"/api/excel/files/{file_id}")
     assert missing_response.status_code == 404
@@ -250,4 +268,7 @@ def _write_xlsx_fixture(path: Path) -> None:
     worksheet.title = "Standards"
     worksheet.append(["Code", "日期"])
     worksheet.append(["EN 60335-1:2023", "2024-01-01"])
+    script_sheet = workbook.create_sheet("Script")
+    script_sheet.append(["Scene", "Voiceover"])
+    script_sheet.append(["Opening", "Narration line"])
     workbook.save(path)

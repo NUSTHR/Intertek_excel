@@ -358,6 +358,29 @@
   min-width: 0;
 }
 
+.excelai-app:not(.chat-mode) .preview-feedback-stack {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .sheet-search-results--file-preview {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .sheet-search-result-list {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.excelai-app:not(.chat-mode) .sheet-search-result-list button {
+  flex: 0 0 auto;
+  max-width: min(360px, 72vw);
+}
+
 .excelai-app:not(.chat-mode) .file-preview-controls label > span {
   overflow: hidden;
   color: #475569;
@@ -379,14 +402,24 @@
 }
 
 .excelai-app:not(.chat-mode) .file-preview-controls .inline-control button {
+  display: grid;
+  width: 38px;
   min-height: 38px;
+  place-items: center;
   border: 1px solid #0f172a;
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 0;
   color: #ffffff;
   background: #0f172a;
   font-size: 12px;
   font-weight: 800;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-controls .inline-control button .app-icon {
+  width: 17px;
+  height: 17px;
+  min-width: 17px;
+  min-height: 17px;
 }
 
 .excelai-app:not(.chat-mode) .file-preview-controls .inline-control button:hover:not(:disabled) {

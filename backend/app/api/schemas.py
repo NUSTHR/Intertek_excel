@@ -247,6 +247,29 @@ class SheetRowsResponse(BaseModel):
     limit: int
 
 
+class SheetSearchMatchResponse(BaseModel):
+    sheet: ExcelSheetResponse
+    mapping: RowMappingResponse
+    row: list[str]
+    matched_columns: list[int]
+
+
+class SheetSearchResponse(BaseModel):
+    sheet: ExcelSheetResponse
+    query: str
+    matches: list[SheetSearchMatchResponse]
+    total_matches: int
+    limit: int
+
+
+class WorkbookSearchResponse(BaseModel):
+    version_id: str
+    query: str
+    matches: list[SheetSearchMatchResponse]
+    total_matches: int
+    limit: int
+
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None

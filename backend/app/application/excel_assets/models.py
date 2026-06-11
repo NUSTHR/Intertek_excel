@@ -59,6 +59,32 @@ class SheetRowsResult:
 
 
 @dataclass(frozen=True)
+class SheetSearchMatch:
+    sheet: ExcelSheet
+    mapping: ExcelRowMapping
+    row: list[str]
+    matched_columns: list[int]
+
+
+@dataclass(frozen=True)
+class SheetSearchResult:
+    sheet: ExcelSheet
+    query: str
+    matches: list[SheetSearchMatch]
+    total_matches: int
+    limit: int
+
+
+@dataclass(frozen=True)
+class WorkbookSearchResult:
+    version_id: str
+    query: str
+    matches: list[SheetSearchMatch]
+    total_matches: int
+    limit: int
+
+
+@dataclass(frozen=True)
 class RowLookupResult:
     sheet: ExcelSheet
     mapping: ExcelRowMapping

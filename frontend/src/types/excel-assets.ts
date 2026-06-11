@@ -127,3 +127,26 @@ export interface SheetRowsResponse {
   offset: number
   limit: number
 }
+
+export interface SheetSearchMatch {
+  sheet: ExcelSheet
+  mapping: RowMapping
+  row: string[]
+  matched_columns: number[]
+}
+
+export interface SheetSearchResponse {
+  sheet: ExcelSheet
+  query: string
+  matches: SheetSearchMatch[]
+  total_matches: number
+  limit: number
+}
+
+export interface WorkbookSearchResponse {
+  version_id: string
+  query: string
+  matches: SheetSearchMatch[]
+  total_matches: number
+  limit: number
+}

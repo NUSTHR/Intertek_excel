@@ -9,9 +9,13 @@ from app.application.excel_assets.models import (
     RowLookupResult,
     SheetPreviewResult,
     SheetRowsResult,
+    SheetSearchMatch,
+    SheetSearchResult,
     UploadExcelResult,
+    WorkbookSearchResult,
 )
 from app.application.excel_assets.profile import WorkbookProfileBuilder
+from app.application.excel_assets.search import SheetRowSearchPolicy
 from app.core.errors import (
     AssetNotFoundError,
     FileDeleteConfirmationRequiredError,
@@ -43,11 +47,13 @@ class ExcelAssetService:
         storage: ExcelArtifactStorage,
         workbook_reader: WorkbookReader,
         profile_builder: WorkbookProfileBuilder | None = None,
+        search_policy: SheetRowSearchPolicy | None = None,
     ) -> None:
         self._repository = repository
         self._storage = storage
         self._workbook_reader = workbook_reader
         self._profile_builder = profile_builder or WorkbookProfileBuilder()
+        self._search_policy = search_policy or SheetRowSearchPolicy()
 
     def initialize(self) -> None:
         self._repository.initialize()
@@ -289,6 +295,64 @@ class ExcelAssetService:
             limit=safe_limit,
         )
 
+    def search_sheet_rows(
+        self,
+        sheet_id: str,
+        query: str,
+        limit: int = 50,
+    ) -> SheetSearchResult:
+        sheet = self._require_sheet(sheet_id)
+        normalized_query = self._search_policy.normalize_query(query)
+        safe_limit = self._search_policy.normalize_limit(limit)
+        if not normalized_query:
+            return SheetSearchResult(
+                sheet=sheet,
+                query=normalized_query,
+                matches=[],
+                total_matches=0,
+                limit=safe_limit,
+            )
+
+        return self._search_sheet(sheet=sheet, query=normalized_query, limit=safe_limit)
+
+    def search_version_rows(
+        self,
+        version_id: str,
+        query: str,
+        limit: int = 50,
+    ) -> WorkbookSearchResult:
+        self._require_version(version_id)
+        normalized_query = self._search_policy.normalize_query(query)
+        safe_limit = self._search_policy.normalize_limit(limit)
+        if not normalized_query:
+            return WorkbookSearchResult(
+                version_id=version_id,
+                query=normalized_query,
+                matches=[],
+                total_matches=0,
+                limit=safe_limit,
+            )
+
+        matches: list[SheetSearchMatch] = []
+        total_matches = 0
+        for sheet in self._repository.list_sheets(version_id):
+            sheet_result = self._search_sheet(
+                sheet=sheet,
+                query=normalized_query,
+                limit=max(1, safe_limit - len(matches)),
+            )
+            total_matches += sheet_result.total_matches
+            if len(matches) < safe_limit:
+                matches.extend(sheet_result.matches[: safe_limit - len(matches)])
+
+        return WorkbookSearchResult(
+            version_id=version_id,
+            query=normalized_query,
+            matches=matches,
+            total_matches=total_matches,
+            limit=safe_limit,
+        )
+
     def lookup_row(self, sheet_id: str, row_id: str) -> RowLookupResult:
         sheet = self._require_sheet(sheet_id)
         mapping = self._repository.get_row_mapping(sheet_id=sheet_id, row_id=row_id)
@@ -482,6 +546,45 @@ class ExcelAssetService:
     def _read_csv_rows(self, path: Path) -> list[list[str]]:
         with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
             return [row for row in csv.reader(csv_file)]
+
+    def _search_sheet(
+        self,
+        sheet: ExcelSheet,
+        query: str,
+        limit: int,
+    ) -> SheetSearchResult:
+        safe_limit = self._search_policy.normalize_limit(limit)
+        rows = self._read_csv_rows(Path(sheet.raw_csv_path))
+        mappings = self._repository.list_row_mappings_for_sheet(sheet.sheet_id)
+        matches: list[SheetSearchMatch] = []
+        total_matches = 0
+
+        for mapping in mappings:
+            row_index = mapping.raw_csv_row_number - 1
+            if row_index < 0 or row_index >= len(rows):
+                continue
+            row = rows[row_index]
+            matched_columns = self._search_policy.matched_column_indexes(row, query)
+            if not matched_columns:
+                continue
+            total_matches += 1
+            if len(matches) < safe_limit:
+                matches.append(
+                    SheetSearchMatch(
+                        sheet=sheet,
+                        mapping=mapping,
+                        row=row,
+                        matched_columns=matched_columns,
+                    )
+                )
+
+        return SheetSearchResult(
+            sheet=sheet,
+            query=query,
+            matches=matches,
+            total_matches=total_matches,
+            limit=safe_limit,
+        )
 
     def _summary_profile_rows(
         self,
