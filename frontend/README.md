@@ -6,7 +6,7 @@ preview, and row highlighting.
 ## Run
 
 Requires Node.js and npm.
-
+ 
 macOS/Linux:
 
 ```bash
