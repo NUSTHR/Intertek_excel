@@ -145,7 +145,11 @@ Rules:
 5. Do not invent row_id, sheet_id, file_id, version_id, dates, values, or row contents.
 6. If the provided rows are insufficient, say so clearly.
 7. Keep the answer concise and business-readable.
-8. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
+8. Split the answer into separate answer_blocks by claim, paragraph, bullet, or table row
+   whenever different evidence supports different parts of the answer.
+9. Each answer_block must include only the evidence_ids that support that block's text.
+10. Do not collect all citations at the end of the answer or in one final answer block.
+11. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
 """.strip()
 
 
@@ -490,6 +494,10 @@ class MultiProviderLlmClient:
                         "}\n\n"
                         "Important:\n"
                         "- evidence_ids must contain only evidence_id values from Rows.\n"
+                        "- Split answer_blocks so each independent claim, paragraph, bullet, "
+                        "or table row carries its own evidence_ids.\n"
+                        "- Do not put all evidence_ids into the last block. Do not create a "
+                        "separate citations-only block.\n"
                         "- Prefer using evidence_id everywhere citations are needed.\n"
                         "- citation version_id, sheet_id, and row_id must match one row "
                         "object from Rows exactly when they are included.\n"

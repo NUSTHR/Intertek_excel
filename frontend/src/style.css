@@ -1559,23 +1559,6 @@ label > span {
   text-transform: uppercase;
 }
 
-.answer-block {
-  margin-top: 10px;
-}
-
-.citation-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  margin: 8px 6px 0 0;
-  padding: 3px 7px;
-  color: var(--secondary);
-  background: var(--secondary-soft);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  font-weight: 800;
-}
-
 .warning-text,
 .warning-list p {
   color: var(--warning);
@@ -4843,6 +4826,8 @@ label > span {
 }
 
 .answer-block {
+  display: grid;
+  gap: 8px;
   margin: 0;
 }
 
@@ -4852,11 +4837,18 @@ label > span {
   margin-top: 12px;
 }
 
+.answer-block-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 2px;
+}
+
 .citation-chip {
   display: inline-flex;
   align-items: center;
   min-height: 22px;
-  margin: 8px 6px 0 0;
   border: 1px solid #e2e8f0;
   border-radius: 4px;
   padding: 2px 6px;

@@ -653,15 +653,18 @@ function resizeChatInput(): void {
                     class="markdown-body"
                     v-html="renderMarkdown(renderAnswerBlock(block.text, block.reasoning).body)"
                   ></div>
-                  <button
-                    v-for="citationId in block.citation_ids"
-                    :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
-                    type="button"
-                    class="citation-chip"
-                    @click="selectCitationById(entry.answer, citationId)"
-                  >
-                    [{{ citationId }}]
-                  </button>
+                  <div v-if="block.citation_ids.length > 0" class="answer-block-citations">
+                    <button
+                      v-for="citationId in block.citation_ids"
+                      :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
+                      type="button"
+                      class="citation-chip"
+                      :aria-label="`Open citation ${citationId}`"
+                      @click="selectCitationById(entry.answer, citationId)"
+                    >
+                      [{{ citationId }}]
+                    </button>
+                  </div>
                 </div>
                 <p v-if="entry.answer.answer_blocks.length === 0" class="empty-copy">
                   No answer blocks returned.
