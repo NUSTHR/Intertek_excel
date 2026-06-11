@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import {
   deleteExcelFile,
@@ -24,7 +24,7 @@ import {
   getDocumentSummary,
   updateDocumentSummary,
 } from '../api/document-summaries-api'
-import { getLlmModelOptions } from '../api/llm-api'
+import { getLlmModelOptions, getLlmPreference, saveLlmPreference } from '../api/llm-api'
 import AppIcon from '../components/AppIcon.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import DocumentSummaryCard from '../components/DocumentSummaryCard.vue'
@@ -146,6 +146,9 @@ const isExcelColumnResizing = ref<boolean>(false)
 const isExcelRowResizing = ref<boolean>(false)
 let transientToastTimer: number | null = null
 let operationNoticeTimer: number | null = null
+let modelPreferenceSaveTimer: number | null = null
+let isModelPreferenceReady = false
+let isApplyingModelPreference = false
 let excelResizeStartX = 0
 let excelResizeStartY = 0
 let excelResizeStartWidth = 0
@@ -313,10 +316,25 @@ onBeforeUnmount(() => {
   }
   clearOperationNotice()
   clearTransientToast()
+  clearModelPreferenceSave()
   stopChatResize()
   stopExcelColumnResize()
   stopExcelRowResize()
 })
+
+watch(
+  () => [
+    summaryProvider.value,
+    summaryModel.value,
+    routerProvider.value,
+    routerModel.value,
+    answerProvider.value,
+    answerModel.value,
+  ],
+  () => {
+    queueModelPreferenceSave()
+  },
+)
 
 async function initializeWorkspace(): Promise<void> {
   await loadLlmModelOptions()
@@ -328,7 +346,20 @@ async function loadLlmModelOptions(): Promise<void> {
   const options = await getLlmModelOptions()
   availableLlmModels.value = options.models
   availableLlmProviders.value = options.providers
-  applyModelDefaults(options.defaults)
+  isApplyingModelPreference = true
+  try {
+    applyModelDefaults(options.defaults)
+    try {
+      const preference = await getLlmPreference()
+      applyModelDefaults(preference)
+    } catch (error: unknown) {
+      errorMessage.value = toErrorMessage(error)
+    }
+  } finally {
+    await nextTick()
+    isApplyingModelPreference = false
+    isModelPreferenceReady = true
+  }
 }
 
 function applyModelDefaults(defaults: LlmModelDefaults): void {
@@ -1381,6 +1412,60 @@ function ensureStageModel(stage: ModelStage): void {
   }
 }
 
+function handleModelProviderChange(stage: ModelStage): void {
+  ensureStageModel(stage)
+  queueModelPreferenceSave()
+}
+
+function queueModelPreferenceSave(): void {
+  if (!isModelPreferenceReady || isApplyingModelPreference || typeof window === 'undefined') {
+    return
+  }
+  if (!isCompleteModelPreference()) {
+    return
+  }
+  if (modelPreferenceSaveTimer !== null) {
+    window.clearTimeout(modelPreferenceSaveTimer)
+  }
+  modelPreferenceSaveTimer = window.setTimeout(() => {
+    modelPreferenceSaveTimer = null
+    void persistModelPreference()
+  }, 350)
+}
+
+async function persistModelPreference(): Promise<void> {
+  try {
+    await saveLlmPreference({
+      summary_provider: summaryProvider.value,
+      summary_model: summaryModel.value,
+      router_provider: routerProvider.value,
+      router_model: routerModel.value,
+      answer_provider: answerProvider.value,
+      answer_model: answerModel.value,
+    })
+  } catch (error: unknown) {
+    errorMessage.value = toErrorMessage(error)
+  }
+}
+
+function clearModelPreferenceSave(): void {
+  if (modelPreferenceSaveTimer !== null) {
+    window.clearTimeout(modelPreferenceSaveTimer)
+    modelPreferenceSaveTimer = null
+  }
+}
+
+function isCompleteModelPreference(): boolean {
+  return Boolean(
+    summaryProvider.value &&
+      summaryModel.value &&
+      routerProvider.value &&
+      routerModel.value &&
+      answerProvider.value &&
+      answerModel.value,
+  )
+}
+
 function columnLabel(index: number): string {
   let value = index
   let label = ''
@@ -1701,7 +1786,7 @@ function toErrorMessage(error: unknown): string {
                   <div class="model-config-grid">
                     <div class="model-setting-row">
                       <span>Summary Model</span>
-                      <select v-model="summaryProvider" @change="ensureStageModel('summary')">
+                      <select v-model="summaryProvider" @change="handleModelProviderChange('summary')">
                         <option
                           v-for="provider in availableLlmProviders"
                           :key="`summary-provider-${provider.provider}`"
@@ -1710,7 +1795,7 @@ function toErrorMessage(error: unknown): string {
                           {{ provider.label }}
                         </option>
                       </select>
-                      <select v-model="summaryModel">
+                      <select v-model="summaryModel" @change="queueModelPreferenceSave">
                         <option
                           v-for="model in modelsForProvider(summaryProvider)"
                           :key="`summary-model-${model}`"
@@ -1722,7 +1807,7 @@ function toErrorMessage(error: unknown): string {
                     </div>
                     <div class="model-setting-row">
                       <span>Router Model</span>
-                      <select v-model="routerProvider" @change="ensureStageModel('router')">
+                      <select v-model="routerProvider" @change="handleModelProviderChange('router')">
                         <option
                           v-for="provider in availableLlmProviders"
                           :key="`router-provider-${provider.provider}`"
@@ -1731,7 +1816,7 @@ function toErrorMessage(error: unknown): string {
                           {{ provider.label }}
                         </option>
                       </select>
-                      <select v-model="routerModel">
+                      <select v-model="routerModel" @change="queueModelPreferenceSave">
                         <option
                           v-for="model in modelsForProvider(routerProvider)"
                           :key="`router-model-${model}`"
@@ -1743,7 +1828,7 @@ function toErrorMessage(error: unknown): string {
                     </div>
                     <div class="model-setting-row">
                       <span>Chat Model</span>
-                      <select v-model="answerProvider" @change="ensureStageModel('answer')">
+                      <select v-model="answerProvider" @change="handleModelProviderChange('answer')">
                         <option
                           v-for="provider in availableLlmProviders"
                           :key="`answer-provider-${provider.provider}`"
@@ -1752,7 +1837,7 @@ function toErrorMessage(error: unknown): string {
                           {{ provider.label }}
                         </option>
                       </select>
-                      <select v-model="answerModel">
+                      <select v-model="answerModel" @change="queueModelPreferenceSave">
                         <option
                           v-for="model in modelsForProvider(answerProvider)"
                           :key="`answer-model-${model}`"

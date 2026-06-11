@@ -4,6 +4,8 @@ import type {
   ChatRouteResult,
   ChatSession,
   ChatSessionListResponse,
+  ChatTurn,
+  ChatTurnListResponse,
 } from '../types/chat'
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
@@ -32,6 +34,18 @@ export async function listChatSessions(): Promise<ChatSession[]> {
   }
   const payload = (await response.json()) as ChatSessionListResponse
   return payload.sessions
+}
+
+export async function listChatSessionTurns(sessionId: string): Promise<ChatTurn[]> {
+  const response = await fetch(
+    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/turns`,
+  )
+  if (!response.ok) {
+    const payload = await parseErrorPayload(response)
+    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
+  }
+  const payload = (await response.json()) as ChatTurnListResponse
+  return payload.turns
 }
 
 export async function renameChatSession(sessionId: string, title: string): Promise<ChatSession> {

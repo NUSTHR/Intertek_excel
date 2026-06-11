@@ -309,6 +309,18 @@ class ChatAnswerResponse(BaseModel):
     created_at: str
 
 
+class ChatTurnResponse(BaseModel):
+    turn_id: str
+    session_id: str
+    question: str
+    answer: ChatAnswerResponse
+    created_at: str
+
+
+class ChatTurnListResponse(BaseModel):
+    turns: list[ChatTurnResponse] = Field(default_factory=list)
+
+
 class ChatRouteResponse(BaseModel):
     session_id: str
     question: str
@@ -338,3 +350,18 @@ class LlmModelOptionsResponse(BaseModel):
     models: list[str] = Field(default_factory=list)
     providers: list[LlmProviderOptionResponse] = Field(default_factory=list)
     defaults: LlmModelDefaultsResponse
+
+
+class LlmPreferenceRequest(BaseModel):
+    summary_provider: str = Field(min_length=1, max_length=80)
+    summary_model: str = Field(min_length=1, max_length=160)
+    router_provider: str = Field(min_length=1, max_length=80)
+    router_model: str = Field(min_length=1, max_length=160)
+    answer_provider: str = Field(min_length=1, max_length=80)
+    answer_model: str = Field(min_length=1, max_length=160)
+
+
+class LlmPreferenceResponse(LlmPreferenceRequest):
+    scope: str
+    created_at: str
+    updated_at: str

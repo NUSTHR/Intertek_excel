@@ -20,6 +20,18 @@ export interface ChatSessionListResponse {
   sessions: ChatSession[]
 }
 
+export interface ChatTurn {
+  turn_id: string
+  session_id: string
+  question: string
+  answer: ChatAnswer
+  created_at: string
+}
+
+export interface ChatTurnListResponse {
+  turns: ChatTurn[]
+}
+
 export interface SelectedDocument {
   file_id: string
   version_id: string

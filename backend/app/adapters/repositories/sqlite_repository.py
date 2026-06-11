@@ -7,16 +7,20 @@ from pathlib import Path
 from app.core.time import utc_now_iso
 from app.domain.models import (
     AttachedDocument,
+    ChatAnswerBlock,
     ChatSession,
+    ChatStageTiming,
     ChatTurn,
     DocumentSummary,
     ExcelArtifact,
     ExcelArtifactType,
+    ExcelCitation,
     ExcelFile,
     ExcelFileVersion,
     ExcelRowMapping,
     ExcelSheet,
     ExcelVersionStatus,
+    LlmPreference,
     SelectedDocument,
     SheetSummary,
 )
@@ -229,6 +233,57 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """
             ALTER TABLE document_sheet_summaries
             ADD COLUMN sampled_identifiers_json TEXT NOT NULL DEFAULT '[]'
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=4,
+        name="persist_chat_turn_snapshots_and_llm_preferences",
+        statements=(
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN answer_blocks_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN newly_attached_documents_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN attached_documents_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN citations_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN insufficient_evidence INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN follow_up_suggestions_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN timings_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS llm_preferences (
+              scope TEXT PRIMARY KEY,
+              summary_provider TEXT NOT NULL,
+              summary_model TEXT NOT NULL,
+              router_provider TEXT NOT NULL,
+              router_model TEXT NOT NULL,
+              answer_provider TEXT NOT NULL,
+              answer_model TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
             """,
         ),
     ),
@@ -473,28 +528,6 @@ class SQLiteExcelAssetRepository:
                 WHERE file_id = ?
                 """,
                 (file_id,),
-            )
-            connection.execute(
-                """
-                DELETE FROM chat_turns
-                WHERE session_id IN (
-                  SELECT session_id FROM chat_sessions
-                  WHERE session_id NOT IN (
-                    SELECT DISTINCT session_id FROM chat_session_documents
-                  )
-                )
-                """
-            )
-            connection.execute(
-                """
-                DELETE FROM chat_sessions
-                WHERE session_id NOT IN (
-                  SELECT DISTINCT session_id FROM chat_turns
-                )
-                AND session_id NOT IN (
-                  SELECT DISTINCT session_id FROM chat_session_documents
-                )
-                """
             )
             connection.execute(
                 """
@@ -990,9 +1023,12 @@ class SQLiteExcelAssetRepository:
                 INSERT INTO chat_turns
                   (
                     turn_id, session_id, question, answer_text,
-                    citation_ids_json, selected_documents_json, created_at
+                    citation_ids_json, selected_documents_json, created_at,
+                    answer_blocks_json, newly_attached_documents_json,
+                    attached_documents_json, citations_json, insufficient_evidence,
+                    follow_up_suggestions_json, warnings_json, timings_json
                   )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn.turn_id,
@@ -1000,18 +1036,20 @@ class SQLiteExcelAssetRepository:
                     turn.question,
                     turn.answer_text,
                     self._dump_json(turn.citation_ids),
-                    self._dump_json(
-                        [
-                            {
-                                "file_id": document.file_id,
-                                "version_id": document.version_id,
-                                "reason": document.reason,
-                                "confidence": document.confidence,
-                            }
-                            for document in turn.selected_documents
-                        ]
-                    ),
+                    self._dump_json(self._selected_documents_payload(turn.selected_documents)),
                     turn.created_at,
+                    self._dump_json(self._answer_blocks_payload(turn.answer_blocks)),
+                    self._dump_json(
+                        self._selected_documents_payload(turn.newly_attached_documents)
+                    ),
+                    self._dump_json(
+                        self._attached_documents_payload(turn.attached_documents)
+                    ),
+                    self._dump_json(self._citations_payload(turn.citations)),
+                    1 if turn.insufficient_evidence else 0,
+                    self._dump_json(turn.follow_up_suggestions),
+                    self._dump_json(turn.warnings),
+                    self._dump_json(self._timings_payload(turn.timings)),
                 ),
             )
 
@@ -1026,6 +1064,54 @@ class SQLiteExcelAssetRepository:
                 (session_id,),
             ).fetchall()
         return [turn for row in rows if (turn := self._to_turn(row)) is not None]
+
+    def get_llm_preference(self, scope: str) -> LlmPreference | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM llm_preferences WHERE scope = ?",
+                (scope,),
+            ).fetchone()
+        return self._to_llm_preference(row)
+
+    def save_llm_preference(self, preference: LlmPreference) -> LlmPreference:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO llm_preferences
+                  (
+                    scope, summary_provider, summary_model, router_provider,
+                    router_model, answer_provider, answer_model, created_at, updated_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope) DO UPDATE SET
+                  summary_provider = excluded.summary_provider,
+                  summary_model = excluded.summary_model,
+                  router_provider = excluded.router_provider,
+                  router_model = excluded.router_model,
+                  answer_provider = excluded.answer_provider,
+                  answer_model = excluded.answer_model,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    preference.scope,
+                    preference.summary_provider,
+                    preference.summary_model,
+                    preference.router_provider,
+                    preference.router_model,
+                    preference.answer_provider,
+                    preference.answer_model,
+                    preference.created_at,
+                    preference.updated_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM llm_preferences WHERE scope = ?",
+                (preference.scope,),
+            ).fetchone()
+        saved = self._to_llm_preference(row)
+        if saved is None:
+            raise RuntimeError("failed to persist llm preference")
+        return saved
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)
@@ -1183,23 +1269,239 @@ class SQLiteExcelAssetRepository:
     def _to_turn(self, row: sqlite3.Row | None) -> ChatTurn | None:
         if row is None:
             return None
+        citation_ids = self._load_string_list(row["citation_ids_json"])
+        selected_documents = self._selected_documents_from_payload(
+            self._load_object_list(row["selected_documents_json"])
+        )
+        answer_blocks = self._answer_blocks_from_payload(
+            self._load_object_list(self._row_value(row, "answer_blocks_json", "[]"))
+        )
+        if not answer_blocks and str(row["answer_text"]):
+            answer_blocks = [
+                ChatAnswerBlock(
+                    text=str(row["answer_text"]),
+                    citation_ids=citation_ids,
+                )
+            ]
         return ChatTurn(
             turn_id=str(row["turn_id"]),
             session_id=str(row["session_id"]),
             question=str(row["question"]),
             answer_text=str(row["answer_text"]),
-            citation_ids=self._load_string_list(row["citation_ids_json"]),
-            selected_documents=[
-                SelectedDocument(
-                    file_id=str(document.get("file_id", "")),
-                    version_id=str(document.get("version_id", "")),
-                    reason=str(document.get("reason", "")),
-                    confidence=document.get("confidence"),
-                )
-                for document in self._load_object_list(row["selected_documents_json"])
-            ],
+            citation_ids=citation_ids,
+            selected_documents=selected_documents,
             created_at=str(row["created_at"]),
+            answer_blocks=answer_blocks,
+            newly_attached_documents=self._selected_documents_from_payload(
+                self._load_object_list(
+                    self._row_value(row, "newly_attached_documents_json", "[]")
+                )
+            ),
+            attached_documents=self._attached_documents_from_payload(
+                self._load_object_list(
+                    self._row_value(row, "attached_documents_json", "[]")
+                )
+            ),
+            citations=self._citations_from_payload(
+                self._load_object_list(self._row_value(row, "citations_json", "[]"))
+            ),
+            insufficient_evidence=bool(
+                int(self._row_value(row, "insufficient_evidence", 0) or 0)
+            ),
+            follow_up_suggestions=self._load_string_list(
+                self._row_value(row, "follow_up_suggestions_json", "[]")
+            ),
+            warnings=self._load_string_list(self._row_value(row, "warnings_json", "[]")),
+            timings=self._timings_from_payload(
+                self._load_object_list(self._row_value(row, "timings_json", "[]"))
+            ),
         )
+
+    def _to_llm_preference(self, row: sqlite3.Row | None) -> LlmPreference | None:
+        if row is None:
+            return None
+        return LlmPreference(
+            scope=str(row["scope"]),
+            summary_provider=str(row["summary_provider"]),
+            summary_model=str(row["summary_model"]),
+            router_provider=str(row["router_provider"]),
+            router_model=str(row["router_model"]),
+            answer_provider=str(row["answer_provider"]),
+            answer_model=str(row["answer_model"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def _answer_blocks_payload(self, blocks: list[ChatAnswerBlock]) -> list[dict[str, object]]:
+        return [
+            {
+                "text": block.text,
+                "citation_ids": block.citation_ids,
+            }
+            for block in blocks
+        ]
+
+    def _answer_blocks_from_payload(
+        self,
+        payload: list[dict],
+    ) -> list[ChatAnswerBlock]:
+        return [
+            ChatAnswerBlock(
+                text=str(block.get("text", "")),
+                citation_ids=[
+                    str(item)
+                    for item in block.get("citation_ids", [])
+                    if str(item).strip()
+                ]
+                if isinstance(block.get("citation_ids", []), list)
+                else [],
+            )
+            for block in payload
+            if str(block.get("text", "")).strip()
+        ]
+
+    def _selected_documents_payload(
+        self,
+        documents: list[SelectedDocument],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "file_id": document.file_id,
+                "version_id": document.version_id,
+                "reason": document.reason,
+                "confidence": document.confidence,
+            }
+            for document in documents
+        ]
+
+    def _selected_documents_from_payload(
+        self,
+        payload: list[dict],
+    ) -> list[SelectedDocument]:
+        documents: list[SelectedDocument] = []
+        for document in payload:
+            file_id = str(document.get("file_id", ""))
+            version_id = str(document.get("version_id", ""))
+            if not file_id or not version_id:
+                continue
+            confidence = document.get("confidence")
+            documents.append(
+                SelectedDocument(
+                    file_id=file_id,
+                    version_id=version_id,
+                    reason=str(document.get("reason", "")),
+                    confidence=float(confidence) if isinstance(confidence, int | float) else None,
+                )
+            )
+        return documents
+
+    def _attached_documents_payload(
+        self,
+        documents: list[AttachedDocument],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "session_id": document.session_id,
+                "file_id": document.file_id,
+                "version_id": document.version_id,
+                "attached_at": document.attached_at,
+                "row_count": document.row_count,
+                "context_hash": document.context_hash,
+                "status": document.status,
+            }
+            for document in documents
+        ]
+
+    def _attached_documents_from_payload(
+        self,
+        payload: list[dict],
+    ) -> list[AttachedDocument]:
+        documents: list[AttachedDocument] = []
+        for document in payload:
+            file_id = str(document.get("file_id", ""))
+            version_id = str(document.get("version_id", ""))
+            if not file_id or not version_id:
+                continue
+            documents.append(
+                AttachedDocument(
+                    session_id=str(document.get("session_id", "")),
+                    file_id=file_id,
+                    version_id=version_id,
+                    attached_at=str(document.get("attached_at", "")),
+                    row_count=self._safe_int(document.get("row_count"), 0),
+                    context_hash=str(document.get("context_hash", "")),
+                    status=str(document.get("status", "attached")),
+                )
+            )
+        return documents
+
+    def _citations_payload(self, citations: list[ExcelCitation]) -> list[dict[str, object]]:
+        return [
+            {
+                "citation_id": citation.citation_id,
+                "evidence_id": citation.evidence_id,
+                "file_id": citation.file_id,
+                "version_id": citation.version_id,
+                "sheet_id": citation.sheet_id,
+                "sheet_name": citation.sheet_name,
+                "row_id": citation.row_id,
+                "row": citation.row,
+                "quote": citation.quote,
+            }
+            for citation in citations
+        ]
+
+    def _citations_from_payload(self, payload: list[dict]) -> list[ExcelCitation]:
+        citations: list[ExcelCitation] = []
+        for citation in payload:
+            citation_id = str(citation.get("citation_id", ""))
+            evidence_id = str(citation.get("evidence_id", ""))
+            if not citation_id or not evidence_id:
+                continue
+            row_payload = citation.get("row", [])
+            row_values = (
+                [str(item) for item in row_payload]
+                if isinstance(row_payload, list)
+                else []
+            )
+            citations.append(
+                ExcelCitation(
+                    citation_id=citation_id,
+                    evidence_id=evidence_id,
+                    file_id=str(citation.get("file_id", "")),
+                    version_id=str(citation.get("version_id", "")),
+                    sheet_id=str(citation.get("sheet_id", "")),
+                    sheet_name=str(citation.get("sheet_name", "")),
+                    row_id=str(citation.get("row_id", "")),
+                    row=row_values,
+                    quote=str(citation.get("quote", "")),
+                )
+            )
+        return citations
+
+    def _timings_payload(self, timings: list[ChatStageTiming]) -> list[dict[str, object]]:
+        return [
+            {
+                "stage": timing.stage,
+                "duration_seconds": timing.duration_seconds,
+            }
+            for timing in timings
+        ]
+
+    def _timings_from_payload(self, payload: list[dict]) -> list[ChatStageTiming]:
+        timings: list[ChatStageTiming] = []
+        for timing in payload:
+            stage = str(timing.get("stage", ""))
+            if not stage:
+                continue
+            duration = timing.get("duration_seconds", 0.0)
+            timings.append(
+                ChatStageTiming(
+                    stage=stage,
+                    duration_seconds=float(duration) if isinstance(duration, int | float) else 0.0,
+                )
+            )
+        return timings
 
     def _dump_json(self, value: object) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -1255,3 +1557,9 @@ class SQLiteExcelAssetRepository:
     ) -> str:
         value = self._row_value(row, column, default)
         return str(value) if value is not None else default
+
+    def _safe_int(self, value: object, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default

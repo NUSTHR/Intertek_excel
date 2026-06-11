@@ -193,6 +193,15 @@ def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
         assert first_answer["citations"][0]["row_id"] == "S001_R205"
         assert len(llm_client.answer_calls[0]["rows"]) == 221
 
+        history_response = client.get(f"/api/excel/chat/sessions/{session_id}/turns")
+        assert history_response.status_code == 200
+        turns = history_response.json()["turns"]
+        assert len(turns) == 1
+        assert turns[0]["question"] == "What standards are listed?"
+        assert turns[0]["answer"]["answer_blocks"] == first_answer["answer_blocks"]
+        assert turns[0]["answer"]["citations"] == first_answer["citations"]
+        assert turns[0]["answer"]["selected_documents"] == first_answer["selected_documents"]
+
         second_response = client.post(
             f"/api/excel/chat/sessions/{session_id}/messages",
             json={"question": "What is the date for that?"},
@@ -207,6 +216,17 @@ def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
         ]
         assert len(llm_client.route_calls[1]["attached_documents"]) == 1
         assert len(llm_client.answer_calls[1]["previous_turns"]) == 1
+
+        persisted_history_response = client.get(f"/api/excel/chat/sessions/{session_id}/turns")
+        assert persisted_history_response.status_code == 200
+        persisted_turns = persisted_history_response.json()["turns"]
+        assert [turn["question"] for turn in persisted_turns] == [
+            "What standards are listed?",
+            "What is the date for that?",
+        ]
+        assert persisted_turns[0]["answer"]["citations"][0]["row"] == (
+            first_answer["citations"][0]["row"]
+        )
 
 
 def test_chat_session_can_be_listed_renamed_pinned_and_deleted(
@@ -418,6 +438,37 @@ def test_llm_options_endpoint_and_request_level_models(
         assert llm_client.summary_models == ["Qwen/Qwen3.6-27B"]
         assert llm_client.route_models == ["inclusionAI/Ling-flash-2.0"]
         assert llm_client.answer_models == ["deepseek-ai/DeepSeek-V4-Pro"]
+
+
+def test_llm_preferences_are_persisted(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        default_response = client.get("/api/excel/llm/preferences")
+        assert default_response.status_code == 200
+        assert default_response.json()["summary_provider"] == "deepseek"
+
+        save_response = client.patch(
+            "/api/excel/llm/preferences",
+            json={
+                "summary_provider": "siliconflow",
+                "summary_model": "Qwen/Qwen3.6-27B",
+                "router_provider": "deepseek",
+                "router_model": "deepseek-v4-flash",
+                "answer_provider": "siliconflow",
+                "answer_model": "deepseek-ai/DeepSeek-V4-Pro",
+            },
+        )
+        assert save_response.status_code == 200
+        saved = save_response.json()
+        assert saved["scope"] == "workspace"
+        assert saved["summary_model"] == "Qwen/Qwen3.6-27B"
+        assert saved["updated_at"]
+
+        persisted_response = client.get("/api/excel/llm/preferences")
+        assert persisted_response.status_code == 200
+        assert persisted_response.json() == saved
 
 
 def test_verifier_uses_evidence_id_to_keep_correct_file() -> None:

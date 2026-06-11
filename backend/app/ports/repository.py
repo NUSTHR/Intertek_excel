@@ -11,6 +11,7 @@ from app.domain.models import (
     ExcelRowMapping,
     ExcelSheet,
     ExcelVersionStatus,
+    LlmPreference,
 )
 
 
@@ -149,4 +150,10 @@ class ChatSessionRepository(Protocol):
         ...
 
     def list_turns(self, session_id: str) -> list[ChatTurn]:
+        ...
+
+    def get_llm_preference(self, scope: str) -> LlmPreference | None:
+        ...
+
+    def save_llm_preference(self, preference: LlmPreference) -> LlmPreference:
         ...

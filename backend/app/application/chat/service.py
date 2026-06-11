@@ -16,6 +16,7 @@ from app.domain.models import (
     ChatTurn,
     ExcelCitation,
     ExcelSheet,
+    LlmPreference,
     SelectedDocument,
 )
 from app.ports.chat_workflow import ChatWorkflow, ChatWorkflowRequest
@@ -23,6 +24,7 @@ from app.ports.llm_client import LlmClient
 from app.ports.repository import ChatSessionRepository
 
 logger = logging.getLogger(__name__)
+DEFAULT_PREFERENCE_SCOPE = "workspace"
 
 
 class ChatService:
@@ -78,6 +80,41 @@ class ChatService:
 
     def delete_session(self, session_id: str) -> bool:
         return self._sessions.delete_session(session_id)
+
+    def list_turns(self, session_id: str) -> list[ChatTurn] | None:
+        if self._sessions.get_session(session_id) is None:
+            return None
+        return self._sessions.list_turns(session_id)
+
+    def get_llm_preference(self, scope: str = DEFAULT_PREFERENCE_SCOPE) -> LlmPreference | None:
+        return self._sessions.get_llm_preference(scope)
+
+    def save_llm_preference(
+        self,
+        *,
+        summary_provider: str,
+        summary_model: str,
+        router_provider: str,
+        router_model: str,
+        answer_provider: str,
+        answer_model: str,
+        scope: str = DEFAULT_PREFERENCE_SCOPE,
+    ) -> LlmPreference:
+        existing = self._sessions.get_llm_preference(scope)
+        now = utc_now_iso()
+        return self._sessions.save_llm_preference(
+            LlmPreference(
+                scope=scope,
+                summary_provider=summary_provider,
+                summary_model=summary_model,
+                router_provider=router_provider,
+                router_model=router_model,
+                answer_provider=answer_provider,
+                answer_model=answer_model,
+                created_at=existing.created_at if existing is not None else now,
+                updated_at=now,
+            )
+        )
 
     def answer_question(
         self,
@@ -262,6 +299,14 @@ class ChatService:
                 ],
                 selected_documents=selected_documents,
                 created_at=created_at,
+                answer_blocks=answer_blocks,
+                newly_attached_documents=newly_attached_documents,
+                attached_documents=attached_documents,
+                citations=citations,
+                insufficient_evidence=answer.insufficient_evidence,
+                follow_up_suggestions=answer.follow_up_suggestions,
+                warnings=answer.warnings,
+                timings=timings,
             )
         )
         self._sessions.touch_session(session.session_id, created_at)

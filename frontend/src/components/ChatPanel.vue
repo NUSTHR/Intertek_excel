@@ -4,6 +4,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import {
   askExcelQuestion,
   createChatSession,
+  listChatSessionTurns,
 } from '../api/chat-api'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import { renderMarkdown } from '../utils/markdown'
@@ -41,10 +42,12 @@ const question = ref<string>('')
 const historiesBySession = ref<Record<string, ChatHistoryEntry[]>>({})
 const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
+const isHistoryLoading = ref<boolean>(false)
 const chatScrollRegion = ref<HTMLElement | null>(null)
 const chatInput = ref<HTMLTextAreaElement | null>(null)
 const activeSourceIndex = ref<number>(0)
 let nextHistoryEntryId = 0
+let historyLoadRequestId = 0
 
 const currentSessionKey = computed(() => props.sessionId || draftSessionKey)
 
@@ -96,8 +99,9 @@ const sourcePositionLabel = computed(() => {
 })
 
 watch(currentSessionKey, () => {
+  void loadSessionHistory()
   void scrollChatToBottom()
-})
+}, { immediate: true })
 
 watch(
   () => [history.value.length, history.value.at(-1)?.answer?.created_at, errorMessage.value],
@@ -126,6 +130,47 @@ async function scrollChatToBottom(): Promise<void> {
   }
 }
 
+async function loadSessionHistory(): Promise<void> {
+  const sessionId = props.sessionId
+  const requestId = ++historyLoadRequestId
+  if (!sessionId) {
+    isHistoryLoading.value = false
+    errorMessage.value = ''
+    setHistory(draftSessionKey, historyForSession(draftSessionKey))
+    return
+  }
+  if (historyForSession(sessionId).some((entry) => entry.answer === null)) {
+    isHistoryLoading.value = false
+    return
+  }
+  isHistoryLoading.value = true
+  errorMessage.value = ''
+  try {
+    const turns = await listChatSessionTurns(sessionId)
+    if (requestId !== historyLoadRequestId) {
+      return
+    }
+    setHistory(
+      sessionId,
+      turns.map((turn) => ({
+        id: turn.turn_id,
+        question: turn.question,
+        answer: turn.answer,
+        createdAt: turn.created_at,
+      })),
+    )
+    await scrollChatToBottom()
+  } catch (error: unknown) {
+    if (requestId === historyLoadRequestId) {
+      errorMessage.value = error instanceof Error ? error.message : 'Failed to load chat history.'
+    }
+  } finally {
+    if (requestId === historyLoadRequestId) {
+      isHistoryLoading.value = false
+    }
+  }
+}
+
 async function submitQuestion(): Promise<void> {
   const trimmedQuestion = question.value.trim()
   if (!trimmedQuestion) {
@@ -150,7 +195,7 @@ async function submitQuestion(): Promise<void> {
       emit('sessionCreated', session)
     }
 
-    const entryId = `entry-${++nextHistoryEntryId}`
+    const entryId = `pending-${Date.now()}-${++nextHistoryEntryId}`
     entry = {
       id: entryId,
       question: trimmedQuestion,
@@ -431,6 +476,7 @@ function resizeChatInput(): void {
         </template>
 
         <p v-if="errorMessage" class="chat-error-note">{{ errorMessage }}</p>
+        <p v-else-if="isHistoryLoading" class="chat-loading-note">Loading chat history...</p>
       </div>
     </div>
 

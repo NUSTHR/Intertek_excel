@@ -168,6 +168,14 @@ class ChatTurn:
     citation_ids: list[str]
     selected_documents: list[SelectedDocument]
     created_at: str
+    answer_blocks: list["ChatAnswerBlock"] = field(default_factory=list)
+    newly_attached_documents: list[SelectedDocument] = field(default_factory=list)
+    attached_documents: list[AttachedDocument] = field(default_factory=list)
+    citations: list["ExcelCitation"] = field(default_factory=list)
+    insufficient_evidence: bool = False
+    follow_up_suggestions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    timings: list["ChatStageTiming"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -237,3 +245,16 @@ class ChatRouteResult:
     attached_documents: list[AttachedDocument]
     timings: list[ChatStageTiming]
     created_at: str
+
+
+@dataclass(frozen=True)
+class LlmPreference:
+    scope: str
+    summary_provider: str
+    summary_model: str
+    router_provider: str
+    router_model: str
+    answer_provider: str
+    answer_model: str
+    created_at: str
+    updated_at: str

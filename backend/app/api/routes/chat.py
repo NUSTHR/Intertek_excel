@@ -14,21 +14,27 @@ from app.api.schemas import (
     ChatSessionListResponse,
     ChatSessionResponse,
     ChatStageTimingResponse,
+    ChatTurnListResponse,
+    ChatTurnResponse,
     ExcelCitationResponse,
     LlmModelDefaultsResponse,
     LlmModelOptionsResponse,
+    LlmPreferenceRequest,
+    LlmPreferenceResponse,
     PinChatSessionRequest,
     RenameChatSessionRequest,
     SelectedDocumentResponse,
 )
 from app.application.chat.service import ChatService
 from app.core.config import get_settings
-from app.core.errors import AssetNotFoundError
+from app.core.errors import AssetNotFoundError, InvalidLlmModelError
 from app.core.llm_catalog import (
+    is_supported_llm_model_for_provider,
+    is_supported_llm_provider,
     list_supported_llm_models,
     list_supported_llm_provider_options,
 )
-from app.domain.models import ChatAnswer, ChatRouteResult, ChatSession
+from app.domain.models import ChatAnswer, ChatRouteResult, ChatSession, ChatTurn, LlmPreference
 
 router = APIRouter(prefix="/api/excel", tags=["chat"])
 ChatServiceDependency = Annotated[ChatService, Depends(get_chat_service)]
@@ -72,6 +78,20 @@ def get_chat_session(
     if session is None:
         raise AssetNotFoundError("chat session was not found")
     return _to_session_response(session)
+
+
+@router.get(
+    "/chat/sessions/{session_id}/turns",
+    response_model=ChatTurnListResponse,
+)
+def list_chat_session_turns(
+    session_id: str,
+    service: ChatServiceDependency,
+) -> ChatTurnListResponse:
+    turns = service.list_turns(session_id)
+    if turns is None:
+        raise AssetNotFoundError("chat session was not found")
+    return ChatTurnListResponse(turns=[_to_chat_turn_response(turn) for turn in turns])
 
 
 @router.patch("/chat/sessions/{session_id}", response_model=ChatSessionResponse)
@@ -185,6 +205,82 @@ def get_llm_model_options() -> LlmModelOptionsResponse:
     )
 
 
+@router.get("/llm/preferences", response_model=LlmPreferenceResponse)
+def get_llm_preference(service: ChatServiceDependency) -> LlmPreferenceResponse:
+    preference = service.get_llm_preference()
+    if preference is not None:
+        return _to_llm_preference_response(preference)
+
+    defaults = get_llm_model_options().defaults
+    return LlmPreferenceResponse(
+        scope="workspace",
+        summary_provider=defaults.summary_provider,
+        summary_model=defaults.summary_model,
+        router_provider=defaults.router_provider,
+        router_model=defaults.router_model,
+        answer_provider=defaults.answer_provider,
+        answer_model=defaults.answer_model,
+        created_at="",
+        updated_at="",
+    )
+
+
+@router.patch("/llm/preferences", response_model=LlmPreferenceResponse)
+def save_llm_preference(
+    request: LlmPreferenceRequest,
+    service: ChatServiceDependency,
+) -> LlmPreferenceResponse:
+    _validate_llm_preference(request)
+    return _to_llm_preference_response(
+        service.save_llm_preference(
+            summary_provider=request.summary_provider,
+            summary_model=request.summary_model,
+            router_provider=request.router_provider,
+            router_model=request.router_model,
+            answer_provider=request.answer_provider,
+            answer_model=request.answer_model,
+        )
+    )
+
+
+def _validate_llm_preference(request: LlmPreferenceRequest) -> None:
+    _validate_stage_model("summary", request.summary_provider, request.summary_model)
+    _validate_stage_model("router", request.router_provider, request.router_model)
+    _validate_stage_model("answer", request.answer_provider, request.answer_model)
+
+
+def _validate_stage_model(stage: str, provider: str, model: str) -> None:
+    if not is_supported_llm_provider(provider):
+        raise InvalidLlmModelError(stage=stage, model=f"{provider}:{model}")
+    if not is_supported_llm_model_for_provider(provider, model):
+        raise InvalidLlmModelError(stage=stage, model=f"{provider}:{model}")
+
+
+def _to_chat_turn_response(turn: ChatTurn) -> ChatTurnResponse:
+    return ChatTurnResponse(
+        turn_id=turn.turn_id,
+        session_id=turn.session_id,
+        question=turn.question,
+        answer=_to_chat_answer_response(
+            ChatAnswer(
+                session_id=turn.session_id,
+                question=turn.question,
+                answer_blocks=turn.answer_blocks,
+                selected_documents=turn.selected_documents,
+                newly_attached_documents=turn.newly_attached_documents,
+                attached_documents=turn.attached_documents,
+                citations=turn.citations,
+                insufficient_evidence=turn.insufficient_evidence,
+                follow_up_suggestions=turn.follow_up_suggestions,
+                warnings=turn.warnings,
+                timings=turn.timings,
+                created_at=turn.created_at,
+            )
+        ),
+        created_at=turn.created_at,
+    )
+
+
 def _to_chat_answer_response(answer: ChatAnswer) -> ChatAnswerResponse:
     return ChatAnswerResponse(
         session_id=answer.session_id,
@@ -250,6 +346,20 @@ def _to_chat_answer_response(answer: ChatAnswer) -> ChatAnswerResponse:
             for timing in answer.timings
         ],
         created_at=answer.created_at,
+    )
+
+
+def _to_llm_preference_response(preference: LlmPreference) -> LlmPreferenceResponse:
+    return LlmPreferenceResponse(
+        scope=preference.scope,
+        summary_provider=preference.summary_provider,
+        summary_model=preference.summary_model,
+        router_provider=preference.router_provider,
+        router_model=preference.router_model,
+        answer_provider=preference.answer_provider,
+        answer_model=preference.answer_model,
+        created_at=preference.created_at,
+        updated_at=preference.updated_at,
     )
 
 

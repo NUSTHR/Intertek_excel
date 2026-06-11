@@ -18,3 +18,9 @@ export interface LlmModelOptionsResponse {
   providers: LlmProviderOption[]
   defaults: LlmModelDefaults
 }
+
+export interface LlmPreference extends LlmModelDefaults {
+  scope: string
+  created_at: string
+  updated_at: string
+}

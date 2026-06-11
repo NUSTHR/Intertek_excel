@@ -345,6 +345,53 @@
   grid-template-columns: minmax(150px, 0.8fr) minmax(160px, 1fr) minmax(210px, 1.1fr);
   gap: 12px;
   min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+}
+
+.excelai-app:not(.chat-mode) .file-preview-controls label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-controls label > span {
+  overflow: hidden;
+  color: #475569;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-controls select,
+.excelai-app:not(.chat-mode) .file-preview-controls input {
+  min-height: 38px;
+  border-color: #d9e2ec;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-controls .inline-control button {
+  min-height: 38px;
+  border: 1px solid #0f172a;
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: #ffffff;
+  background: #0f172a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-controls .inline-control button:hover:not(:disabled) {
+  border-color: #1e293b;
+  background: #1e293b;
 }
 
 .excelai-app:not(.chat-mode) .preview-metrics {
@@ -386,10 +433,60 @@
   height: 100%;
   margin: 0;
   border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  border-radius: 12px;
   background: #ffffff;
-  box-shadow: none;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
   overflow: hidden;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel .spreadsheet-header {
+  min-height: 58px;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 12px 16px;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel .spreadsheet-header strong {
+  display: block;
+  overflow: hidden;
+  color: #0f172a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel .spreadsheet-header span {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel .pagination-actions {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel .secondary-button {
+  min-height: 34px;
+  border-color: #d9e2ec;
+  border-radius: 8px;
+  padding: 7px 11px;
+  color: #475569;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.excelai-app:not(.chat-mode) .file-preview-panel .secondary-button:hover:not(:disabled) {
+  color: #0f172a;
+  border-color: #94a3b8;
+  background: #f8fafc;
 }
 
 .excelai-app:not(.chat-mode) .preview-card .excel-scroll {
@@ -408,9 +505,203 @@
   height: 32px;
   max-width: 260px;
   min-width: 120px;
+  border-color: #e2e8f0;
+  padding: 7px 9px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.excelai-app:not(.chat-mode) .excel-table th {
+  color: #475569;
+  background: #f8fafc;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.excelai-app:not(.chat-mode) .excel-table td {
+  color: #334155;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.excelai-app:not(.chat-mode) .excel-table td:first-child,
+.excelai-app:not(.chat-mode) .excel-table th:first-child {
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.excelai-app:not(.chat-mode) .excel-table tr.header-like td {
+  color: #0f172a;
+  background: #f8fafc;
+  font-weight: 800;
+}
+
+.excelai-app:not(.chat-mode) .excel-table tbody tr:hover td {
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .excel-table tbody tr.highlighted td {
+  background: #ecfdf5;
+  box-shadow: inset 0 1px 0 #047857, inset 0 -1px 0 #047857;
+}
+
+.excelai-app:not(.chat-mode) .excel-table tbody tr.highlighted td:first-child {
+  color: #065f46;
+  background: #d1fae5;
+}
+
+.excelai-app:not(.chat-mode) .evidence-strip.compact {
+  min-height: 58px;
+  border: 1px solid #bbf7d0;
+  border-radius: 12px;
+  margin: 0;
+  padding: 12px 16px;
+  background: #ecfdf5;
+}
+
+.excelai-app:not(.chat-mode) .evidence-strip.compact .eyebrow {
+  margin-bottom: 2px;
+  color: #047857;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.excelai-app:not(.chat-mode) .evidence-strip.compact h3 {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.excelai-app:not(.chat-mode) .evidence-strip.compact p {
+  color: #475569;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-overview-card,
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-sheet-card,
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-card-head {
+  min-height: 58px;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 12px 16px;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-card-head .app-icon {
+  display: grid;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  color: #047857;
+  background: #ecfdf5;
+  font-size: 18px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-card-head h3 {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-card-head > span {
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #047857;
+  background: #ecfdf5;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-metrics {
+  gap: 10px;
+  padding: 14px 16px 16px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-metrics div {
+  border-color: #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-metrics span {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-metrics strong {
+  color: #0f172a;
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-sheet-list,
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-list {
+  padding: 14px 16px 16px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-sheet-list button,
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-row {
+  border-color: #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-sheet-list button:hover,
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-sheet-list button.active {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-sheet-list button strong {
+  overflow: hidden;
+  color: #0f172a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-sheet-list button span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-row {
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-row strong {
+  color: #047857;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-row span,
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-row small {
+  color: #64748b;
+}
+
+.excelai-app:not(.chat-mode) .file-schema-panel .schema-column-row em {
+  color: #334155;
+  background: #f1f5f9;
 }
 
 .excelai-app:not(.chat-mode) .sheet-tabs.compact {
