@@ -1,3 +1,5 @@
+import { getAuthToken } from './auth-token'
+
 export interface ApiErrorPayload {
   detail?: string
   requires_confirmation?: boolean
@@ -59,6 +61,7 @@ async function request(
   try {
     const response = await fetch(`${options.apiBaseUrl ?? ''}${path}`, {
       ...init,
+      headers: buildHeaders(init.headers),
       signal: init.signal ?? controller.signal,
     })
     if (!response.ok) {
@@ -89,6 +92,15 @@ async function request(
   } finally {
     window.clearTimeout(timeoutId)
   }
+}
+
+function buildHeaders(headers: HeadersInit | undefined): HeadersInit {
+  const nextHeaders = new Headers(headers)
+  const token = getAuthToken()
+  if (token && !nextHeaders.has('Authorization')) {
+    nextHeaders.set('Authorization', `Bearer ${token}`)
+  }
+  return nextHeaders
 }
 
 async function parseErrorPayload(response: Response): Promise<ApiErrorPayload> {

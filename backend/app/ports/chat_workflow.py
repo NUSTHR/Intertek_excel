@@ -8,6 +8,7 @@ from app.domain.models import ChatAnswer, ChatRouteResult
 class ChatWorkflowRequest:
     question: str
     session_id: str | None = None
+    user_id: str = "legacy"
     router_model: str | None = None
     router_provider: str | None = None
     answer_model: str | None = None
@@ -20,6 +21,7 @@ class ChatWorkflowActions(Protocol):
         self,
         question: str,
         session_id: str | None = None,
+        user_id: str = "legacy",
         *,
         router_model: str | None = None,
         router_provider: str | None = None,
@@ -30,6 +32,7 @@ class ChatWorkflowActions(Protocol):
         self,
         question: str,
         session_id: str,
+        user_id: str = "legacy",
         route_result: ChatRouteResult | None = None,
         *,
         answer_model: str | None = None,

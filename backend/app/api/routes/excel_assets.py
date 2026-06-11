@@ -2,7 +2,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 
-from app.api.dependencies import get_excel_asset_service
+from app.api.dependencies import (
+    get_current_user,
+    get_excel_asset_service,
+    require_admin_user,
+)
 from app.api.schemas import (
     ActiveExcelFileResponse,
     CheckFileNameRequest,
@@ -45,12 +49,15 @@ ExcelAssetServiceDependency = Annotated[
     ExcelAssetService,
     Depends(get_excel_asset_service),
 ]
+AuthenticatedDependency = Annotated[object, Depends(get_current_user)]
+AdminDependency = Annotated[object, Depends(require_admin_user)]
 
 
 @router.post("/files/check-name", response_model=CheckFileNameResponse)
 def check_file_name(
     request: CheckFileNameRequest,
     service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
 ) -> CheckFileNameResponse:
     result = service.check_display_name(request.display_name)
     return CheckFileNameResponse(
@@ -65,6 +72,7 @@ def check_file_name(
 async def upload_excel_file(
     file: Annotated[UploadFile, File(...)],
     service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
     replace_existing: Annotated[bool, Form()] = False,
 ) -> UploadExcelResponse:
     content = await file.read()
@@ -85,6 +93,7 @@ async def upload_excel_file(
 @router.get("/files", response_model=ListExcelFilesResponse)
 def list_excel_files(
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> ListExcelFilesResponse:
     return ListExcelFilesResponse(
         files=[_to_file_response(file) for file in service.list_files()]
@@ -95,6 +104,7 @@ def list_excel_files(
 def get_excel_file(
     file_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> ExcelFileResponse:
     return _to_file_response(service.get_file(file_id))
 
@@ -104,6 +114,7 @@ def rename_excel_file(
     file_id: str,
     request: RenameExcelFileRequest,
     service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
 ) -> ExcelFileResponse:
     return _to_file_response(service.rename_file(file_id, request.display_name))
 
@@ -112,6 +123,7 @@ def rename_excel_file(
 def delete_excel_file(
     file_id: str,
     service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
     confirm_delete: Annotated[bool, Query()] = False,
 ) -> DeleteExcelFileResponse:
     result = service.delete_file(file_id, confirm_delete=confirm_delete)
@@ -131,6 +143,7 @@ def delete_excel_file(
 def get_active_excel_file_version(
     file_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> ActiveExcelFileResponse:
     return ActiveExcelFileResponse(
         file=_to_file_response(service.get_file(file_id)),
@@ -142,6 +155,7 @@ def get_active_excel_file_version(
 def list_excel_file_versions(
     file_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> ListExcelVersionsResponse:
     return ListExcelVersionsResponse(
         versions=[_to_version_response(version) for version in service.list_versions(file_id)]
@@ -156,6 +170,7 @@ def activate_excel_file_version(
     file_id: str,
     version_id: str,
     service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
 ) -> ExcelFileVersionResponse:
     return _to_version_response(service.activate_version(file_id, version_id))
 
@@ -164,6 +179,7 @@ def activate_excel_file_version(
 def list_excel_sheets(
     version_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> ListExcelSheetsResponse:
     return ListExcelSheetsResponse(
         sheets=[_to_sheet_response(sheet) for sheet in service.list_sheets(version_id)]
@@ -174,6 +190,7 @@ def list_excel_sheets(
 def get_excel_version_profile(
     version_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> WorkbookProfileResponse:
     return _to_profile_response(service.get_profile(version_id))
 
@@ -182,6 +199,7 @@ def get_excel_version_profile(
 def list_excel_version_artifacts(
     version_id: str,
     service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
 ) -> ListExcelArtifactsResponse:
     return ListExcelArtifactsResponse(
         artifacts=[
@@ -195,6 +213,7 @@ def list_excel_version_artifacts(
 def preview_excel_sheet(
     sheet_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
 ) -> SheetPreviewResponse:
@@ -212,6 +231,7 @@ def preview_excel_sheet(
 def list_excel_sheet_rows(
     sheet_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
 ) -> SheetRowsResponse:
@@ -236,6 +256,7 @@ def lookup_excel_row(
     sheet_id: str,
     row_id: str,
     service: ExcelAssetServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> RowLookupResponse:
     result = service.lookup_row(sheet_id=sheet_id, row_id=row_id)
     return RowLookupResponse(

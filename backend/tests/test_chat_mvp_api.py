@@ -13,8 +13,10 @@ from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStora
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
 from app.api.dependencies import (
     get_chat_service,
+    get_current_user,
     get_document_summary_service,
     get_excel_asset_service,
+    require_admin_user,
 )
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
@@ -32,6 +34,7 @@ from app.domain.models import (
 )
 from app.main import app
 from app.ports.chat_workflow import ChatWorkflow
+from tests.auth_helpers import admin_user
 
 
 @pytest.fixture
@@ -58,6 +61,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
     app.dependency_overrides[get_document_summary_service] = lambda: summaries
     app.dependency_overrides[get_chat_service] = lambda: chat
+    app.dependency_overrides[get_current_user] = admin_user
+    app.dependency_overrides[require_admin_user] = admin_user
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -820,6 +825,8 @@ def _client_with_llm(
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
     app.dependency_overrides[get_document_summary_service] = lambda: summaries
     app.dependency_overrides[get_chat_service] = lambda: chat
+    app.dependency_overrides[get_current_user] = admin_user
+    app.dependency_overrides[require_admin_user] = admin_user
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

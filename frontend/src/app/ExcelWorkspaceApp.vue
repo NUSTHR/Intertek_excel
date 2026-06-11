@@ -19,6 +19,8 @@ import {
   renameChatSession,
   setChatSessionPinned,
 } from '../api/chat-api'
+import { getCurrentUser, logout as logoutSession } from '../api/auth-api'
+import { clearAuthToken, getAuthToken, setAuthToken } from '../api/auth-token'
 import {
   generateDocumentSummary,
   getDocumentSummary,
@@ -26,8 +28,10 @@ import {
 } from '../api/document-summaries-api'
 import { getLlmModelOptions, getLlmPreference, saveLlmPreference } from '../api/llm-api'
 import AppIcon from '../components/AppIcon.vue'
+import AuthPanel from '../components/AuthPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import DocumentSummaryCard from '../components/DocumentSummaryCard.vue'
+import type { AuthResponse, AuthUser } from '../types/auth'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
 import type { LlmModelDefaults, LlmProviderOption } from '../types/llm'
@@ -76,7 +80,7 @@ interface PrimaryNavItem {
 
 const previewLimit = 250
 const filePageSize = 6
-const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm', '.csv']
+const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm']
 const pinnedFileStorageKey = 'excelai-pinned-file-ids'
 const defaultRouterProvider = 'deepseek'
 const defaultRouterModel = 'deepseek-v4-flash'
@@ -99,6 +103,9 @@ const initialActiveView: ActiveView =
   typeof window !== 'undefined' && window.location.hash === '#files' ? 'files' : 'chat'
 
 const activeView = ref<ActiveView>(initialActiveView)
+const currentUser = ref<AuthUser | null>(null)
+const isAuthChecking = ref<boolean>(true)
+const authErrorMessage = ref<string>('')
 const activeFileInsightTab = ref<FileInsightTab>('summary')
 const isFileInsightFullscreen = ref<boolean>(false)
 const chatSessions = ref<ChatSession[]>([])
@@ -153,6 +160,7 @@ const isUploadDragging = ref<boolean>(false)
 const isExcelColumnResizing = ref<boolean>(false)
 const isExcelRowResizing = ref<boolean>(false)
 const isChatPanelCollapsed = ref<boolean>(false)
+const isChatAnswerPending = ref<boolean>(false)
 const filePage = ref<number>(1)
 let operationFeedbackTimer: number | null = null
 let chatSessionFeedbackTimer: number | null = null
@@ -165,6 +173,13 @@ let excelResizeStartWidth = 0
 let excelResizeStartHeight = 0
 let excelResizeTargetColumnKey = ''
 let excelResizeTargetRowKey = ''
+let fileListRequestId = 0
+let workspaceSelectionRequestId = 0
+let rowLookupRequestId = 0
+let summaryGenerationRequestId = 0
+let summarySaveRequestId = 0
+let chatSessionListRequestId = 0
+let workspaceBusyRequestId = 0
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -357,12 +372,29 @@ const answerSupportsDeepThinking = computed(() => {
   return provider?.deep_thinking_models.includes(answerModel.value) ?? false
 })
 
+const isAdmin = computed(() => currentUser.value?.role === 'admin')
+
+const visiblePrimaryNavItems = computed(() => {
+  return primaryNavItems.filter((item) => item.key !== 'files' || isAdmin.value)
+})
+
+const userInitial = computed(() => {
+  const email = currentUser.value?.email ?? ''
+  return email.trim().charAt(0).toUpperCase() || 'U'
+})
+
+const userEmail = computed(() => currentUser.value?.email ?? '')
+
+const userRoleLabel = computed(() => (isAdmin.value ? 'Administrator' : 'Workspace user'))
+
+const blocksWorkspaceMutation = computed(() => isChatAnswerPending.value)
+
 
 onMounted(() => {
   if (typeof window !== 'undefined') {
     window.addEventListener('hashchange', syncActiveViewFromLocation)
   }
-  void initializeWorkspace()
+  void restoreAuthentication()
 })
 
 onBeforeUnmount(() => {
@@ -400,9 +432,73 @@ watch(
 )
 
 async function initializeWorkspace(): Promise<void> {
+  if (!currentUser.value) {
+    return
+  }
+  if (!isAdmin.value && activeView.value === 'files') {
+    setActiveView('chat')
+  }
   await loadLlmModelOptions()
   await loadChatSessions()
   await refreshFiles()
+}
+
+async function restoreAuthentication(): Promise<void> {
+  authErrorMessage.value = ''
+  isAuthChecking.value = true
+  try {
+    if (!getAuthToken()) {
+      currentUser.value = null
+      return
+    }
+    currentUser.value = await getCurrentUser()
+    await initializeWorkspace()
+  } catch (error: unknown) {
+    clearAuthToken()
+    currentUser.value = null
+    authErrorMessage.value = toErrorMessage(error)
+  } finally {
+    isAuthChecking.value = false
+  }
+}
+
+async function handleAuthenticated(response: AuthResponse): Promise<void> {
+  setAuthToken(response.access_token)
+  currentUser.value = response.user
+  authErrorMessage.value = ''
+  await resetWorkspaceState()
+  await initializeWorkspace()
+}
+
+async function signOut(): Promise<void> {
+  try {
+    await logoutSession()
+  } catch {
+    // Local token cleanup is still the source of truth for the browser session.
+  }
+  clearAuthToken()
+  currentUser.value = null
+  await resetWorkspaceState()
+}
+
+async function resetWorkspaceState(): Promise<void> {
+  chatSessions.value = []
+  activeChatSessionId.value = ''
+  files.value = []
+  versions.value = []
+  sheets.value = []
+  preview.value = null
+  rowLookup.value = null
+  documentSummary.value = null
+  latestAnswer.value = null
+  selectedFileId.value = ''
+  selectedVersionId.value = ''
+  selectedSheetId.value = ''
+  selectedCell.value = null
+  errorMessage.value = ''
+  chatSessionError.value = ''
+  isChatAnswerPending.value = false
+  closeActionMenus()
 }
 
 async function loadLlmModelOptions(): Promise<void> {
@@ -438,6 +534,10 @@ function applyModelDefaults(defaults: LlmModelDefaults): void {
 }
 
 function setActiveView(view: ActiveView): void {
+  if (view === 'files' && !isAdmin.value) {
+    activeView.value = 'chat'
+    return
+  }
   closeActionMenus()
   if (view !== 'files') {
     isFileInsightFullscreen.value = false
@@ -460,6 +560,10 @@ function syncActiveViewFromLocation(): void {
     return
   }
   const nextView: ActiveView = window.location.hash === '#files' ? 'files' : 'chat'
+  if (nextView === 'files' && !isAdmin.value) {
+    setActiveView('chat')
+    return
+  }
   if (activeView.value === nextView) {
     return
   }
@@ -518,11 +622,15 @@ function showNotificationsNotice(): void {
 }
 
 async function loadChatSessions(preferredSessionId: string | null = null): Promise<void> {
+  const requestId = ++chatSessionListRequestId
   chatSessionError.value = ''
   clearChatSessionFeedback()
   isChatSessionLoading.value = true
   try {
     const sessions = await listChatSessions()
+    if (requestId !== chatSessionListRequestId) {
+      return
+    }
     chatSessions.value = sortChatSessions(sessions)
     const nextActiveSessionId = preferredSessionId || activeChatSessionId.value
     const activeStillExists = chatSessions.value.some(
@@ -534,9 +642,13 @@ async function loadChatSessions(preferredSessionId: string | null = null): Promi
     }
     activeChatSessionId.value = chatSessions.value[0]?.session_id ?? ''
   } catch (error: unknown) {
-    chatSessionError.value = toErrorMessage(error)
+    if (requestId === chatSessionListRequestId) {
+      chatSessionError.value = toErrorMessage(error)
+    }
   } finally {
-    isChatSessionLoading.value = false
+    if (requestId === chatSessionListRequestId) {
+      isChatSessionLoading.value = false
+    }
   }
 }
 
@@ -715,42 +827,88 @@ function savePinnedFileIds(fileIds: string[]): void {
   window.localStorage.setItem(pinnedFileStorageKey, JSON.stringify(fileIds))
 }
 
-async function refreshFiles(): Promise<void> {
-  errorMessage.value = ''
+function nextWorkspaceSelectionRequestId(): number {
+  workspaceSelectionRequestId += 1
+  return workspaceSelectionRequestId
+}
+
+function isCurrentWorkspaceSelection(requestId: number): boolean {
+  return requestId === workspaceSelectionRequestId
+}
+
+function beginWorkspaceBusy(): number {
+  workspaceBusyRequestId += 1
   isWorkspaceBusy.value = true
+  return workspaceBusyRequestId
+}
+
+function finishWorkspaceBusy(requestId: number): void {
+  if (requestId === workspaceBusyRequestId) {
+    isWorkspaceBusy.value = false
+  }
+}
+
+async function refreshFiles(): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
+  const requestId = ++fileListRequestId
+  const busyRequestId = beginWorkspaceBusy()
+  errorMessage.value = ''
   try {
-    files.value = await listExcelFiles()
+    const nextFiles = await listExcelFiles()
+    if (requestId !== fileListRequestId) {
+      return
+    }
+    files.value = nextFiles
     const selectedStillExists = files.value.some((file) => file.file_id === selectedFileId.value)
     if (!selectedStillExists) {
+      nextWorkspaceSelectionRequestId()
       clearSelection()
     }
     if (!selectedFileId.value && files.value[0]) {
       await selectFile(files.value[0])
     }
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    if (requestId === fileListRequestId) {
+      errorMessage.value = toErrorMessage(error)
+    }
   } finally {
-    isWorkspaceBusy.value = false
+    if (requestId === fileListRequestId) {
+      finishWorkspaceBusy(busyRequestId)
+    }
   }
 }
 
 async function chooseFile(file: ExcelFile, view: ActiveView | null = null): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   closeActionMenus()
   errorMessage.value = ''
-  isWorkspaceBusy.value = true
+  const requestId = nextWorkspaceSelectionRequestId()
+  const busyRequestId = beginWorkspaceBusy()
   try {
-    await selectFile(file)
+    await selectFile(file, requestId)
     if (view) {
       setActiveView(view)
     }
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    if (isCurrentWorkspaceSelection(requestId)) {
+      errorMessage.value = toErrorMessage(error)
+    }
   } finally {
-    isWorkspaceBusy.value = false
+    finishWorkspaceBusy(busyRequestId)
   }
 }
 
-async function selectFile(file: ExcelFile): Promise<void> {
+async function selectFile(
+  file: ExcelFile,
+  requestId = nextWorkspaceSelectionRequestId(),
+): Promise<void> {
+  if (!isCurrentWorkspaceSelection(requestId)) {
+    return
+  }
   selectedFileId.value = file.file_id
   selectedVersionId.value = ''
   selectedSheetId.value = ''
@@ -758,16 +916,26 @@ async function selectFile(file: ExcelFile): Promise<void> {
   rowLookup.value = null
   documentSummary.value = null
   selectedCell.value = null
-  versions.value = await listExcelVersions(file.file_id)
+  const nextVersions = await listExcelVersions(file.file_id)
+  if (!isCurrentWorkspaceSelection(requestId) || selectedFileId.value !== file.file_id) {
+    return
+  }
+  versions.value = nextVersions
   const targetVersionId = file.active_version_id ?? versions.value[0]?.version_id ?? ''
   if (targetVersionId) {
-    await selectVersion(targetVersionId)
+    await selectVersion(targetVersionId, requestId)
   } else {
     sheets.value = []
   }
 }
 
-async function selectVersion(versionId: string): Promise<void> {
+async function selectVersion(
+  versionId: string,
+  requestId = nextWorkspaceSelectionRequestId(),
+): Promise<void> {
+  if (!isCurrentWorkspaceSelection(requestId)) {
+    return
+  }
   if (!versionId) {
     selectedVersionId.value = ''
     sheets.value = []
@@ -782,54 +950,80 @@ async function selectVersion(versionId: string): Promise<void> {
   rowLookup.value = null
   documentSummary.value = null
   selectedCell.value = null
-  sheets.value = await listExcelSheets(versionId)
-  await loadExistingSummary(versionId)
-  if (sheets.value[0]) {
-    await selectSheet(sheets.value[0])
+  const [nextSheets, nextSummary] = await Promise.all([
+    listExcelSheets(versionId),
+    getDocumentSummary(versionId).catch(() => null),
+  ])
+  if (!isCurrentWorkspaceSelection(requestId) || selectedVersionId.value !== versionId) {
+    return
+  }
+  sheets.value = nextSheets
+  documentSummary.value = nextSummary
+  if (nextSheets[0]) {
+    await selectSheet(nextSheets[0], requestId)
   }
 }
 
 async function selectCurrentVersion(): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   if (selectedVersionId.value) {
-    await runWorkspaceAction(() => selectVersion(selectedVersionId.value))
+    await runWorkspaceAction((requestId) => selectVersion(selectedVersionId.value, requestId))
   }
 }
 
 async function selectCurrentSheet(): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   const sheet = sheets.value.find((item) => item.sheet_id === selectedSheetId.value)
   if (sheet) {
-    await runWorkspaceAction(() => selectSheet(sheet))
+    await runWorkspaceAction((requestId) => selectSheet(sheet, requestId))
   }
 }
 
-async function selectSheet(sheet: ExcelSheet): Promise<void> {
+async function selectSheet(
+  sheet: ExcelSheet,
+  requestId = nextWorkspaceSelectionRequestId(),
+): Promise<void> {
+  if (!isCurrentWorkspaceSelection(requestId)) {
+    return
+  }
   selectedSheetId.value = sheet.sheet_id
   rowLookup.value = null
   lookupRowId.value = ''
   selectedCell.value = null
-  preview.value = await previewExcelSheet(sheet.sheet_id, 0, previewLimit)
+  const nextPreview = await previewExcelSheet(sheet.sheet_id, 0, previewLimit)
+  if (!isCurrentWorkspaceSelection(requestId) || selectedSheetId.value !== sheet.sheet_id) {
+    return
+  }
+  preview.value = nextPreview
 }
 
 async function loadPreviewPage(offset: number): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   if (!selectedSheetId.value) {
     return
   }
+  const requestId = nextWorkspaceSelectionRequestId()
+  const sheetId = selectedSheetId.value
   errorMessage.value = ''
   try {
     const safeOffset = Math.max(0, offset)
     rowLookup.value = null
     selectedCell.value = null
-    preview.value = await previewExcelSheet(selectedSheetId.value, safeOffset, previewLimit)
+    const nextPreview = await previewExcelSheet(sheetId, safeOffset, previewLimit)
+    if (!isCurrentWorkspaceSelection(requestId) || selectedSheetId.value !== sheetId) {
+      return
+    }
+    preview.value = nextPreview
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
-  }
-}
-
-async function loadExistingSummary(versionId: string): Promise<void> {
-  try {
-    documentSummary.value = await getDocumentSummary(versionId)
-  } catch {
-    documentSummary.value = null
+    if (isCurrentWorkspaceSelection(requestId)) {
+      errorMessage.value = toErrorMessage(error)
+    }
   }
 }
 
@@ -838,19 +1032,37 @@ async function generateSummaryForSelectedVersion(): Promise<void> {
     errorMessage.value = 'Select a version first.'
     return
   }
+  const versionId = selectedVersionId.value
+  const selectionRequestId = workspaceSelectionRequestId
+  const generationRequestId = ++summaryGenerationRequestId
   errorMessage.value = ''
   isSummaryLoading.value = true
   try {
-    documentSummary.value = await generateDocumentSummary(
-      selectedVersionId.value,
+    const nextSummary = await generateDocumentSummary(
+      versionId,
       summaryModel.value || null,
       summaryProvider.value || null,
     )
-    showOperationFeedback('success', 'Document description generated.')
+    if (
+      generationRequestId === summaryGenerationRequestId &&
+      isCurrentWorkspaceSelection(selectionRequestId) &&
+      selectedVersionId.value === versionId
+    ) {
+      documentSummary.value = nextSummary
+      showOperationFeedback('success', 'Document description generated.')
+    }
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    if (
+      generationRequestId === summaryGenerationRequestId &&
+      isCurrentWorkspaceSelection(selectionRequestId) &&
+      selectedVersionId.value === versionId
+    ) {
+      errorMessage.value = toErrorMessage(error)
+    }
   } finally {
-    isSummaryLoading.value = false
+    if (generationRequestId === summaryGenerationRequestId) {
+      isSummaryLoading.value = false
+    }
   }
 }
 
@@ -863,21 +1075,42 @@ async function saveDocumentSummary(
     onSaved(false)
     return
   }
+  const versionId = selectedVersionId.value
+  const selectionRequestId = workspaceSelectionRequestId
+  const saveRequestId = ++summarySaveRequestId
   errorMessage.value = ''
   isSummarySaving.value = true
   try {
-    documentSummary.value = await updateDocumentSummary(selectedVersionId.value, payload)
-    showOperationFeedback('success', 'Document summary saved.')
-    onSaved(true)
+    const nextSummary = await updateDocumentSummary(versionId, payload)
+    const isCurrentVersion =
+      saveRequestId === summarySaveRequestId &&
+      isCurrentWorkspaceSelection(selectionRequestId) &&
+      selectedVersionId.value === versionId
+    if (isCurrentVersion) {
+      documentSummary.value = nextSummary
+      showOperationFeedback('success', 'Document summary saved.')
+    }
+    onSaved(isCurrentVersion)
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    if (
+      saveRequestId === summarySaveRequestId &&
+      isCurrentWorkspaceSelection(selectionRequestId) &&
+      selectedVersionId.value === versionId
+    ) {
+      errorMessage.value = toErrorMessage(error)
+    }
     onSaved(false)
   } finally {
-    isSummarySaving.value = false
+    if (saveRequestId === summarySaveRequestId) {
+      isSummarySaving.value = false
+    }
   }
 }
 
 function openUploadDialog(): void {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   fileInput.value?.click()
 }
 
@@ -890,7 +1123,7 @@ function handleUploadFileChange(event: Event): void {
 }
 
 function handleUploadDragEnter(): void {
-  if (!isWorkspaceBusy.value) {
+  if (!isWorkspaceBusy.value && !blocksWorkspaceMutation.value) {
     isUploadDragging.value = true
   }
 }
@@ -908,7 +1141,7 @@ function handleUploadDragLeave(event: DragEvent): void {
 
 function handleUploadDrop(event: DragEvent): void {
   isUploadDragging.value = false
-  if (isWorkspaceBusy.value) {
+  if (isWorkspaceBusy.value || !ensureWorkspaceMutationAllowed()) {
     return
   }
   setUploadFile(event.dataTransfer?.files?.[0] ?? null)
@@ -923,7 +1156,7 @@ function setUploadFile(file: File | null): void {
   }
   if (!isAllowedUploadFile(file)) {
     selectedUploadFile.value = null
-    errorMessage.value = 'Only Excel and CSV files are supported: .xls, .xlsx, .xlsm, .xltx, .xltm, .csv.'
+    errorMessage.value = 'Only Excel files are supported: .xls, .xlsx, .xlsm, .xltx, .xltm.'
     return
   }
   if (file.size > maxUploadBytes) {
@@ -937,6 +1170,9 @@ function setUploadFile(file: File | null): void {
 }
 
 function requestDeleteFile(file: ExcelFile): void {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   closeActionMenus()
   confirmDialog.value = { kind: 'file', file }
   pendingDeleteFile.value = null
@@ -964,6 +1200,9 @@ function exportPreviewCsv(): void {
 }
 
 async function renameFilePrompt(file: ExcelFile): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   closeActionMenus()
   dialogError.value = ''
   renameDialog.value = { kind: 'file', file }
@@ -1006,6 +1245,9 @@ async function submitRenameDialog(): Promise<void> {
   if (!dialog) {
     return
   }
+  if (dialog.kind === 'file' && !ensureWorkspaceMutationAllowed()) {
+    return
+  }
 
   const trimmedValue = renameDraft.value.trim()
   if (!trimmedValue) {
@@ -1015,10 +1257,10 @@ async function submitRenameDialog(): Promise<void> {
   }
 
   dialogError.value = ''
+  const busyRequestId = dialog.kind === 'file' ? beginWorkspaceBusy() : null
   try {
     if (dialog.kind === 'file') {
       errorMessage.value = ''
-      isWorkspaceBusy.value = true
       const renamedFile = await renameExcelFile(dialog.file.file_id, trimmedValue)
       files.value = files.value.map((item) => (
         item.file_id === renamedFile.file_id ? renamedFile : item
@@ -1034,11 +1276,16 @@ async function submitRenameDialog(): Promise<void> {
   } catch (error: unknown) {
     dialogError.value = toErrorMessage(error)
   } finally {
-    isWorkspaceBusy.value = false
+    if (busyRequestId !== null) {
+      finishWorkspaceBusy(busyRequestId)
+    }
   }
 }
 
 async function confirmDeleteFile(): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   const file =
     confirmDialog.value?.kind === 'file' ? confirmDialog.value.file : pendingDeleteFile.value
   if (!file) {
@@ -1046,7 +1293,8 @@ async function confirmDeleteFile(): Promise<void> {
   }
 
   errorMessage.value = ''
-  isWorkspaceBusy.value = true
+  const requestId = nextWorkspaceSelectionRequestId()
+  const busyRequestId = beginWorkspaceBusy()
   try {
     const result = await deleteExcelFile(file.file_id, true)
     pendingDeleteFile.value = null
@@ -1054,9 +1302,13 @@ async function confirmDeleteFile(): Promise<void> {
     if (selectedFileId.value === file.file_id) {
       clearSelection()
     }
-    files.value = await listExcelFiles()
+    const nextFiles = await listExcelFiles()
+    if (!isCurrentWorkspaceSelection(requestId)) {
+      return
+    }
+    files.value = nextFiles
     if (!selectedFileId.value && files.value[0]) {
-      await selectFile(files.value[0])
+      await selectFile(files.value[0], requestId)
     }
     showOperationFeedback(
       'success',
@@ -1070,13 +1322,18 @@ async function confirmDeleteFile(): Promise<void> {
       showOperationFeedback('warning', `Confirm deletion for ${file.display_name}.`, 5000)
       return
     }
-    dialogError.value = toErrorMessage(error)
+    if (isCurrentWorkspaceSelection(requestId)) {
+      dialogError.value = toErrorMessage(error)
+    }
   } finally {
-    isWorkspaceBusy.value = false
+    finishWorkspaceBusy(busyRequestId)
   }
 }
 
 async function uploadSelectedFile(replaceExisting = false): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   const file = replaceExisting ? pendingReplaceFile.value : selectedUploadFile.value
   if (!file) {
     errorMessage.value = 'Choose an Excel workbook first.'
@@ -1084,7 +1341,8 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
   }
 
   errorMessage.value = ''
-  isWorkspaceBusy.value = true
+  const requestId = nextWorkspaceSelectionRequestId()
+  const busyRequestId = beginWorkspaceBusy()
   try {
     const result = await uploadExcelFile(file, replaceExisting)
     pendingReplaceFile.value = null
@@ -1095,10 +1353,14 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
       fileInput.value.value = ''
     }
     showOperationFeedback('success', `${result.file.display_name} uploaded and parsed.`)
-    files.value = await listExcelFiles()
+    const nextFiles = await listExcelFiles()
+    if (!isCurrentWorkspaceSelection(requestId)) {
+      return
+    }
+    files.value = nextFiles
     const uploadedFile = files.value.find((item) => item.file_id === result.file.file_id)
     if (uploadedFile) {
-      await selectFile(uploadedFile)
+      await selectFile(uploadedFile, requestId)
     }
   } catch (error: unknown) {
     if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
@@ -1108,17 +1370,22 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
       dialogError.value = ''
       return
     }
-    if (uploadDialog.value) {
-      dialogError.value = toErrorMessage(error)
-    } else {
-      errorMessage.value = toErrorMessage(error)
+    if (isCurrentWorkspaceSelection(requestId)) {
+      if (uploadDialog.value) {
+        dialogError.value = toErrorMessage(error)
+      } else {
+        errorMessage.value = toErrorMessage(error)
+      }
     }
   } finally {
-    isWorkspaceBusy.value = false
+    finishWorkspaceBusy(busyRequestId)
   }
 }
 
 async function lookupRow(): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   if (!selectedSheetId.value || !lookupRowId.value.trim()) {
     errorMessage.value = 'Enter a row id such as S001_R25.'
     return
@@ -1128,7 +1395,7 @@ async function lookupRow(): Promise<void> {
 
 async function lookupVisibleRow(row: string[]): Promise<void> {
   const rowId = row[0]?.trim()
-  if (!rowId || isLookupLoading.value) {
+  if (!rowId || isLookupLoading.value || !ensureWorkspaceMutationAllowed()) {
     return
   }
   lookupRowId.value = rowId
@@ -1136,87 +1403,162 @@ async function lookupVisibleRow(row: string[]): Promise<void> {
 }
 
 async function lookupRowInSheet(sheetId: string, rowId: string): Promise<void> {
+  const requestId = ++rowLookupRequestId
+  const selectionRequestId = workspaceSelectionRequestId
   errorMessage.value = ''
   isLookupLoading.value = true
   try {
     const result = await lookupExcelRow(sheetId, rowId)
+    if (!isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
+      return
+    }
+    const nextPreview = await previewForLookupRow(result)
+    if (!isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
+      return
+    }
+    if (nextPreview) {
+      preview.value = nextPreview
+    }
     rowLookup.value = result
     selectedCell.value = null
-    await ensureLookupRowVisible(result)
     await nextTick()
-    document.getElementById(rowDomId(result.mapping.row_id))?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'center',
-    })
+    if (isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
+      document.getElementById(rowDomId(result.mapping.row_id))?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    }
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    if (isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
+      errorMessage.value = toErrorMessage(error)
+    }
   } finally {
-    isLookupLoading.value = false
+    if (requestId === rowLookupRequestId) {
+      isLookupLoading.value = false
+    }
   }
 }
 
-async function ensureLookupRowVisible(result: RowLookupResponse): Promise<void> {
+function isCurrentRowLookup(
+  requestId: number,
+  selectionRequestId: number,
+  sheetId: string,
+): boolean {
+  return (
+    requestId === rowLookupRequestId &&
+    isCurrentWorkspaceSelection(selectionRequestId) &&
+    selectedSheetId.value === sheetId
+  )
+}
+
+async function previewForLookupRow(
+  result: RowLookupResponse,
+): Promise<SheetPreviewResponse | null> {
   const rowZeroIndex = Math.max(0, result.mapping.raw_csv_row_number - 1)
   const currentOffset = preview.value?.offset ?? 0
   const currentEnd = currentOffset + (preview.value?.rows.length ?? 0)
   const isCurrentSheetPreview = preview.value?.sheet.sheet_id === result.sheet.sheet_id
   if (!isCurrentSheetPreview || rowZeroIndex < currentOffset || rowZeroIndex >= currentEnd) {
     const centeredOffset = Math.max(0, rowZeroIndex - 24)
-    preview.value = await previewExcelSheet(result.sheet.sheet_id, centeredOffset, previewLimit)
+    return previewExcelSheet(result.sheet.sheet_id, centeredOffset, previewLimit)
   }
+  return null
 }
 
 async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
   setActiveView('chat')
   errorMessage.value = ''
+  const requestId = nextWorkspaceSelectionRequestId()
   try {
     let targetFile = files.value.find((file) => file.file_id === citation.file_id)
     if (!targetFile) {
-      files.value = await listExcelFiles()
+      const nextFiles = await listExcelFiles()
+      if (!isCurrentWorkspaceSelection(requestId)) {
+        return
+      }
+      files.value = nextFiles
       targetFile = files.value.find((file) => file.file_id === citation.file_id)
     }
     if (targetFile && selectedFileId.value !== targetFile.file_id) {
-      await selectFile(targetFile)
+      await selectFile(targetFile, requestId)
     }
     if (selectedVersionId.value !== citation.version_id) {
-      await selectVersion(citation.version_id)
+      await selectVersion(citation.version_id, requestId)
     }
     const targetSheet = sheets.value.find((sheet) => sheet.sheet_id === citation.sheet_id)
     if (targetSheet && selectedSheetId.value !== targetSheet.sheet_id) {
-      await selectSheet(targetSheet)
+      await selectSheet(targetSheet, requestId)
+    }
+    if (!isCurrentWorkspaceSelection(requestId)) {
+      return
     }
     lookupRowId.value = citation.row_id
     await lookupRowInSheet(citation.sheet_id, citation.row_id)
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    if (isCurrentWorkspaceSelection(requestId)) {
+      errorMessage.value = toErrorMessage(error)
+    }
   }
 }
 
 function handleChatAnswer(answer: ChatAnswer): void {
   latestAnswer.value = answer
-  void loadChatSessions(answer.session_id)
+  void loadChatSessions(activeChatSessionId.value === answer.session_id ? answer.session_id : null)
 }
 
 async function openReferencedDocument(document: SelectedDocument): Promise<void> {
-  const file = files.value.find((item) => item.file_id === document.file_id)
-  if (file) {
-    await chooseFile(file, 'chat')
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
   }
-  if (selectedVersionId.value !== document.version_id) {
-    await runWorkspaceAction(() => selectVersion(document.version_id))
+  const requestId = nextWorkspaceSelectionRequestId()
+  setActiveView('chat')
+  await runWorkspaceAction(async () => {
+    const file = files.value.find((item) => item.file_id === document.file_id)
+    if (file && selectedFileId.value !== file.file_id) {
+      await selectFile(file, requestId)
+    }
+    if (
+      isCurrentWorkspaceSelection(requestId) &&
+      selectedVersionId.value !== document.version_id
+    ) {
+      await selectVersion(document.version_id, requestId)
+    }
+  }, requestId)
+}
+
+async function runWorkspaceAction(
+  action: (requestId: number) => Promise<void>,
+  requestId = nextWorkspaceSelectionRequestId(),
+): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
+  errorMessage.value = ''
+  const busyRequestId = beginWorkspaceBusy()
+  try {
+    await action(requestId)
+  } catch (error: unknown) {
+    if (isCurrentWorkspaceSelection(requestId)) {
+      errorMessage.value = toErrorMessage(error)
+    }
+  } finally {
+    finishWorkspaceBusy(busyRequestId)
   }
 }
 
-async function runWorkspaceAction(action: () => Promise<void>): Promise<void> {
-  errorMessage.value = ''
-  isWorkspaceBusy.value = true
-  try {
-    await action()
-  } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
-  } finally {
-    isWorkspaceBusy.value = false
+function handleChatAskingStateChanged(value: boolean): void {
+  isChatAnswerPending.value = value
+}
+
+function ensureWorkspaceMutationAllowed(): boolean {
+  if (!blocksWorkspaceMutation.value) {
+    return true
   }
+  showOperationFeedback('info', 'ExcelAI is answering. Wait for the response before changing files.')
+  return false
 }
 
 function clearSelection(): void {
@@ -1637,7 +1979,17 @@ function toErrorMessage(error: unknown): string {
 </script>
 
 <template>
-  <main class="excelai-app" :class="{ 'chat-mode': activeView === 'chat' }">
+  <div v-if="isAuthChecking" class="auth-loading-screen">
+    <div class="auth-loading-card">
+      <span class="auth-card-icon"><AppIcon name="lock" /></span>
+      <strong>Checking session</strong>
+    </div>
+  </div>
+  <AuthPanel
+    v-else-if="!currentUser"
+    @authenticated="handleAuthenticated"
+  />
+  <main v-else class="excelai-app" :class="{ 'chat-mode': activeView === 'chat' }">
     <aside class="app-sidebar">
       <div class="brand-block">
         <h1>ExcelAI</h1>
@@ -1646,7 +1998,7 @@ function toErrorMessage(error: unknown): string {
 
       <nav class="primary-nav" aria-label="Primary">
         <button
-          v-for="item in primaryNavItems"
+          v-for="item in visiblePrimaryNavItems"
           :key="item.key"
           type="button"
           class="nav-item"
@@ -1666,12 +2018,12 @@ function toErrorMessage(error: unknown): string {
           <span>Support</span>
         </button>
         <div class="user-mini">
-          <div class="avatar">A</div>
+          <div class="avatar">{{ userInitial }}</div>
           <div>
-            <strong>Alex Rivera</strong>
-            <span>alex.r@excelai.com</span>
+            <strong>{{ userRoleLabel }}</strong>
+            <span>{{ userEmail }}</span>
           </div>
-          <button type="button" class="logout-button" aria-label="Logout">
+          <button type="button" class="logout-button" aria-label="Logout" @click="signOut">
             <AppIcon name="logout" />
           </button>
         </div>
@@ -1692,7 +2044,7 @@ function toErrorMessage(error: unknown): string {
               type="button"
               class="topbar-icon-button"
               aria-label="Refresh files"
-              :disabled="isWorkspaceBusy"
+              :disabled="isWorkspaceBusy || blocksWorkspaceMutation"
               @click="refreshFiles"
             >
               <AppIcon name="refresh" />
@@ -1719,6 +2071,7 @@ function toErrorMessage(error: unknown): string {
               <input v-model="searchTerm" type="search" placeholder="Search documents..." />
             </label>
             <button
+              v-if="isAdmin"
               type="button"
               class="view-switch"
               @click="setActiveView('files')"
@@ -1745,7 +2098,7 @@ function toErrorMessage(error: unknown): string {
           ref="fileInput"
           class="visually-hidden"
           type="file"
-          accept=".xls,.xlsx,.xlsm,.xltx,.xltm,.csv"
+          accept=".xls,.xlsx,.xlsm,.xltx,.xltm"
           @change="handleUploadFileChange"
         />
 
@@ -1763,7 +2116,7 @@ function toErrorMessage(error: unknown): string {
             type="button"
             class="file-upload-zone"
             :class="{ dragging: isUploadDragging }"
-            :disabled="isWorkspaceBusy"
+            :disabled="isWorkspaceBusy || blocksWorkspaceMutation"
             @click="openUploadDialog"
             @dragenter.prevent="handleUploadDragEnter"
             @dragover.prevent="handleUploadDragEnter"
@@ -1774,7 +2127,7 @@ function toErrorMessage(error: unknown): string {
               <AppIcon name="upload_file" />
             </span>
             <strong>Click or drag files to upload</strong>
-            <span>Supports Excel, CSV (Max 50MB)</span>
+            <span>Supports Excel workbooks (Max 50MB)</span>
           </button>
 
           <div class="file-card-list">
@@ -1789,6 +2142,7 @@ function toErrorMessage(error: unknown): string {
                 pinned: isFilePinned(file.file_id),
                 'menu-open': openFileActionMenuId === file.file_id,
               }"
+              :aria-disabled="blocksWorkspaceMutation ? 'true' : undefined"
               @click="chooseFile(file)"
               @keydown.enter.prevent="chooseFile(file)"
               @keydown.space.prevent="chooseFile(file)"
@@ -1804,6 +2158,7 @@ function toErrorMessage(error: unknown): string {
                 <button
                   type="button"
                   class="menu-trigger"
+                  :disabled="blocksWorkspaceMutation"
                   :aria-expanded="openFileActionMenuId === file.file_id"
                   aria-label="File actions"
                   @click="toggleFileActionMenu(file.file_id)"
@@ -1820,11 +2175,20 @@ function toErrorMessage(error: unknown): string {
                   <AppIcon name="push_pin" />
                   {{ isFilePinned(file.file_id) ? 'Unpin' : 'Pin' }}
                 </button>
-                <button type="button" @click="renameFilePrompt(file)">
+                <button
+                  type="button"
+                  :disabled="blocksWorkspaceMutation"
+                  @click="renameFilePrompt(file)"
+                >
                   <AppIcon name="edit" />
                   Rename
                 </button>
-                <button type="button" class="danger-text" @click="requestDeleteFile(file)">
+                <button
+                  type="button"
+                  class="danger-text"
+                  :disabled="blocksWorkspaceMutation"
+                  @click="requestDeleteFile(file)"
+                >
                   <AppIcon name="close" />
                   Delete
                 </button>
@@ -2008,7 +2372,7 @@ function toErrorMessage(error: unknown): string {
                     <span>Version</span>
                     <select
                       v-model="selectedVersionId"
-                      :disabled="versions.length === 0"
+                      :disabled="versions.length === 0 || blocksWorkspaceMutation"
                       @change="selectCurrentVersion"
                     >
                       <option value="">Version</option>
@@ -2025,7 +2389,7 @@ function toErrorMessage(error: unknown): string {
                     <span>Sheet</span>
                     <select
                       v-model="selectedSheetId"
-                      :disabled="sheets.length === 0"
+                      :disabled="sheets.length === 0 || blocksWorkspaceMutation"
                       @change="selectCurrentSheet"
                     >
                       <option value="">Sheet</option>
@@ -2047,7 +2411,11 @@ function toErrorMessage(error: unknown): string {
                         type="text"
                         @keydown.enter="lookupRow"
                       />
-                      <button type="button" :disabled="isLookupLoading" @click="lookupRow">
+                      <button
+                        type="button"
+                        :disabled="isLookupLoading || blocksWorkspaceMutation"
+                        @click="lookupRow"
+                      >
                         Find
                       </button>
                     </div>
@@ -2094,7 +2462,7 @@ function toErrorMessage(error: unknown): string {
                       <button
                         type="button"
                         class="secondary-button"
-                        :disabled="!canPreviewPrevious"
+                        :disabled="!canPreviewPrevious || blocksWorkspaceMutation"
                         @click="loadPreviewPage((preview?.offset ?? 0) - previewLimit)"
                       >
                         Previous
@@ -2102,7 +2470,7 @@ function toErrorMessage(error: unknown): string {
                       <button
                         type="button"
                         class="secondary-button"
-                        :disabled="!canPreviewNext"
+                        :disabled="!canPreviewNext || blocksWorkspaceMutation"
                         @click="loadPreviewPage((preview?.offset ?? 0) + previewLimit)"
                       >
                         Next
@@ -2146,7 +2514,8 @@ function toErrorMessage(error: unknown): string {
                     :key="sheet.sheet_id"
                     type="button"
                     :class="{ active: sheet.sheet_id === selectedSheetId }"
-                    @click="runWorkspaceAction(() => selectSheet(sheet))"
+                    :disabled="blocksWorkspaceMutation"
+                    @click="runWorkspaceAction((requestId) => selectSheet(sheet, requestId))"
                   >
                     {{ sheet.sheet_name }}
                   </button>
@@ -2195,7 +2564,8 @@ function toErrorMessage(error: unknown): string {
                       :key="sheet.sheet_id"
                       type="button"
                       :class="{ active: sheet.sheet_id === selectedSheetId }"
-                      @click="runWorkspaceAction(() => selectSheet(sheet))"
+                      :disabled="blocksWorkspaceMutation"
+                      @click="runWorkspaceAction((requestId) => selectSheet(sheet, requestId))"
                     >
                       <strong>{{ sheet.sheet_code }} {{ sheet.sheet_name }}</strong>
                       <span>{{ sheet.row_count }} rows / {{ sheet.column_count }} columns</span>
@@ -2232,7 +2602,7 @@ function toErrorMessage(error: unknown): string {
       </section>
 
       <section
-        v-else
+        v-show="activeView === 'chat'"
         class="analysis-page"
         :class="chatWorkspaceClasses"
         :style="chatWorkspaceStyle"
@@ -2331,21 +2701,21 @@ function toErrorMessage(error: unknown): string {
           </p>
 
           <div class="rail-system-links">
-            <button type="button" @click="setActiveView('files')">
+            <button v-if="isAdmin" type="button" @click="setActiveView('files')">
               <AppIcon name="folder_open" />
               <span>Files</span>
             </button>
           </div>
 
           <div class="chat-rail-user">
-            <img
-              alt="User profile"
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuCydg9xLa1V1jLmz2zCEqipeHRQX6jNRFmnvrbvDd1087ZqFBiMN2m1WqUS7eiTRlcTPGlA-AXESHcNu2x3iBZc1wI_ehf6OJReBuSe9QPBEE4Ii9Cdz6LPcEYHIrJzk4ZitvvROTavnO5XvMCyCvOpEs_GCfqkaNMjx-5vMQXTyOjMIJAvAdoxzX-SvCHKsmXA7ciOdVwuZEtN2TGlzfvKAbf3QZnikct32nv9K3teVaruCd7nFPTVaEgfdt0PJa0sKECq8RA0JBRw"
-            />
+            <div class="avatar">{{ userInitial }}</div>
             <div>
-              <strong>Alex Rivera</strong>
-              <span>Pro Tier</span>
+              <strong>{{ userEmail }}</strong>
+              <span>{{ userRoleLabel }}</span>
             </div>
+            <button type="button" class="logout-button" aria-label="Logout" @click="signOut">
+              <AppIcon name="logout" />
+            </button>
           </div>
         </aside>
 
@@ -2490,7 +2860,8 @@ function toErrorMessage(error: unknown): string {
               :key="sheet.sheet_id"
               type="button"
               :class="{ active: sheet.sheet_id === selectedSheetId }"
-              @click="runWorkspaceAction(() => selectSheet(sheet))"
+              :disabled="blocksWorkspaceMutation"
+              @click="runWorkspaceAction((requestId) => selectSheet(sheet, requestId))"
             >
               {{ sheet.sheet_name }}
             </button>
@@ -2533,6 +2904,7 @@ function toErrorMessage(error: unknown): string {
             :document-titles="documentTitleMap"
             :active-document="activeDocumentForChat"
             @answer-received="handleChatAnswer"
+            @asking-state-changed="handleChatAskingStateChanged"
             @select-citation="handleCitationSelected"
             @select-document="openReferencedDocument"
             @session-created="handleChatSessionCreated"

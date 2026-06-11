@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     deepseek_answer_model: str = DEFAULT_DEEPSEEK_ANSWER_MODEL
     llm_request_timeout_seconds: float = 60.0
     llm_summary_max_profile_rows: int = 10
+    auth_admin_email: str = "969348539@qq.com"
+    auth_admin_password: str = "Intertek_AI"
+    auth_session_ttl_hours: int = 24 * 14
+    auth_password_reset_ttl_minutes: int = 30
+    auth_password_hash_iterations: int = 260_000
 
     @property
     def backend_root(self) -> Path:

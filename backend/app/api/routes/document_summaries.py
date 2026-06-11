@@ -2,7 +2,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.api.dependencies import get_document_summary_service
+from app.api.dependencies import (
+    get_current_user,
+    get_document_summary_service,
+    require_admin_user,
+)
 from app.api.schemas import (
     DocumentSummaryResponse,
     GenerateDocumentSummaryRequest,
@@ -19,6 +23,8 @@ DocumentSummaryServiceDependency = Annotated[
     DocumentSummaryService,
     Depends(get_document_summary_service),
 ]
+AuthenticatedDependency = Annotated[object, Depends(get_current_user)]
+AdminDependency = Annotated[object, Depends(require_admin_user)]
 
 
 @router.post(
@@ -28,6 +34,7 @@ DocumentSummaryServiceDependency = Annotated[
 def generate_document_summary(
     version_id: str,
     service: DocumentSummaryServiceDependency,
+    _admin: AdminDependency,
     request: GenerateDocumentSummaryRequest | None = None,
 ) -> DocumentSummaryResponse:
     model = request.model if request is not None else None
@@ -41,6 +48,7 @@ def generate_document_summary(
 def get_document_summary(
     version_id: str,
     service: DocumentSummaryServiceDependency,
+    _user: AuthenticatedDependency,
 ) -> DocumentSummaryResponse:
     summary = service.get_summary(version_id)
     if summary is None:
@@ -53,6 +61,7 @@ def update_document_summary(
     version_id: str,
     request: UpdateDocumentSummaryRequest,
     service: DocumentSummaryServiceDependency,
+    _admin: AdminDependency,
 ) -> DocumentSummaryResponse:
     return _to_summary_response(
         service.update_summary(

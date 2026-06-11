@@ -9,10 +9,11 @@ from openpyxl import Workbook
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
-from app.api.dependencies import get_excel_asset_service
+from app.api.dependencies import get_current_user, get_excel_asset_service, require_admin_user
 from app.api.routes import excel_assets
 from app.application.excel_assets.service import ExcelAssetService
 from app.main import app
+from tests.auth_helpers import admin_user
 
 
 @pytest.fixture
@@ -25,6 +26,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     )
     service.initialize()
     app.dependency_overrides[get_excel_asset_service] = lambda: service
+    app.dependency_overrides[get_current_user] = admin_user
+    app.dependency_overrides[require_admin_user] = admin_user
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

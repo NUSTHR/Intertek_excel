@@ -56,3 +56,19 @@ class VersionActivationError(ExcelWorkspaceError):
 
 class UploadValidationError(ExcelWorkspaceError):
     pass
+
+
+class AuthenticationError(ExcelWorkspaceError):
+    pass
+
+
+class AuthorizationError(ExcelWorkspaceError):
+    pass
+
+
+class UserAlreadyExistsError(ExcelWorkspaceError):
+    pass
+
+
+class PasswordResetTokenError(ExcelWorkspaceError):
+    pass

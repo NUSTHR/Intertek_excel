@@ -1,4 +1,8 @@
 from functools import lru_cache
+from typing import Annotated
+
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.adapters.dialogue import LangGraphChatWorkflow
 from app.adapters.llm.fake_llm_client import FakeLlmClient
@@ -10,13 +14,22 @@ from app.adapters.llm.siliconflow_client import (
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
+from app.application.auth.service import AuthService
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.core.config import get_settings
+from app.core.errors import AuthenticationError, AuthorizationError
 from app.core.llm_catalog import DEEPSEEK_PROVIDER, SILICONFLOW_PROVIDER
+from app.domain.models import AuthenticatedUser, UserRole
 from app.ports.chat_workflow import ChatWorkflow
 from app.ports.llm_client import LlmClient
+
+auth_scheme = HTTPBearer(auto_error=False)
+AuthCredentialsDependency = Annotated[
+    HTTPAuthorizationCredentials | None,
+    Depends(auth_scheme),
+]
 
 
 @lru_cache(maxsize=1)
@@ -55,6 +68,44 @@ def get_chat_service() -> ChatService:
         sessions=get_excel_repository(),
         workflow=get_chat_workflow(),
     )
+
+
+@lru_cache(maxsize=1)
+def get_auth_service() -> AuthService:
+    settings = get_settings()
+    service = AuthService(
+        repository=get_excel_repository(),
+        admin_email=settings.auth_admin_email,
+        admin_password=settings.auth_admin_password,
+        session_ttl_hours=settings.auth_session_ttl_hours,
+        password_reset_ttl_minutes=settings.auth_password_reset_ttl_minutes,
+        password_hash_iterations=settings.auth_password_hash_iterations,
+    )
+    service.initialize()
+    return service
+
+
+AuthServiceDependency = Annotated[AuthService, Depends(get_auth_service)]
+
+
+def get_current_user(
+    credentials: AuthCredentialsDependency,
+    service: AuthServiceDependency,
+) -> AuthenticatedUser:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise AuthenticationError("authentication is required")
+    return service.get_user_for_token(credentials.credentials)
+
+
+CurrentUserDependency = Annotated[AuthenticatedUser, Depends(get_current_user)]
+
+
+def require_admin_user(
+    user: CurrentUserDependency,
+) -> AuthenticatedUser:
+    if user.role != UserRole.ADMIN:
+        raise AuthorizationError("administrator access is required")
+    return user
 
 
 @lru_cache(maxsize=1)

@@ -127,6 +127,7 @@ class DocumentSummary:
 @dataclass(frozen=True)
 class ChatSession:
     session_id: str
+    user_id: str
     created_at: str
     updated_at: str
     title: str = "New chat"
@@ -260,3 +261,49 @@ class LlmPreference:
     answer_model: str
     created_at: str
     updated_at: str
+
+
+class UserRole(StrEnum):
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+@dataclass(frozen=True)
+class UserAccount:
+    user_id: str
+    email: str
+    password_hash: str
+    role: UserRole
+    is_active: bool
+    created_at: str
+    updated_at: str
+    last_login_at: str | None = None
+
+
+@dataclass(frozen=True)
+class AuthSession:
+    session_id: str
+    user_id: str
+    session_token_hash: str
+    created_at: str
+    expires_at: str
+    revoked_at: str | None = None
+
+
+@dataclass(frozen=True)
+class PasswordResetToken:
+    reset_token_id: str
+    user_id: str
+    token_hash: str
+    created_at: str
+    expires_at: str
+    used_at: str | None = None
+
+
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    user_id: str
+    email: str
+    role: UserRole
+    created_at: str
+    last_login_at: str | None = None

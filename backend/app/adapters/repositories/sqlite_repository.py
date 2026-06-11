@@ -8,6 +8,7 @@ from pathlib import Path
 from app.core.time import utc_now_iso
 from app.domain.models import (
     AttachedDocument,
+    AuthSession,
     ChatAnswerBlock,
     ChatSession,
     ChatStageTiming,
@@ -22,8 +23,11 @@ from app.domain.models import (
     ExcelSheet,
     ExcelVersionStatus,
     LlmPreference,
+    PasswordResetToken,
     SelectedDocument,
     SheetSummary,
+    UserAccount,
+    UserRole,
 )
 
 
@@ -285,6 +289,62 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             )
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=5,
+        name="add_authentication_and_session_ownership",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS user_accounts (
+              user_id TEXT PRIMARY KEY,
+              email TEXT NOT NULL UNIQUE,
+              password_hash TEXT NOT NULL,
+              role TEXT NOT NULL,
+              is_active INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_login_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+              session_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              session_token_hash TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL,
+              revoked_at TEXT,
+              FOREIGN KEY(user_id) REFERENCES user_accounts(user_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+              reset_token_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              token_hash TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL,
+              used_at TEXT,
+              FOREIGN KEY(user_id) REFERENCES user_accounts(user_id)
+            )
+            """,
+            """
+            ALTER TABLE chat_sessions
+            ADD COLUMN user_id TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
+              ON auth_sessions(user_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_token_hash
+              ON auth_sessions(session_token_hash)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+              ON password_reset_tokens(user_id)
             """,
         ),
     ),
@@ -882,11 +942,12 @@ class SQLiteExcelAssetRepository:
             connection.execute(
                 """
                 INSERT OR IGNORE INTO chat_sessions
-                  (session_id, created_at, updated_at, title, pinned_at, status)
-                VALUES (?, ?, ?, ?, ?, ?)
+                  (session_id, user_id, created_at, updated_at, title, pinned_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.session_id,
+                    session.user_id,
                     session.created_at,
                     session.updated_at,
                     session.title,
@@ -1121,6 +1182,209 @@ class SQLiteExcelAssetRepository:
             raise RuntimeError("failed to persist llm preference")
         return saved
 
+    def create_user(self, user: UserAccount) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_accounts
+                  (
+                    user_id, email, password_hash, role, is_active,
+                    created_at, updated_at, last_login_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user.user_id,
+                    user.email,
+                    user.password_hash,
+                    user.role.value,
+                    1 if user.is_active else 0,
+                    user.created_at,
+                    user.updated_at,
+                    user.last_login_at,
+                ),
+            )
+
+    def get_user(self, user_id: str) -> UserAccount | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM user_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return self._to_user(row)
+
+    def get_user_by_email(self, email: str) -> UserAccount | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM user_accounts WHERE email = ?",
+                (email,),
+            ).fetchone()
+        return self._to_user(row)
+
+    def update_user_password(
+        self,
+        user_id: str,
+        password_hash: str,
+        updated_at: str,
+    ) -> UserAccount | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE user_accounts
+                SET password_hash = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (password_hash, updated_at, user_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM user_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return self._to_user(row)
+
+    def record_user_login(self, user_id: str, last_login_at: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE user_accounts
+                SET last_login_at = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (last_login_at, last_login_at, user_id),
+            )
+
+    def create_auth_session(self, session: AuthSession) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO auth_sessions
+                  (
+                    session_id, user_id, session_token_hash,
+                    created_at, expires_at, revoked_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.session_id,
+                    session.user_id,
+                    session.session_token_hash,
+                    session.created_at,
+                    session.expires_at,
+                    session.revoked_at,
+                ),
+            )
+
+    def get_auth_session_by_token_hash(
+        self,
+        token_hash: str,
+    ) -> tuple[AuthSession, UserAccount] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                  auth_sessions.session_id AS auth_session_id,
+                  auth_sessions.user_id AS auth_user_id,
+                  auth_sessions.session_token_hash,
+                  auth_sessions.created_at AS auth_created_at,
+                  auth_sessions.expires_at,
+                  auth_sessions.revoked_at,
+                  user_accounts.user_id,
+                  user_accounts.email,
+                  user_accounts.password_hash,
+                  user_accounts.role,
+                  user_accounts.is_active,
+                  user_accounts.created_at AS user_created_at,
+                  user_accounts.updated_at AS user_updated_at,
+                  user_accounts.last_login_at
+                FROM auth_sessions
+                JOIN user_accounts ON user_accounts.user_id = auth_sessions.user_id
+                WHERE auth_sessions.session_token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._to_auth_session(row), self._to_joined_user(row)
+
+    def revoke_auth_session(self, token_hash: str, revoked_at: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE session_token_hash = ? AND revoked_at IS NULL
+                """,
+                (revoked_at, token_hash),
+            )
+        return cursor.rowcount > 0
+
+    def create_password_reset_token(self, token: PasswordResetToken) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO password_reset_tokens
+                  (reset_token_id, user_id, token_hash, created_at, expires_at, used_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token.reset_token_id,
+                    token.user_id,
+                    token.token_hash,
+                    token.created_at,
+                    token.expires_at,
+                    token.used_at,
+                ),
+            )
+
+    def get_password_reset_token_by_hash(
+        self,
+        token_hash: str,
+    ) -> tuple[PasswordResetToken, UserAccount] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                  password_reset_tokens.reset_token_id,
+                  password_reset_tokens.user_id AS reset_user_id,
+                  password_reset_tokens.token_hash,
+                  password_reset_tokens.created_at AS reset_created_at,
+                  password_reset_tokens.expires_at,
+                  password_reset_tokens.used_at,
+                  user_accounts.user_id,
+                  user_accounts.email,
+                  user_accounts.password_hash,
+                  user_accounts.role,
+                  user_accounts.is_active,
+                  user_accounts.created_at AS user_created_at,
+                  user_accounts.updated_at AS user_updated_at,
+                  user_accounts.last_login_at
+                FROM password_reset_tokens
+                JOIN user_accounts ON user_accounts.user_id = password_reset_tokens.user_id
+                WHERE password_reset_tokens.token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._to_password_reset_token(row), self._to_joined_user(row)
+
+    def mark_password_reset_token_used(
+        self,
+        reset_token_id: str,
+        used_at: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE password_reset_tokens
+                SET used_at = ?
+                WHERE reset_token_id = ?
+                """,
+                (used_at, reset_token_id),
+            )
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
             self._database_path,
@@ -1273,13 +1537,61 @@ class SQLiteExcelAssetRepository:
         if row is None:
             return None
         columns = set(row.keys())
+        user_id = str(row["user_id"]) if "user_id" in columns else "legacy"
         return ChatSession(
             session_id=str(row["session_id"]),
+            user_id=user_id or "legacy",
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             title=str(row["title"]) if "title" in columns else "New chat",
             pinned_at=row["pinned_at"] if "pinned_at" in columns else None,
             status=str(row["status"]),
+        )
+
+    def _to_user(self, row: sqlite3.Row | None) -> UserAccount | None:
+        if row is None:
+            return None
+        return UserAccount(
+            user_id=str(row["user_id"]),
+            email=str(row["email"]),
+            password_hash=str(row["password_hash"]),
+            role=UserRole(str(row["role"])),
+            is_active=bool(int(row["is_active"])),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            last_login_at=row["last_login_at"],
+        )
+
+    def _to_joined_user(self, row: sqlite3.Row) -> UserAccount:
+        return UserAccount(
+            user_id=str(row["user_id"]),
+            email=str(row["email"]),
+            password_hash=str(row["password_hash"]),
+            role=UserRole(str(row["role"])),
+            is_active=bool(int(row["is_active"])),
+            created_at=str(row["user_created_at"]),
+            updated_at=str(row["user_updated_at"]),
+            last_login_at=row["last_login_at"],
+        )
+
+    def _to_auth_session(self, row: sqlite3.Row) -> AuthSession:
+        return AuthSession(
+            session_id=str(row["auth_session_id"]),
+            user_id=str(row["auth_user_id"]),
+            session_token_hash=str(row["session_token_hash"]),
+            created_at=str(row["auth_created_at"]),
+            expires_at=str(row["expires_at"]),
+            revoked_at=row["revoked_at"],
+        )
+
+    def _to_password_reset_token(self, row: sqlite3.Row) -> PasswordResetToken:
+        return PasswordResetToken(
+            reset_token_id=str(row["reset_token_id"]),
+            user_id=str(row["reset_user_id"]),
+            token_hash=str(row["token_hash"]),
+            created_at=str(row["reset_created_at"]),
+            expires_at=str(row["expires_at"]),
+            used_at=row["used_at"],
         )
 
     def _to_attached_document(

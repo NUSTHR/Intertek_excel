@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.api.dependencies import get_chat_service
+from app.api.dependencies import get_chat_service, get_current_user, require_admin_user
 from app.api.schemas import (
     AttachedDocumentResponse,
     ChatAnswerBlockResponse,
@@ -34,21 +34,32 @@ from app.core.llm_catalog import (
     list_supported_llm_models,
     list_supported_llm_provider_options,
 )
-from app.domain.models import ChatAnswer, ChatRouteResult, ChatSession, ChatTurn, LlmPreference
+from app.domain.models import (
+    AuthenticatedUser,
+    ChatAnswer,
+    ChatRouteResult,
+    ChatSession,
+    ChatTurn,
+    LlmPreference,
+)
 
 router = APIRouter(prefix="/api/excel", tags=["chat"])
 ChatServiceDependency = Annotated[ChatService, Depends(get_chat_service)]
+CurrentUserDependency = Annotated[AuthenticatedUser, Depends(get_current_user)]
+AdminDependency = Annotated[AuthenticatedUser, Depends(require_admin_user)]
 
 
 @router.post("/chat", response_model=ChatAnswerResponse)
 def answer_excel_question(
     request: ChatRequest,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatAnswerResponse:
     return _to_chat_answer_response(
         service.answer_question(
             request.question,
             session_id=request.session_id,
+            user_id=user.user_id,
             router_model=request.router_model,
             router_provider=request.router_provider,
             answer_model=request.answer_model,
@@ -59,14 +70,23 @@ def answer_excel_question(
 
 
 @router.post("/chat/sessions", response_model=ChatSessionResponse)
-def create_chat_session(service: ChatServiceDependency) -> ChatSessionResponse:
-    return _to_session_response(service.create_session())
+def create_chat_session(
+    service: ChatServiceDependency,
+    user: CurrentUserDependency,
+) -> ChatSessionResponse:
+    return _to_session_response(service.create_session_for_user(user.user_id))
 
 
 @router.get("/chat/sessions", response_model=ChatSessionListResponse)
-def list_chat_sessions(service: ChatServiceDependency) -> ChatSessionListResponse:
+def list_chat_sessions(
+    service: ChatServiceDependency,
+    user: CurrentUserDependency,
+) -> ChatSessionListResponse:
     return ChatSessionListResponse(
-        sessions=[_to_session_response(session) for session in service.list_sessions()]
+        sessions=[
+            _to_session_response(session)
+            for session in service.list_sessions(user_id=user.user_id)
+        ]
     )
 
 
@@ -74,8 +94,9 @@ def list_chat_sessions(service: ChatServiceDependency) -> ChatSessionListRespons
 def get_chat_session(
     session_id: str,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatSessionResponse:
-    session = service.get_session(session_id)
+    session = service.get_session(session_id, user_id=user.user_id)
     if session is None:
         raise AssetNotFoundError("chat session was not found")
     return _to_session_response(session)
@@ -88,8 +109,9 @@ def get_chat_session(
 def list_chat_session_turns(
     session_id: str,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatTurnListResponse:
-    turns = service.list_turns(session_id)
+    turns = service.list_turns(session_id, user_id=user.user_id)
     if turns is None:
         raise AssetNotFoundError("chat session was not found")
     return ChatTurnListResponse(turns=[_to_chat_turn_response(turn) for turn in turns])
@@ -100,8 +122,9 @@ def rename_chat_session(
     session_id: str,
     request: RenameChatSessionRequest,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatSessionResponse:
-    session = service.rename_session(session_id, request.title)
+    session = service.rename_session(session_id, request.title, user_id=user.user_id)
     if session is None:
         raise AssetNotFoundError("chat session was not found")
     return _to_session_response(session)
@@ -112,8 +135,13 @@ def pin_chat_session(
     session_id: str,
     request: PinChatSessionRequest,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatSessionResponse:
-    session = service.set_session_pinned(session_id, request.pinned)
+    session = service.set_session_pinned(
+        session_id,
+        request.pinned,
+        user_id=user.user_id,
+    )
     if session is None:
         raise AssetNotFoundError("chat session was not found")
     return _to_session_response(session)
@@ -123,8 +151,9 @@ def pin_chat_session(
 def delete_chat_session(
     session_id: str,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> None:
-    deleted = service.delete_session(session_id)
+    deleted = service.delete_session(session_id, user_id=user.user_id)
     if not deleted:
         raise AssetNotFoundError("chat session was not found")
 
@@ -137,11 +166,13 @@ def answer_excel_session_question(
     session_id: str,
     request: ChatRequest,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatAnswerResponse:
     return _to_chat_answer_response(
         service.answer_question(
             request.question,
             session_id=session_id,
+            user_id=user.user_id,
             router_model=request.router_model,
             router_provider=request.router_provider,
             answer_model=request.answer_model,
@@ -159,11 +190,13 @@ def route_excel_session_question(
     session_id: str,
     request: ChatRouteRequest,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatRouteResponse:
     return _to_chat_route_response(
         service.route_question(
             request.question,
             session_id=session_id,
+            user_id=user.user_id,
             router_model=request.router_model,
             router_provider=request.router_provider,
         )
@@ -178,11 +211,13 @@ def answer_excel_routed_session_question(
     session_id: str,
     request: ChatAnswerRequest,
     service: ChatServiceDependency,
+    user: CurrentUserDependency,
 ) -> ChatAnswerResponse:
     return _to_chat_answer_response(
         service.answer_routed_question(
             request.question,
             session_id=session_id,
+            user_id=user.user_id,
             answer_model=request.answer_model,
             answer_provider=request.answer_provider,
             selected_version_ids=request.selected_version_ids,
@@ -192,7 +227,11 @@ def answer_excel_routed_session_question(
 
 
 @router.get("/llm/options", response_model=LlmModelOptionsResponse)
-def get_llm_model_options() -> LlmModelOptionsResponse:
+def get_llm_model_options(_user: CurrentUserDependency) -> LlmModelOptionsResponse:
+    return _default_llm_model_options()
+
+
+def _default_llm_model_options() -> LlmModelOptionsResponse:
     settings = get_settings()
     return LlmModelOptionsResponse(
         models=list_supported_llm_models(),
@@ -209,12 +248,15 @@ def get_llm_model_options() -> LlmModelOptionsResponse:
 
 
 @router.get("/llm/preferences", response_model=LlmPreferenceResponse)
-def get_llm_preference(service: ChatServiceDependency) -> LlmPreferenceResponse:
+def get_llm_preference(
+    service: ChatServiceDependency,
+    _user: CurrentUserDependency,
+) -> LlmPreferenceResponse:
     preference = service.get_llm_preference()
     if preference is not None:
         return _to_llm_preference_response(preference)
 
-    defaults = get_llm_model_options().defaults
+    defaults = _default_llm_model_options().defaults
     return LlmPreferenceResponse(
         scope="workspace",
         summary_provider=defaults.summary_provider,
@@ -232,6 +274,7 @@ def get_llm_preference(service: ChatServiceDependency) -> LlmPreferenceResponse:
 def save_llm_preference(
     request: LlmPreferenceRequest,
     service: ChatServiceDependency,
+    _admin: AdminDependency,
 ) -> LlmPreferenceResponse:
     _validate_llm_preference(request)
     return _to_llm_preference_response(
@@ -414,6 +457,7 @@ def _to_chat_route_response(route_result: ChatRouteResult) -> ChatRouteResponse:
 def _to_session_response(session: ChatSession) -> ChatSessionResponse:
     return ChatSessionResponse(
         session_id=session.session_id,
+        user_id=session.user_id,
         created_at=session.created_at,
         updated_at=session.updated_at,
         title=session.title,

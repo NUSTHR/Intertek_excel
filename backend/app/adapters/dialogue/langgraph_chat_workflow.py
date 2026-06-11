@@ -49,6 +49,7 @@ class LangGraphChatWorkflow:
         route_result = state["actions"].route_question(
             request.question,
             session_id=request.session_id,
+            user_id=request.user_id,
             router_model=request.router_model,
             router_provider=request.router_provider,
         )
@@ -60,6 +61,7 @@ class LangGraphChatWorkflow:
         answer = state["actions"].answer_routed_question(
             question=request.question,
             session_id=route_result.session_id,
+            user_id=request.user_id,
             route_result=route_result,
             answer_model=request.answer_model,
             answer_provider=request.answer_provider,

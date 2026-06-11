@@ -24,6 +24,8 @@ export const appIconPaths: Record<string, string[]> = {
   help: ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z', 'M9.2 9a3 3 0 1 1 5.6 1.5c-.6 1.2-2.3 1.5-2.8 3', 'M12 17h.01'],
   keyboard_arrow_down: ['M6 9l6 6 6-6'],
   keyboard_arrow_up: ['M6 15l6-6 6 6'],
+  lock: ['M7 11V8a5 5 0 0 1 10 0v3', 'M5 11h14v10H5V11z', 'M12 15v2'],
+  login: ['M10 17l5-5-5-5', 'M15 12H3', 'M17 5h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-2'],
   logout: ['M10 6H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h4', 'M14 8l4 4-4 4', 'M18 12H9'],
   more_vert: ['M12 5h.01', 'M12 12h.01', 'M12 19h.01'],
   notifications: ['M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7', 'M13.7 21a2 2 0 0 1-3.4 0'],
@@ -38,5 +40,6 @@ export const appIconPaths: Record<string, string[]> = {
   table_rows: ['M4 5h16v14H4V5z', 'M4 10h16', 'M4 14h16'],
   tune: ['M4 7h10', 'M18 7h2', 'M4 17h2', 'M10 17h10', 'M14 5v4', 'M8 15v4'],
   upload_file: ['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z', 'M14 3v5h5', 'M12 17V10', 'M8.5 13.5L12 10l3.5 3.5'],
+  verified: ['M12 2l2.2 2 3-.4 1.1 2.8 2.6 1.6-1 2.8 1 2.8-2.6 1.6-1.1 2.8-3-.4L12 22l-2.2-2-3 .4-1.1-2.8-2.6-1.6 1-2.8-1-2.8 2.6-1.6 1.1-2.8 3 .4L12 2z', 'M8.5 12.2l2.2 2.2 4.8-5'],
   view_week: ['M4 5h16v14H4V5z', 'M9 5v14', 'M15 5v14'],
 }

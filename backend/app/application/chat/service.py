@@ -4,6 +4,7 @@ from time import perf_counter
 
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
+from app.core.errors import AssetNotFoundError
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
@@ -47,22 +48,39 @@ class ChatService:
         self._workflow = workflow
 
     def create_session(self) -> ChatSession:
+        return self.create_session_for_user("legacy")
+
+    def create_session_for_user(self, user_id: str) -> ChatSession:
         now = utc_now_iso()
         session = ChatSession(
             session_id=new_id("session"),
+            user_id=user_id,
             created_at=now,
             updated_at=now,
         )
         self._sessions.create_session(session)
         return session
 
-    def get_session(self, session_id: str) -> ChatSession | None:
-        return self._sessions.get_session(session_id)
+    def get_session(self, session_id: str, user_id: str | None = None) -> ChatSession | None:
+        session = self._sessions.get_session(session_id)
+        if user_id is not None and session is not None and session.user_id != user_id:
+            return None
+        return session
 
-    def list_sessions(self) -> list[ChatSession]:
-        return self._sessions.list_sessions()
+    def list_sessions(self, user_id: str | None = None) -> list[ChatSession]:
+        sessions = self._sessions.list_sessions()
+        if user_id is None:
+            return sessions
+        return [session for session in sessions if session.user_id == user_id]
 
-    def rename_session(self, session_id: str, title: str) -> ChatSession | None:
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        user_id: str | None = None,
+    ) -> ChatSession | None:
+        if self.get_session(session_id, user_id=user_id) is None:
+            return None
         normalized_title = self._normalize_session_title(title)
         return self._sessions.rename_session(
             session_id=session_id,
@@ -70,7 +88,14 @@ class ChatService:
             updated_at=utc_now_iso(),
         )
 
-    def set_session_pinned(self, session_id: str, pinned: bool) -> ChatSession | None:
+    def set_session_pinned(
+        self,
+        session_id: str,
+        pinned: bool,
+        user_id: str | None = None,
+    ) -> ChatSession | None:
+        if self.get_session(session_id, user_id=user_id) is None:
+            return None
         now = utc_now_iso()
         return self._sessions.set_session_pinned(
             session_id=session_id,
@@ -78,11 +103,17 @@ class ChatService:
             updated_at=now,
         )
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, user_id: str | None = None) -> bool:
+        if self.get_session(session_id, user_id=user_id) is None:
+            return False
         return self._sessions.delete_session(session_id)
 
-    def list_turns(self, session_id: str) -> list[ChatTurn] | None:
-        if self._sessions.get_session(session_id) is None:
+    def list_turns(
+        self,
+        session_id: str,
+        user_id: str | None = None,
+    ) -> list[ChatTurn] | None:
+        if self.get_session(session_id, user_id=user_id) is None:
             return None
         return self._sessions.list_turns(session_id)
 
@@ -120,6 +151,7 @@ class ChatService:
         self,
         question: str,
         session_id: str | None = None,
+        user_id: str = "legacy",
         *,
         router_model: str | None = None,
         router_provider: str | None = None,
@@ -132,6 +164,7 @@ class ChatService:
                 ChatWorkflowRequest(
                     question=question,
                     session_id=session_id,
+                    user_id=user_id,
                     router_model=router_model,
                     router_provider=router_provider,
                     answer_model=answer_model,
@@ -143,12 +176,14 @@ class ChatService:
         route_result = self.route_question(
             question,
             session_id=session_id,
+            user_id=user_id,
             router_model=router_model,
             router_provider=router_provider,
         )
         return self.answer_routed_question(
             question=question,
             session_id=route_result.session_id,
+            user_id=user_id,
             route_result=route_result,
             answer_model=answer_model,
             answer_provider=answer_provider,
@@ -159,12 +194,13 @@ class ChatService:
         self,
         question: str,
         session_id: str | None = None,
+        user_id: str = "legacy",
         *,
         router_model: str | None = None,
         router_provider: str | None = None,
     ) -> ChatRouteResult:
         total_timer = StageTimer()
-        session = self._get_or_create_session(session_id)
+        session = self._get_or_create_session(session_id, user_id=user_id)
         existing_turns = self._sessions.list_turns(session.session_id)
         attached_before = self._sessions.list_attached_documents(session.session_id)
         summaries = self._summaries.list_active_summaries()
@@ -211,6 +247,7 @@ class ChatService:
         self,
         question: str,
         session_id: str,
+        user_id: str = "legacy",
         route_result: ChatRouteResult | None = None,
         *,
         answer_model: str | None = None,
@@ -219,7 +256,7 @@ class ChatService:
         enable_deep_thinking: bool = False,
     ) -> ChatAnswer:
         total_timer = StageTimer()
-        session = self._get_or_create_session(session_id)
+        session = self._get_or_create_session(session_id, user_id=user_id)
         existing_turns = self._sessions.list_turns(session.session_id)
         attached_documents = self._sessions.list_attached_documents(session.session_id)
         documents_for_answer = self._resolve_documents_for_answer(
@@ -343,15 +380,18 @@ class ChatService:
             ]
         return self._attached_to_selected_documents(attached_documents)
 
-    def _get_or_create_session(self, session_id: str | None) -> ChatSession:
+    def _get_or_create_session(self, session_id: str | None, *, user_id: str) -> ChatSession:
         if session_id is None:
-            return self.create_session()
+            return self.create_session_for_user(user_id)
         session = self._sessions.get_session(session_id)
-        if session is not None:
+        if session is not None and session.user_id == user_id:
             return session
+        if session is not None:
+            raise AssetNotFoundError("chat session was not found")
         now = utc_now_iso()
         session = ChatSession(
             session_id=session_id,
+            user_id=user_id,
             created_at=now,
             updated_at=now,
         )

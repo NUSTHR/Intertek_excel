@@ -25,15 +25,17 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
             """
         ).fetchall()
 
-    assert [int(row["version"]) for row in rows] == [1, 2, 3, 4]
+    assert [int(row["version"]) for row in rows] == [1, 2, 3, 4, 5]
     assert rows[0]["name"] == "initial_excel_workspace_schema"
     assert rows[1]["name"] == "add_chat_session_metadata"
     assert rows[2]["name"] == "add_document_routing_summary_fields"
     assert rows[3]["name"] == "persist_chat_turn_snapshots_and_llm_preferences"
+    assert rows[4]["name"] == "add_authentication_and_session_ownership"
     assert rows[0]["checksum"]
     assert rows[1]["checksum"]
     assert rows[2]["checksum"]
     assert rows[3]["checksum"]
+    assert rows[4]["checksum"]
 
 
 def test_repository_configures_connections_for_long_running_use(tmp_path: Path) -> None:

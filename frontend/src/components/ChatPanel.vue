@@ -39,6 +39,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   answerReceived: [answer: ChatAnswer]
+  askingStateChanged: [isAsking: boolean]
   collapse: []
   selectCitation: [citation: ExcelCitation]
   selectDocument: [document: SelectedDocument]
@@ -157,6 +158,14 @@ watch(
     if (!supported) {
       enableDeepThinking.value = false
     }
+  },
+  { immediate: true },
+)
+
+watch(
+  isAsking,
+  (value) => {
+    emit('askingStateChanged', value)
   },
   { immediate: true },
 )

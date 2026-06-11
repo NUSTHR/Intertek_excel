@@ -5,6 +5,45 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class UserResponse(BaseModel):
+    user_id: str
+    email: str
+    role: str
+    created_at: str
+    last_login_at: str | None = None
+
+
+class AuthResponse(BaseModel):
+    user: UserResponse
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: str
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    password: str = Field(min_length=8, max_length=255)
+
+
+class LoginRequest(RegisterRequest):
+    pass
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+
+
+class PasswordResetResponse(BaseModel):
+    email: str
+    reset_token: str | None = None
+    expires_at: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=12, max_length=255)
+    new_password: str = Field(min_length=8, max_length=255)
+
+
 class HealthResponse(BaseModel):
     status: str
 
@@ -240,6 +279,7 @@ class GenerateDocumentSummaryRequest(BaseModel):
 
 class ChatSessionResponse(BaseModel):
     session_id: str
+    user_id: str
     created_at: str
     updated_at: str
     title: str

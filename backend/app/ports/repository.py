@@ -2,6 +2,7 @@ from typing import Protocol
 
 from app.domain.models import (
     AttachedDocument,
+    AuthSession,
     ChatSession,
     ChatTurn,
     DocumentSummary,
@@ -12,6 +13,8 @@ from app.domain.models import (
     ExcelSheet,
     ExcelVersionStatus,
     LlmPreference,
+    PasswordResetToken,
+    UserAccount,
 )
 
 
@@ -156,4 +159,57 @@ class ChatSessionRepository(Protocol):
         ...
 
     def save_llm_preference(self, preference: LlmPreference) -> LlmPreference:
+        ...
+
+
+class AuthRepository(Protocol):
+    def initialize(self) -> None:
+        ...
+
+    def create_user(self, user: UserAccount) -> None:
+        ...
+
+    def get_user(self, user_id: str) -> UserAccount | None:
+        ...
+
+    def get_user_by_email(self, email: str) -> UserAccount | None:
+        ...
+
+    def update_user_password(
+        self,
+        user_id: str,
+        password_hash: str,
+        updated_at: str,
+    ) -> UserAccount | None:
+        ...
+
+    def record_user_login(self, user_id: str, last_login_at: str) -> None:
+        ...
+
+    def create_auth_session(self, session: AuthSession) -> None:
+        ...
+
+    def get_auth_session_by_token_hash(
+        self,
+        token_hash: str,
+    ) -> tuple[AuthSession, UserAccount] | None:
+        ...
+
+    def revoke_auth_session(self, token_hash: str, revoked_at: str) -> bool:
+        ...
+
+    def create_password_reset_token(self, token: PasswordResetToken) -> None:
+        ...
+
+    def get_password_reset_token_by_hash(
+        self,
+        token_hash: str,
+    ) -> tuple[PasswordResetToken, UserAccount] | None:
+        ...
+
+    def mark_password_reset_token_used(
+        self,
+        reset_token_id: str,
+        used_at: str,
+    ) -> None:
         ...
