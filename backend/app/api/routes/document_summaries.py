@@ -57,6 +57,7 @@ def update_document_summary(
     return _to_summary_response(
         service.update_summary(
             version_id,
+            document_title=request.document_title,
             summary_text=request.summary_text,
             business_domain=request.business_domain,
             key_topics=request.key_topics,

@@ -23,6 +23,7 @@ const emit = defineEmits<{
 const isEditing = ref(false)
 const isAddingTag = ref(false)
 const isSavePending = ref(false)
+const draftDocumentTitle = ref('')
 const draftSummaryText = ref('')
 const draftBusinessDomain = ref('')
 const draftKeyTopicsText = ref('')
@@ -36,6 +37,11 @@ const newTagInput = ref<HTMLInputElement | null>(null)
 const primaryTags = computed(() => props.summary?.key_topics ?? [])
 
 const isSavingSummary = computed(() => props.isSaving || isSavePending.value)
+
+const summaryTitle = computed(() => {
+  const value = props.summary?.document_title || props.summary?.business_domain || ''
+  return truncateMiddle(value, 52)
+})
 
 const summaryText = computed(() => props.summary?.summary_text.trim() ?? '')
 
@@ -104,6 +110,7 @@ watch(isEditing, (editing) => {
 function resetDraft(): void {
   const summary = props.summary
   if (!summary) {
+    draftDocumentTitle.value = ''
     draftSummaryText.value = ''
     draftBusinessDomain.value = ''
     draftKeyTopicsText.value = ''
@@ -113,6 +120,7 @@ function resetDraft(): void {
     draftSheetSummaries.value = []
     return
   }
+  draftDocumentTitle.value = summary.document_title
   draftSummaryText.value = summary.summary_text
   draftBusinessDomain.value = summary.business_domain
   draftKeyTopicsText.value = summary.key_topics.join('\n')
@@ -148,6 +156,7 @@ function saveDraft(): void {
   }
   requestSave(
     {
+      document_title: draftDocumentTitle.value,
       summary_text: draftSummaryText.value,
       business_domain: draftBusinessDomain.value,
       key_topics: parseLines(draftKeyTopicsText.value),
@@ -244,6 +253,15 @@ function cleanTag(value: string): string {
   return value.replace(/^#+/, '').replace(/\s+/g, ' ').trim()
 }
 
+function truncateMiddle(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLength) {
+    return normalized
+  }
+  const edgeLength = Math.floor((maxLength - 1) / 2)
+  return `${normalized.slice(0, edgeLength)}…${normalized.slice(-edgeLength)}`
+}
+
 function isSameText(first: string, second: string): boolean {
   return first.localeCompare(second, undefined, { sensitivity: 'accent' }) === 0
 }
@@ -256,7 +274,9 @@ function isSameText(first: string, second: string): boolean {
         <span class="summary-icon"><AppIcon name="auto_awesome" /></span>
         <div>
           <h3>AI Executive Summary</h3>
-          <p v-if="summary">{{ summary.document_title || summary.business_domain }}</p>
+          <p v-if="summary" :title="summary.document_title || summary.business_domain">
+            {{ summaryTitle }}
+          </p>
         </div>
       </div>
       <div class="summary-head-actions">
@@ -413,6 +433,10 @@ function isSameText(first: string, second: string): boolean {
     </div>
 
     <form v-else-if="summary && isEditing" class="summary-edit-layout" @submit.prevent="saveDraft">
+      <label class="summary-field full">
+        <span>File Name</span>
+        <input v-model="draftDocumentTitle" type="text" required maxlength="255" />
+      </label>
       <label class="summary-field full">
         <span>Summary</span>
         <textarea v-model="draftSummaryText" rows="7" required></textarea>

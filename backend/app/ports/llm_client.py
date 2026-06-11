@@ -41,5 +41,6 @@ class LlmClient(Protocol):
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        enable_deep_thinking: bool = False,
     ) -> DraftChatAnswer:
         ...

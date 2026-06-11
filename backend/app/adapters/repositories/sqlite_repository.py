@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -290,9 +291,16 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
 )
 
 
+SQLITE_CONNECTION_TIMEOUT_SECONDS = 30.0
+SQLITE_BUSY_TIMEOUT_MS = 30000
+SQLITE_WAL_AUTOCHECKPOINT_PAGES = 1000
+SQLITE_MAINTENANCE_INTERVAL_SECONDS = 300.0
+
+
 class SQLiteExcelAssetRepository:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
+        self._last_maintenance_at = 0.0
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1114,10 +1122,34 @@ class SQLiteExcelAssetRepository:
         return saved
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._database_path)
+        connection = sqlite3.connect(
+            self._database_path,
+            timeout=SQLITE_CONNECTION_TIMEOUT_SECONDS,
+        )
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
+        self._configure_connection(connection)
+        self._maybe_run_connection_maintenance(connection)
         return connection
+
+    def _configure_connection(self, connection: sqlite3.Connection) -> None:
+        connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute(
+            f"PRAGMA wal_autocheckpoint = {SQLITE_WAL_AUTOCHECKPOINT_PAGES}"
+        )
+
+    def _maybe_run_connection_maintenance(self, connection: sqlite3.Connection) -> None:
+        now = time.monotonic()
+        if now - self._last_maintenance_at < SQLITE_MAINTENANCE_INTERVAL_SECONDS:
+            return
+        self._run_connection_maintenance(connection)
+        self._last_maintenance_at = now
+
+    def _run_connection_maintenance(self, connection: sqlite3.Connection) -> None:
+        connection.execute("PRAGMA optimize")
+        connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     def _to_file(self, row: sqlite3.Row | None) -> ExcelFile | None:
         if row is None:
@@ -1337,6 +1369,7 @@ class SQLiteExcelAssetRepository:
             {
                 "text": block.text,
                 "citation_ids": block.citation_ids,
+                "reasoning": block.reasoning,
             }
             for block in blocks
         ]
@@ -1355,6 +1388,7 @@ class SQLiteExcelAssetRepository:
                 ]
                 if isinstance(block.get("citation_ids", []), list)
                 else [],
+                reasoning=str(block.get("reasoning", "") or ""),
             )
             for block in payload
             if str(block.get("text", "")).strip()

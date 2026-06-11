@@ -5,6 +5,7 @@ export interface ChatRequest {
   router_provider?: string | null
   answer_model?: string | null
   answer_provider?: string | null
+  enable_deep_thinking?: boolean
 }
 
 export interface ChatSession {
@@ -68,6 +69,7 @@ export interface ChatStageTiming {
 export interface ChatAnswerBlock {
   text: string
   citation_ids: string[]
+  reasoning?: string
 }
 
 export interface ChatAnswer {
@@ -100,4 +102,5 @@ export interface ChatModelSelection {
   routerModel: string
   answerProvider: string
   answerModel: string
+  enableDeepThinking?: boolean
 }

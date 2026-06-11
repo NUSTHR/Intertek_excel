@@ -109,17 +109,134 @@
   white-space: normal;
 }
 
-.loading-message {
+.user-message-stack {
   display: grid;
+  justify-items: end;
+  gap: 6px;
+  max-width: 85%;
+}
+
+.user-message-stack .user-bubble {
+  max-width: 100%;
+}
+
+.message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.user-actions {
+  justify-content: flex-end;
+}
+
+.assistant-actions {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.message-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  padding: 4px 8px;
+  color: #64748b;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 16px;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.message-action-button:hover:not(:disabled) {
+  color: #0f172a;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.message-action-button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.message-action-button .app-icon {
+  font-size: 14px;
+}
+
+.thinking-details {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-bottom: 12px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.thinking-details summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 10px;
+  color: #475569;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  list-style: none;
+}
+
+.thinking-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-details summary::after {
+  margin-left: auto;
+  color: #94a3b8;
+  content: "Show";
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.thinking-details[open] summary {
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.thinking-details[open] summary::after {
+  content: "Hide";
+}
+
+.thinking-details summary .app-icon {
+  color: #047857;
+  font-size: 16px;
+}
+
+.thinking-markdown {
+  padding: 10px 12px 12px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.loading-message {
+  display: flex;
+  align-items: center;
   gap: 12px;
   min-width: min(230px, 100%);
+  overflow: hidden;
 }
 
 .loading-dots {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 5px;
-  width: max-content;
+  gap: 4px;
+  min-width: 30px;
 }
 
 .loading-dots span {
@@ -127,7 +244,7 @@
   height: 7px;
   border-radius: 999px;
   background: #94a3b8;
-  animation: chat-loading-dot 1.2s ease-in-out infinite;
+  animation: thinking-dot-pulse 1.15s ease-in-out infinite;
 }
 
 .loading-dots span:nth-child(2) {
@@ -138,47 +255,76 @@
   animation-delay: 280ms;
 }
 
-.loading-lines {
+.thinking-copy {
   display: grid;
-  gap: 8px;
+  gap: 2px;
+  min-width: 0;
 }
 
-.loading-lines span {
-  height: 9px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #f1f5f9 0%, #e2e8f0 45%, #f1f5f9 90%);
-  background-size: 220% 100%;
-  animation: chat-loading-line 1.4s ease-in-out infinite;
+.thinking-copy strong,
+.thinking-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.loading-lines span:first-child {
-  width: 190px;
+.thinking-copy strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 18px;
 }
 
-.loading-lines span:last-child {
-  width: 135px;
+.thinking-copy span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
 }
 
-@keyframes chat-loading-dot {
+.chat-tool-button.thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: auto;
+  min-width: 112px;
+  height: 36px;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chat-tool-button.thinking-toggle .app-icon,
+.chat-tool-button.thinking-toggle span {
+  color: currentColor;
+}
+
+.chat-tool-button.thinking-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.chat-tool-button.thinking-toggle.unavailable {
+  color: #94a3b8;
+}
+
+.chat-tool-button.thinking-toggle.active {
+  color: #047857;
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+}
+
+@keyframes thinking-dot-pulse {
   0%,
-  80%,
   100% {
     opacity: 0.35;
     transform: translateY(0);
   }
 
-  40% {
+  50% {
     opacity: 1;
     transform: translateY(-3px);
-  }
-}
-
-@keyframes chat-loading-line {
-  0% {
-    background-position: 220% 0;
-  }
-
-  100% {
-    background-position: -220% 0;
   }
 }

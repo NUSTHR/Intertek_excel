@@ -39,6 +39,7 @@ export interface SheetSummaryUpdate {
 }
 
 export interface DocumentSummaryUpdate {
+  document_title?: string
   summary_text?: string
   business_domain?: string
   key_topics?: string[]

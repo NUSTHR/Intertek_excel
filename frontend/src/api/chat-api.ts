@@ -7,50 +7,46 @@ import type {
   ChatTurn,
   ChatTurnListResponse,
 } from '../types/chat'
+import { requestEmpty, requestJson } from './errors'
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
 const requestTimeoutMs = Number(import.meta.env.VITE_EXCEL_WORKSPACE_CHAT_TIMEOUT_MS ?? 180000)
 
-interface ChatErrorPayload {
-  detail?: string
+const requestOptions = {
+  apiBaseUrl,
+  timeoutMs: requestTimeoutMs,
+  timeoutMessage: 'Chat request timed out while waiting for the model.',
 }
 
 export async function createChatSession(): Promise<ChatSession> {
-  const response = await fetch(`${apiBaseUrl}/api/excel/chat/sessions`, {
-    method: 'POST',
-  })
-  if (!response.ok) {
-    const payload = await parseErrorPayload(response)
-    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-  }
-  return (await response.json()) as ChatSession
+  return requestJson<ChatSession>(
+    '/api/excel/chat/sessions',
+    { method: 'POST' },
+    requestOptions,
+  )
 }
 
 export async function listChatSessions(): Promise<ChatSession[]> {
-  const response = await fetch(`${apiBaseUrl}/api/excel/chat/sessions`)
-  if (!response.ok) {
-    const payload = await parseErrorPayload(response)
-    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-  }
-  const payload = (await response.json()) as ChatSessionListResponse
+  const payload = await requestJson<ChatSessionListResponse>(
+    '/api/excel/chat/sessions',
+    { method: 'GET' },
+    requestOptions,
+  )
   return payload.sessions
 }
 
 export async function listChatSessionTurns(sessionId: string): Promise<ChatTurn[]> {
-  const response = await fetch(
-    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/turns`,
+  const payload = await requestJson<ChatTurnListResponse>(
+    `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/turns`,
+    { method: 'GET' },
+    requestOptions,
   )
-  if (!response.ok) {
-    const payload = await parseErrorPayload(response)
-    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-  }
-  const payload = (await response.json()) as ChatTurnListResponse
   return payload.turns
 }
 
 export async function renameChatSession(sessionId: string, title: string): Promise<ChatSession> {
-  const response = await fetch(
-    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}`,
+  return requestJson<ChatSession>(
+    `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}`,
     {
       method: 'PATCH',
       headers: {
@@ -58,20 +54,16 @@ export async function renameChatSession(sessionId: string, title: string): Promi
       },
       body: JSON.stringify({ title }),
     },
+    requestOptions,
   )
-  if (!response.ok) {
-    const payload = await parseErrorPayload(response)
-    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-  }
-  return (await response.json()) as ChatSession
 }
 
 export async function setChatSessionPinned(
   sessionId: string,
   pinned: boolean,
 ): Promise<ChatSession> {
-  const response = await fetch(
-    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/pin`,
+  return requestJson<ChatSession>(
+    `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/pin`,
     {
       method: 'PATCH',
       headers: {
@@ -79,25 +71,18 @@ export async function setChatSessionPinned(
       },
       body: JSON.stringify({ pinned }),
     },
+    requestOptions,
   )
-  if (!response.ok) {
-    const payload = await parseErrorPayload(response)
-    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-  }
-  return (await response.json()) as ChatSession
 }
 
 export async function deleteChatSession(sessionId: string): Promise<void> {
-  const response = await fetch(
-    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}`,
+  return requestEmpty(
+    `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}`,
     {
       method: 'DELETE',
     },
+    requestOptions,
   )
-  if (!response.ok) {
-    const payload = await parseErrorPayload(response)
-    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-  }
 }
 
 export async function askExcelQuestion(
@@ -105,13 +90,12 @@ export async function askExcelQuestion(
   sessionId: string | null = null,
   modelSelection: ChatModelSelection | null = null,
 ): Promise<ChatAnswer> {
-  const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs)
   const path = sessionId
     ? `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/messages`
     : '/api/excel/chat'
-  try {
-    const response = await fetch(`${apiBaseUrl}${path}`, {
+  return requestJson<ChatAnswer>(
+    path,
+    {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -123,25 +107,11 @@ export async function askExcelQuestion(
         router_provider: modelSelection?.routerProvider ?? null,
         answer_model: modelSelection?.answerModel ?? null,
         answer_provider: modelSelection?.answerProvider ?? null,
+        enable_deep_thinking: modelSelection?.enableDeepThinking ?? false,
       }),
-      signal: controller.signal,
-    })
-    if (!response.ok) {
-      const payload = await parseErrorPayload(response)
-      throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-    }
-    return (await response.json()) as ChatAnswer
-  } catch (error: unknown) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error('Chat request timed out while waiting for the model.')
-    }
-    if (error instanceof Error) {
-      throw error
-    }
-    throw new Error('Unexpected chat request error.')
-  } finally {
-    window.clearTimeout(timeoutId)
-  }
+    },
+    requestOptions,
+  )
 }
 
 export async function routeExcelQuestion(
@@ -150,8 +120,8 @@ export async function routeExcelQuestion(
   routerModel: string | null = null,
   routerProvider: string | null = null,
 ): Promise<ChatRouteResult> {
-  const response = await fetch(
-    `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/route`,
+  return requestJson<ChatRouteResult>(
+    `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/route`,
     {
       method: 'POST',
       headers: {
@@ -164,12 +134,8 @@ export async function routeExcelQuestion(
         router_provider: routerProvider,
       }),
     },
+    requestOptions,
   )
-  if (!response.ok) {
-    const payload = await parseErrorPayload(response)
-    throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-  }
-  return (await response.json()) as ChatRouteResult
 }
 
 export async function answerRoutedExcelQuestion(
@@ -178,52 +144,23 @@ export async function answerRoutedExcelQuestion(
   answerModel: string | null = null,
   answerProvider: string | null = null,
   selectedVersionIds: string[] = [],
+  enableDeepThinking = false,
 ): Promise<ChatAnswer> {
-  const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs)
-  try {
-    const response = await fetch(
-      `${apiBaseUrl}/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/answer`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          question,
-          answer_model: answerModel,
-          answer_provider: answerProvider,
-          selected_version_ids: selectedVersionIds,
-        }),
-        signal: controller.signal,
+  return requestJson<ChatAnswer>(
+    `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/answer`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
-    )
-    if (!response.ok) {
-      const payload = await parseErrorPayload(response)
-      throw new Error(payload.detail || `Request failed with status ${response.status}.`)
-    }
-    return (await response.json()) as ChatAnswer
-  } catch (error: unknown) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error('Chat request timed out while waiting for the model.')
-    }
-    if (error instanceof Error) {
-      throw error
-    }
-    throw new Error('Unexpected chat request error.')
-  } finally {
-    window.clearTimeout(timeoutId)
-  }
-}
-
-async function parseErrorPayload(response: Response): Promise<ChatErrorPayload> {
-  const text = await response.text()
-  if (!text) {
-    return {}
-  }
-  try {
-    return JSON.parse(text) as ChatErrorPayload
-  } catch {
-    return { detail: text }
-  }
+      body: JSON.stringify({
+        question,
+        answer_model: answerModel,
+        answer_provider: answerProvider,
+        selected_version_ids: selectedVersionIds,
+        enable_deep_thinking: enableDeepThinking,
+      }),
+    },
+    requestOptions,
+  )
 }

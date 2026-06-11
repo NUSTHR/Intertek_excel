@@ -11,6 +11,7 @@ export interface LlmProviderOption {
   provider: string
   label: string
   models: string[]
+  deep_thinking_models: string[]
 }
 
 export interface LlmModelOptionsResponse {

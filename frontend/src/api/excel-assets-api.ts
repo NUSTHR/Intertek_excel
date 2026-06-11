@@ -14,84 +14,17 @@ import type {
   UploadExcelResponse,
   WorkbookProfile,
 } from '../types/excel-assets'
-
-interface ErrorPayload {
-  detail?: string
-  requires_confirmation?: boolean
-}
-
-export class ExcelWorkspaceApiError extends Error {
-  readonly statusCode: number | null
-  readonly requiresConfirmation: boolean
-
-  constructor(
-    message: string,
-    statusCode: number | null = null,
-    requiresConfirmation = false,
-  ) {
-    super(message)
-    this.name = 'ExcelWorkspaceApiError'
-    this.statusCode = statusCode
-    this.requiresConfirmation = requiresConfirmation
-  }
-}
+export { ExcelWorkspaceApiError } from './errors'
+import { requestJson } from './errors'
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
 const requestTimeoutMs = Number(
   import.meta.env.VITE_EXCEL_WORKSPACE_REQUEST_TIMEOUT_MS ?? 30000,
 )
 
-function createTimeoutSignal(): {
-  signal: AbortSignal
-  dispose: () => void
-} {
-  const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs)
-  return {
-    signal: controller.signal,
-    dispose: () => window.clearTimeout(timeoutId),
-  }
-}
-
-async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
-  const timeout = createTimeoutSignal()
-  try {
-    const response = await fetch(`${apiBaseUrl}${path}`, {
-      ...init,
-      signal: timeout.signal,
-    })
-    if (!response.ok) {
-      const payload = await parseErrorPayload(response)
-      throw new ExcelWorkspaceApiError(
-        payload.detail || `Request failed with status ${response.status}.`,
-        response.status,
-        payload.requires_confirmation === true,
-      )
-    }
-    return (await response.json()) as T
-  } catch (error: unknown) {
-    if (error instanceof ExcelWorkspaceApiError) {
-      throw error
-    }
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new ExcelWorkspaceApiError('Request timed out.')
-    }
-    throw new ExcelWorkspaceApiError('Network error. Check whether the Excel backend is running.')
-  } finally {
-    timeout.dispose()
-  }
-}
-
-async function parseErrorPayload(response: Response): Promise<ErrorPayload> {
-  const text = await response.text()
-  if (!text) {
-    return {}
-  }
-  try {
-    return JSON.parse(text) as ErrorPayload
-  } catch {
-    return { detail: text }
-  }
+const requestOptions = {
+  apiBaseUrl,
+  timeoutMs: requestTimeoutMs,
 }
 
 export async function uploadExcelFile(
@@ -101,16 +34,22 @@ export async function uploadExcelFile(
   const formData = new FormData()
   formData.append('file', file)
   formData.append('replace_existing', String(replaceExisting))
-  return requestJson<UploadExcelResponse>('/api/excel/files', {
-    method: 'POST',
-    body: formData,
-  })
+  return requestJson<UploadExcelResponse>(
+    '/api/excel/files',
+    {
+      method: 'POST',
+      body: formData,
+    },
+    requestOptions,
+  )
 }
 
 export async function listExcelFiles(): Promise<ExcelFile[]> {
-  const response = await requestJson<ListExcelFilesResponse>('/api/excel/files', {
-    method: 'GET',
-  })
+  const response = await requestJson<ListExcelFilesResponse>(
+    '/api/excel/files',
+    { method: 'GET' },
+    requestOptions,
+  )
   return response.files
 }
 
@@ -118,13 +57,17 @@ export async function renameExcelFile(
   fileId: string,
   displayName: string,
 ): Promise<ExcelFile> {
-  return requestJson<ExcelFile>(`/api/excel/files/${fileId}`, {
-    method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
+  return requestJson<ExcelFile>(
+    `/api/excel/files/${fileId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ display_name: displayName }),
     },
-    body: JSON.stringify({ display_name: displayName }),
-  })
+    requestOptions,
+  )
 }
 
 export async function deleteExcelFile(
@@ -139,6 +82,7 @@ export async function deleteExcelFile(
     {
       method: 'DELETE',
     },
+    requestOptions,
   )
 }
 
@@ -148,14 +92,17 @@ export async function listExcelVersions(fileId: string): Promise<ExcelFileVersio
     {
       method: 'GET',
     },
+    requestOptions,
   )
   return response.versions
 }
 
 export async function getActiveExcelFile(fileId: string): Promise<ActiveExcelFileResponse> {
-  return requestJson<ActiveExcelFileResponse>(`/api/excel/files/${fileId}/active`, {
-    method: 'GET',
-  })
+  return requestJson<ActiveExcelFileResponse>(
+    `/api/excel/files/${fileId}/active`,
+    { method: 'GET' },
+    requestOptions,
+  )
 }
 
 export async function listExcelSheets(versionId: string): Promise<ExcelSheet[]> {
@@ -164,14 +111,17 @@ export async function listExcelSheets(versionId: string): Promise<ExcelSheet[]> 
     {
       method: 'GET',
     },
+    requestOptions,
   )
   return response.sheets
 }
 
 export async function getExcelVersionProfile(versionId: string): Promise<WorkbookProfile> {
-  return requestJson<WorkbookProfile>(`/api/excel/versions/${versionId}/profile`, {
-    method: 'GET',
-  })
+  return requestJson<WorkbookProfile>(
+    `/api/excel/versions/${versionId}/profile`,
+    { method: 'GET' },
+    requestOptions,
+  )
 }
 
 export async function listExcelArtifacts(versionId: string): Promise<ListExcelArtifactsResponse> {
@@ -180,6 +130,7 @@ export async function listExcelArtifacts(versionId: string): Promise<ListExcelAr
     {
       method: 'GET',
     },
+    requestOptions,
   )
 }
 
@@ -197,6 +148,7 @@ export async function previewExcelSheet(
     {
       method: 'GET',
     },
+    requestOptions,
   )
 }
 
@@ -214,6 +166,7 @@ export async function listExcelSheetRows(
     {
       method: 'GET',
     },
+    requestOptions,
   )
 }
 
@@ -223,8 +176,7 @@ export async function lookupExcelRow(
 ): Promise<RowLookupResponse> {
   return requestJson<RowLookupResponse>(
     `/api/excel/sheets/${sheetId}/rows/${encodeURIComponent(rowId)}`,
-    {
-      method: 'GET',
-    },
+    { method: 'GET' },
+    requestOptions,
   )
 }

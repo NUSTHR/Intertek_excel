@@ -121,8 +121,9 @@ class FakeLlmClient:
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        enable_deep_thinking: bool = False,
     ) -> DraftChatAnswer:
-        _ = previous_turns, model, provider
+        _ = previous_turns, model, provider, enable_deep_thinking
         cited_evidence_ids = [str(row["evidence_id"]) for row in rows[:3]]
         selected_count = len(documents)
         row_count = len(rows)

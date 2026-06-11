@@ -522,23 +522,50 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  padding: 12px 32px 0;
+  padding: 16px 32px 4px;
 }
 
 .status-note,
 .error-note {
   margin: 0;
+  border: 1px solid transparent;
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 9px 11px;
   font-size: 13px;
+  font-weight: 800;
+  line-height: 18px;
 }
 
 .status-note {
-  color: var(--secondary);
-  background: var(--secondary-soft);
+  color: var(--text);
+  background: var(--surface);
 }
 
 .error-note {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.tone-success {
+  border-color: #bbf7d0;
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.tone-info {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.tone-warning {
+  border-color: #fde68a;
+  color: #92400e;
+  background: #fffbeb;
+}
+
+.tone-error {
+  border-color: #fecaca;
   color: var(--danger);
   background: var(--danger-soft);
 }
@@ -1061,6 +1088,7 @@ label > span {
   font-size: 13px;
 }
 
+.session-feedback,
 .session-error {
   margin: 8px 0 0;
 }
@@ -3710,22 +3738,6 @@ label > span {
 
 .file-insight-pane.fullscreen .file-preview-panel .preview-card {
   min-height: 460px;
-}
-
-.app-toast {
-  position: fixed;
-  right: 32px;
-  bottom: 104px;
-  z-index: 80;
-  max-width: 320px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 14px;
-  color: var(--text);
-  background: var(--surface);
-  box-shadow: 0 18px 40px rgb(15 23 42 / 0.18);
-  font-size: 13px;
-  font-weight: 800;
 }
 
 .dialog-backdrop {

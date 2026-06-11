@@ -1,14 +1,10 @@
 import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
+import { requestJson } from './errors'
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
 
 async function requestSummary(path: string, init: RequestInit): Promise<DocumentSummary> {
-  const response = await fetch(`${apiBaseUrl}${path}`, init)
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(text || `Request failed with status ${response.status}.`)
-  }
-  return (await response.json()) as DocumentSummary
+  return requestJson<DocumentSummary>(path, init, { apiBaseUrl })
 }
 
 export async function generateDocumentSummary(

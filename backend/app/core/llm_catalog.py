@@ -50,17 +50,12 @@ DEFAULT_DEEPSEEK_SUMMARY_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_ROUTER_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_ANSWER_MODEL = "deepseek-v4-pro"
 
-# SiliconFlow's public docs explicitly mention enable_thinking for Qwen3
-# families and DeepSeek-V3.2. For Pro/* variants we avoid the parameter and
-# let the request proceed without a thinking toggle.
-ENABLE_THINKING_FALSE_EXACT_MODELS: frozenset[str] = frozenset(
-    {
-        "deepseek-ai/DeepSeek-V3.2",
-    }
-)
-ENABLE_THINKING_FALSE_PREFIXES: tuple[str, ...] = (
-    "Qwen/Qwen3",
-)
+DEEP_THINKING_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
+    SILICONFLOW_PROVIDER: (
+        "Pro/deepseek-ai/DeepSeek-V3.2",
+    ),
+    DEEPSEEK_PROVIDER: DEEPSEEK_OFFICIAL_LLM_MODELS,
+}
 
 
 def is_supported_llm_model(model: str) -> bool:
@@ -82,10 +77,15 @@ def normalize_llm_provider(provider: str) -> str:
     return provider.strip().lower()
 
 
-def supports_enable_thinking_false(model: str) -> bool:
-    if model in ENABLE_THINKING_FALSE_EXACT_MODELS:
-        return True
-    return any(model.startswith(prefix) for prefix in ENABLE_THINKING_FALSE_PREFIXES)
+def supports_deep_thinking(provider: str, model: str) -> bool:
+    return model in DEEP_THINKING_MODELS_BY_PROVIDER.get(
+        normalize_llm_provider(provider),
+        (),
+    )
+
+
+def list_deep_thinking_models(provider: str) -> list[str]:
+    return list(DEEP_THINKING_MODELS_BY_PROVIDER.get(normalize_llm_provider(provider), ()))
 
 
 def list_supported_llm_models(provider: str | None = None) -> list[str]:
@@ -100,6 +100,7 @@ def list_supported_llm_provider_options() -> list[dict[str, object]]:
             "provider": provider,
             "label": LLM_PROVIDER_LABELS[provider],
             "models": list(SUPPORTED_LLM_MODELS_BY_PROVIDER[provider]),
+            "deep_thinking_models": list_deep_thinking_models(provider),
         }
         for provider in SUPPORTED_LLM_PROVIDERS
     ]

@@ -15,7 +15,7 @@ from app.core.llm_catalog import (
     is_supported_llm_model_for_provider,
     is_supported_llm_provider,
     normalize_llm_provider,
-    supports_enable_thinking_false,
+    supports_deep_thinking,
 )
 from app.core.time import utc_now_iso
 from app.domain.models import (
@@ -431,6 +431,7 @@ class MultiProviderLlmClient:
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        enable_deep_thinking: bool = False,
     ) -> DraftChatAnswer:
         provider_config, resolved_model = self._resolve_request(
             provider=provider,
@@ -450,10 +451,11 @@ class MultiProviderLlmClient:
             len(previous_turns or []),
             [document.version_id for document in documents],
         )
-        payload = self._chat_json(
+        payload, reasoning_content = self._chat_json_with_reasoning(
             stage="answer_model",
             provider_config=provider_config,
             model=resolved_model,
+            enable_deep_thinking=enable_deep_thinking,
             messages=[
                 {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
                 *self._history_messages(previous_turns or []),
@@ -501,17 +503,19 @@ class MultiProviderLlmClient:
                 },
             ],
         )
+        answer_blocks = [
+            DraftAnswerBlock(
+                text=str(block.get("text", "")).strip(),
+                evidence_ids=self._string_list(
+                    block.get("evidence_ids", block.get("evidence_row_ids"))
+                ),
+                reasoning=reasoning_content if index == 0 else "",
+            )
+            for index, block in enumerate(self._object_list(payload.get("answer_blocks")))
+            if str(block.get("text", "")).strip()
+        ]
         return DraftChatAnswer(
-            answer_blocks=[
-                DraftAnswerBlock(
-                    text=str(block.get("text", "")).strip(),
-                    evidence_ids=self._string_list(
-                        block.get("evidence_ids", block.get("evidence_row_ids"))
-                    ),
-                )
-                for block in self._object_list(payload.get("answer_blocks"))
-                if str(block.get("text", "")).strip()
-            ],
+            answer_blocks=answer_blocks,
             citations=[
                 DraftCitation(
                     evidence_id=str(citation.get("evidence_id", "")).strip(),
@@ -532,6 +536,28 @@ class MultiProviderLlmClient:
             follow_up_suggestions=self._string_list(payload.get("follow_up_suggestions")),
         )
 
+    def _chat_json_with_reasoning(
+        self,
+        *,
+        stage: str,
+        provider_config: LlmProviderConfig,
+        model: str,
+        system_prompt: str | None = None,
+        user_prompt: str | None = None,
+        messages: list[dict[str, str]] | None = None,
+        enable_deep_thinking: bool = False,
+    ) -> tuple[dict[str, Any], str]:
+        content, reasoning_content = self._chat_message_parts(
+            stage=stage,
+            provider_config=provider_config,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            messages=messages,
+            enable_deep_thinking=enable_deep_thinking,
+        )
+        return self._parse_json_object(content), reasoning_content
+
     def _chat_json(
         self,
         *,
@@ -541,14 +567,16 @@ class MultiProviderLlmClient:
         system_prompt: str | None = None,
         user_prompt: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        enable_deep_thinking: bool = False,
     ) -> dict[str, Any]:
-        content = self._chat_text(
+        content, _reasoning_content = self._chat_message_parts(
             stage=stage,
             provider_config=provider_config,
             model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             messages=messages,
+            enable_deep_thinking=enable_deep_thinking,
         )
         return self._parse_json_object(content)
 
@@ -561,7 +589,30 @@ class MultiProviderLlmClient:
         system_prompt: str | None = None,
         user_prompt: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        enable_deep_thinking: bool = False,
     ) -> str:
+        content, _reasoning_content = self._chat_message_parts(
+            stage=stage,
+            provider_config=provider_config,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            messages=messages,
+            enable_deep_thinking=enable_deep_thinking,
+        )
+        return content
+
+    def _chat_message_parts(
+        self,
+        *,
+        stage: str,
+        provider_config: LlmProviderConfig,
+        model: str,
+        system_prompt: str | None = None,
+        user_prompt: str | None = None,
+        messages: list[dict[str, str]] | None = None,
+        enable_deep_thinking: bool = False,
+    ) -> tuple[str, str]:
         if not provider_config.api_key.strip():
             raise ExcelWorkspaceError(f"{provider_config.label} API key is required for LLM calls")
 
@@ -578,7 +629,11 @@ class MultiProviderLlmClient:
         max_tokens = self._max_tokens_for_stage(stage)
         if max_tokens is not None:
             request_payload["max_tokens"] = max_tokens
-        provider_options = self._provider_request_options(provider_config.provider, model)
+        provider_options = self._provider_request_options(
+            provider_config.provider,
+            model,
+            enable_deep_thinking=enable_deep_thinking,
+        )
         request_payload.update(provider_options)
         logger.debug(
             "sending llm request stage=%s provider=%s model=%s url=%s request_keys=%s",
@@ -638,7 +693,11 @@ class MultiProviderLlmClient:
         )
         payload = response.json()
         try:
-            return str(payload["choices"][0]["message"]["content"])
+            message = payload["choices"][0]["message"]
+            return (
+                str(message["content"]),
+                str(message.get("reasoning_content") or "").strip(),
+            )
         except (KeyError, IndexError, TypeError) as exc:
             raise ExcelWorkspaceError("LLM response did not include message content") from exc
 
@@ -891,14 +950,24 @@ class MultiProviderLlmClient:
             return provider_config.answer_model
         raise ExcelWorkspaceError(f"unknown LLM stage '{stage}'")
 
-    def _provider_request_options(self, provider: str, model: str) -> dict[str, Any]:
-        if provider == SILICONFLOW_PROVIDER and supports_enable_thinking_false(model):
-            return {"enable_thinking": False}
+    def _provider_request_options(
+        self,
+        provider: str,
+        model: str,
+        *,
+        enable_deep_thinking: bool = False,
+    ) -> dict[str, Any]:
+        if provider == SILICONFLOW_PROVIDER and supports_deep_thinking(provider, model):
+            return {"enable_thinking": bool(enable_deep_thinking)}
         if provider == DEEPSEEK_PROVIDER:
-            return {
-                "response_format": {"type": "json_object"},
-                "thinking": {"type": "disabled"},
-            }
+            options: dict[str, Any] = {"response_format": {"type": "json_object"}}
+            if supports_deep_thinking(provider, model):
+                if enable_deep_thinking:
+                    options["thinking"] = {"type": "enabled"}
+                    options["reasoning_effort"] = "high"
+                else:
+                    options["thinking"] = {"type": "disabled"}
+            return options
         return {}
 
     def _temperature_for_stage(self, stage: str) -> float:

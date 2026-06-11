@@ -63,5 +63,6 @@ class LangGraphChatWorkflow:
             route_result=route_result,
             answer_model=request.answer_model,
             answer_provider=request.answer_provider,
+            enable_deep_thinking=request.enable_deep_thinking,
         )
         return {"answer": answer}

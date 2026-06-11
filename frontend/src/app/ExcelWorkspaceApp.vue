@@ -52,6 +52,13 @@ type ConfirmDialog =
 type UploadDialog =
   | { kind: 'new'; file: File }
   | { kind: 'replace'; file: File }
+type FeedbackTone = 'info' | 'success' | 'warning' | 'error'
+
+interface FeedbackMessage {
+  tone: FeedbackTone
+  message: string
+}
+
 interface SelectedCell {
   rowKey: string
   rowNumber: number
@@ -115,11 +122,11 @@ const renameDraft = ref<string>('')
 const confirmDialog = ref<ConfirmDialog | null>(null)
 const uploadDialog = ref<UploadDialog | null>(null)
 const dialogError = ref<string>('')
-const transientToastMessage = ref<string>('')
 const openFileActionMenuId = ref<string>('')
 const openChatSessionActionMenuId = ref<string>('')
 const lookupRowId = ref<string>('')
-const operationNotice = ref<string>('')
+const operationFeedback = ref<FeedbackMessage | null>(null)
+const chatSessionFeedback = ref<FeedbackMessage | null>(null)
 const errorMessage = ref<string>('')
 const searchTerm = ref<string>('')
 const isWorkspaceBusy = ref<boolean>(false)
@@ -144,8 +151,8 @@ const isChatResizing = ref<boolean>(false)
 const isUploadDragging = ref<boolean>(false)
 const isExcelColumnResizing = ref<boolean>(false)
 const isExcelRowResizing = ref<boolean>(false)
-let transientToastTimer: number | null = null
-let operationNoticeTimer: number | null = null
+let operationFeedbackTimer: number | null = null
+let chatSessionFeedbackTimer: number | null = null
 let modelPreferenceSaveTimer: number | null = null
 let isModelPreferenceReady = false
 let isApplyingModelPreference = false
@@ -302,6 +309,13 @@ const activeChatSession = computed(() => {
   )
 })
 
+const answerSupportsDeepThinking = computed(() => {
+  const provider = availableLlmProviders.value.find(
+    (item) => item.provider === answerProvider.value,
+  )
+  return provider?.deep_thinking_models.includes(answerModel.value) ?? false
+})
+
 
 onMounted(() => {
   if (typeof window !== 'undefined') {
@@ -314,8 +328,8 @@ onBeforeUnmount(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('hashchange', syncActiveViewFromLocation)
   }
-  clearOperationNotice()
-  clearTransientToast()
+  clearOperationFeedback()
+  clearChatSessionFeedback()
   clearModelPreferenceSave()
   stopChatResize()
   stopExcelColumnResize()
@@ -414,7 +428,6 @@ function setFileInsightTab(tab: FileInsightTab): void {
 
 function toggleFileInsightFullscreen(): void {
   isFileInsightFullscreen.value = !isFileInsightFullscreen.value
-  showTransientToast(isFileInsightFullscreen.value ? 'Expanded detail view.' : 'Restored split view.')
 }
 
 function toggleFileActionMenu(fileId: string): void {
@@ -435,6 +448,7 @@ function closeActionMenus(): void {
 
 async function loadChatSessions(preferredSessionId: string | null = null): Promise<void> {
   chatSessionError.value = ''
+  clearChatSessionFeedback()
   isChatSessionLoading.value = true
   try {
     const sessions = await listChatSessions()
@@ -458,6 +472,7 @@ async function loadChatSessions(preferredSessionId: string | null = null): Promi
 async function startNewChatSession(): Promise<void> {
   closeActionMenus()
   chatSessionError.value = ''
+  clearChatSessionFeedback()
   isChatSessionLoading.value = true
   try {
     const session = await createChatSession()
@@ -490,7 +505,11 @@ async function renameChatSessionPrompt(session: ChatSession): Promise<void> {
 
 async function toggleChatSessionPin(session: ChatSession): Promise<void> {
   closeActionMenus()
-  await updateChatSession(() => setChatSessionPinned(session.session_id, !session.pinned_at))
+  const pinned = !session.pinned_at
+  await updateChatSession(
+    () => setChatSessionPinned(session.session_id, pinned),
+    pinned ? 'Chat pinned.' : 'Chat unpinned.',
+  )
 }
 
 async function removeChatSession(session: ChatSession): Promise<void> {
@@ -501,11 +520,11 @@ async function removeChatSession(session: ChatSession): Promise<void> {
 
 async function confirmDeleteChatSession(session: ChatSession): Promise<void> {
   chatSessionError.value = ''
+  clearChatSessionFeedback()
   isChatSessionLoading.value = true
   try {
     await deleteChatSession(session.session_id)
     confirmDialog.value = null
-    showTransientToast('Chat session deleted.')
     chatSessions.value = chatSessions.value.filter(
       (item) => item.session_id !== session.session_id,
     )
@@ -513,6 +532,7 @@ async function confirmDeleteChatSession(session: ChatSession): Promise<void> {
       activeChatSessionId.value = chatSessions.value[0]?.session_id ?? ''
       latestAnswer.value = null
     }
+    showChatSessionFeedback('success', 'Chat deleted.')
   } catch (error: unknown) {
     chatSessionError.value = toErrorMessage(error)
   } finally {
@@ -533,12 +553,19 @@ async function handleChatSessionTitleSuggested(sessionId: string, title: string)
   await updateChatSession(() => renameChatSession(sessionId, title))
 }
 
-async function updateChatSession(action: () => Promise<ChatSession>): Promise<void> {
+async function updateChatSession(
+  action: () => Promise<ChatSession>,
+  successMessage = '',
+): Promise<void> {
   chatSessionError.value = ''
+  clearChatSessionFeedback()
   isChatSessionLoading.value = true
   try {
     const session = await action()
     upsertChatSession(session)
+    if (successMessage) {
+      showChatSessionFeedback('success', successMessage)
+    }
   } catch (error: unknown) {
     chatSessionError.value = toErrorMessage(error)
   } finally {
@@ -590,7 +617,6 @@ function toggleFilePin(file: ExcelFile): void {
     : [file.file_id, ...pinnedFileIds.value]
   pinnedFileIds.value = nextIds
   savePinnedFileIds(nextIds)
-  showTransientToast(isFilePinned(file.file_id) ? 'Workbook pinned.' : 'Workbook unpinned.')
 }
 
 function loadPinnedFileIds(): string[] {
@@ -630,9 +656,6 @@ async function refreshFiles(): Promise<void> {
     if (!selectedFileId.value && files.value[0]) {
       await selectFile(files.value[0])
     }
-    showOperationNotice(
-      `${files.value.length} workbook${files.value.length === 1 ? '' : 's'} loaded`,
-    )
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
   } finally {
@@ -752,7 +775,7 @@ async function generateSummaryForSelectedVersion(): Promise<void> {
       summaryModel.value || null,
       summaryProvider.value || null,
     )
-    showOperationNotice('Document description generated')
+    showOperationFeedback('success', 'Document description generated.')
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
   } finally {
@@ -773,7 +796,7 @@ async function saveDocumentSummary(
   isSummarySaving.value = true
   try {
     documentSummary.value = await updateDocumentSummary(selectedVersionId.value, payload)
-    showOperationNotice('Document summary saved')
+    showOperationFeedback('success', 'Document summary saved.')
     onSaved(true)
   } catch (error: unknown) {
     errorMessage.value = toErrorMessage(error)
@@ -867,7 +890,6 @@ function exportPreviewCsv(): void {
   link.click()
   link.remove()
   URL.revokeObjectURL(objectUrl)
-  showTransientToast('Preview downloaded.')
 }
 
 async function renameFilePrompt(file: ExcelFile): Promise<void> {
@@ -930,11 +952,12 @@ async function submitRenameDialog(): Promise<void> {
       files.value = files.value.map((item) => (
         item.file_id === renamedFile.file_id ? renamedFile : item
       ))
-      showOperationNotice(`${renamedFile.display_name} renamed`)
-      showTransientToast('Workbook renamed.')
+      showOperationFeedback('success', `${renamedFile.display_name} renamed.`)
     } else {
-      await updateChatSession(() => renameChatSession(dialog.session.session_id, trimmedValue))
-      showTransientToast('Chat session renamed.')
+      await updateChatSession(
+        () => renameChatSession(dialog.session.session_id, trimmedValue),
+        'Chat renamed.',
+      )
     }
     cancelDialog()
   } catch (error: unknown) {
@@ -964,15 +987,16 @@ async function confirmDeleteFile(): Promise<void> {
     if (!selectedFileId.value && files.value[0]) {
       await selectFile(files.value[0])
     }
-    showOperationNotice(
-      `${result.display_name} deleted. Removed ${result.deleted_versions} version(s), ${result.deleted_sheets} sheet(s), ${result.deleted_artifacts} artifact(s), ${result.deleted_summaries} summary record(s), and ${result.deleted_chat_session_documents} chat attachment(s).`
+    showOperationFeedback(
+      'success',
+      `${result.display_name} deleted. Removed ${result.deleted_versions} version(s), ${result.deleted_sheets} sheet(s), ${result.deleted_artifacts} artifact(s), ${result.deleted_summaries} summary record(s), and ${result.deleted_chat_session_documents} chat attachment(s).`,
+      5200,
     )
-    showTransientToast('Workbook deleted.')
   } catch (error: unknown) {
     if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
       pendingDeleteFile.value = file
       confirmDialog.value = { kind: 'file', file }
-      showOperationNotice(`Confirm deletion for ${file.display_name}.`, 5000)
+      showOperationFeedback('warning', `Confirm deletion for ${file.display_name}.`, 5000)
       return
     }
     dialogError.value = toErrorMessage(error)
@@ -999,7 +1023,7 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
     if (fileInput.value) {
       fileInput.value.value = ''
     }
-    showOperationNotice(`${result.file.display_name} uploaded and parsed`)
+    showOperationFeedback('success', `${result.file.display_name} uploaded and parsed.`)
     files.value = await listExcelFiles()
     const uploadedFile = files.value.find((item) => item.file_id === result.file.file_id)
     if (uploadedFile) {
@@ -1484,46 +1508,57 @@ function csvEscape(value: string): string {
   return value
 }
 
-function showOperationNotice(message: string, durationMs = 3200): void {
-  operationNotice.value = message
-  if (operationNoticeTimer !== null) {
-    window.clearTimeout(operationNoticeTimer)
+function showOperationFeedback(
+  tone: FeedbackTone,
+  message: string,
+  durationMs = 3200,
+): void {
+  operationFeedback.value = { tone, message }
+  if (operationFeedbackTimer !== null) {
+    window.clearTimeout(operationFeedbackTimer)
   }
-  operationNoticeTimer = window.setTimeout(() => {
-    operationNotice.value = ''
-    operationNoticeTimer = null
+  operationFeedbackTimer = window.setTimeout(() => {
+    operationFeedback.value = null
+    operationFeedbackTimer = null
   }, durationMs)
 }
 
-function clearOperationNotice(): void {
-  if (operationNoticeTimer !== null) {
-    window.clearTimeout(operationNoticeTimer)
-    operationNoticeTimer = null
+function clearOperationFeedback(): void {
+  if (operationFeedbackTimer !== null) {
+    window.clearTimeout(operationFeedbackTimer)
+    operationFeedbackTimer = null
   }
-  operationNotice.value = ''
+  operationFeedback.value = null
 }
 
-function showTransientToast(message: string): void {
-  transientToastMessage.value = message
-  if (transientToastTimer !== null) {
-    window.clearTimeout(transientToastTimer)
+function showChatSessionFeedback(
+  tone: FeedbackTone,
+  message: string,
+  durationMs = 2800,
+): void {
+  chatSessionFeedback.value = { tone, message }
+  if (chatSessionFeedbackTimer !== null) {
+    window.clearTimeout(chatSessionFeedbackTimer)
   }
-  transientToastTimer = window.setTimeout(() => {
-    transientToastMessage.value = ''
-    transientToastTimer = null
-  }, 2400)
+  chatSessionFeedbackTimer = window.setTimeout(() => {
+    chatSessionFeedback.value = null
+    chatSessionFeedbackTimer = null
+  }, durationMs)
 }
 
-function clearTransientToast(): void {
-  if (transientToastTimer !== null) {
-    window.clearTimeout(transientToastTimer)
-    transientToastTimer = null
+function clearChatSessionFeedback(): void {
+  if (chatSessionFeedbackTimer !== null) {
+    window.clearTimeout(chatSessionFeedbackTimer)
+    chatSessionFeedbackTimer = null
   }
-  transientToastMessage.value = ''
+  chatSessionFeedback.value = null
 }
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
+    if (error.message === 'internal server error') {
+      return 'Something went wrong on the server. Please try again.'
+    }
     return error.message
   }
   return 'Unexpected error.'
@@ -1609,11 +1644,15 @@ function toErrorMessage(error: unknown): string {
         </template>
       </header>
 
-      <div v-if="errorMessage || (activeView === 'chat' && operationNotice)" class="notice-row">
-        <p v-if="activeView === 'chat' && operationNotice" class="status-note">
-          {{ operationNotice }}
+      <div v-if="errorMessage || (activeView === 'files' && operationFeedback)" class="notice-row">
+        <p
+          v-if="activeView === 'files' && operationFeedback"
+          class="status-note"
+          :class="`tone-${operationFeedback.tone}`"
+        >
+          {{ operationFeedback.message }}
         </p>
-        <p v-if="errorMessage" class="error-note">{{ errorMessage }}</p>
+        <p v-if="errorMessage" class="error-note tone-error">{{ errorMessage }}</p>
       </div>
 
       <section v-if="activeView === 'files'" class="file-page">
@@ -2172,7 +2211,16 @@ function toErrorMessage(error: unknown): string {
             </div>
           </div>
 
-          <p v-if="chatSessionError" class="error-note session-error">{{ chatSessionError }}</p>
+          <p
+            v-if="chatSessionFeedback"
+            class="status-note session-feedback"
+            :class="`tone-${chatSessionFeedback.tone}`"
+          >
+            {{ chatSessionFeedback.message }}
+          </p>
+          <p v-if="chatSessionError" class="error-note session-error tone-error">
+            {{ chatSessionError }}
+          </p>
 
           <div class="rail-system-links">
             <button type="button" @click="setActiveView('files')">
@@ -2357,6 +2405,7 @@ function toErrorMessage(error: unknown): string {
             :router-model="routerModel || null"
             :answer-provider="answerProvider || null"
             :answer-model="answerModel || null"
+            :answer-supports-deep-thinking="answerSupportsDeepThinking"
             :document-titles="documentTitleMap"
             :active-document="activeDocumentForChat"
             @answer-received="handleChatAnswer"
@@ -2368,10 +2417,6 @@ function toErrorMessage(error: unknown): string {
         </aside>
       </section>
     </section>
-
-    <div v-if="transientToastMessage" class="app-toast" role="status">
-      {{ transientToastMessage }}
-    </div>
 
     <section
       v-if="renameDialog"

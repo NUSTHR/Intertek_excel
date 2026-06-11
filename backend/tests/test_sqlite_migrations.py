@@ -36,6 +36,51 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
     assert rows[3]["checksum"]
 
 
+def test_repository_configures_connections_for_long_running_use(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+
+    repository.initialize()
+
+    with repository._connect() as connection:
+        busy_timeout_ms = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+        foreign_keys_enabled = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
+        wal_autocheckpoint = int(
+            connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+        )
+
+    assert busy_timeout_ms == sqlite_repository.SQLITE_BUSY_TIMEOUT_MS
+    assert foreign_keys_enabled == 1
+    assert journal_mode.lower() == "wal"
+    assert wal_autocheckpoint == sqlite_repository.SQLITE_WAL_AUTOCHECKPOINT_PAGES
+
+
+def test_repository_throttles_periodic_sqlite_maintenance(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    calls = 0
+
+    def record_maintenance(_connection: sqlite3.Connection) -> None:
+        nonlocal calls
+        calls += 1
+
+    repository._run_connection_maintenance = record_maintenance  # type: ignore[method-assign]
+
+    with repository._connect():
+        pass
+    with repository._connect():
+        pass
+
+    repository._last_maintenance_at -= (
+        sqlite_repository.SQLITE_MAINTENANCE_INTERVAL_SECONDS + 1
+    )
+    with repository._connect():
+        pass
+
+    assert calls == 2
+
+
 def test_repository_initialization_detects_changed_applied_migration(
     tmp_path: Path,
 ) -> None:

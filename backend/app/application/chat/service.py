@@ -125,6 +125,7 @@ class ChatService:
         router_provider: str | None = None,
         answer_model: str | None = None,
         answer_provider: str | None = None,
+        enable_deep_thinking: bool = False,
     ) -> ChatAnswer:
         if self._workflow is not None:
             return self._workflow.answer_question(
@@ -135,6 +136,7 @@ class ChatService:
                     router_provider=router_provider,
                     answer_model=answer_model,
                     answer_provider=answer_provider,
+                    enable_deep_thinking=enable_deep_thinking,
                 ),
                 actions=self,
             )
@@ -150,6 +152,7 @@ class ChatService:
             route_result=route_result,
             answer_model=answer_model,
             answer_provider=answer_provider,
+            enable_deep_thinking=enable_deep_thinking,
         )
 
     def route_question(
@@ -213,6 +216,7 @@ class ChatService:
         answer_model: str | None = None,
         answer_provider: str | None = None,
         selected_version_ids: list[str] | None = None,
+        enable_deep_thinking: bool = False,
     ) -> ChatAnswer:
         total_timer = StageTimer()
         session = self._get_or_create_session(session_id)
@@ -233,6 +237,7 @@ class ChatService:
                 previous_turns=existing_turns,
                 model=answer_model,
                 provider=answer_provider,
+                enable_deep_thinking=enable_deep_thinking,
             )
         cited_evidence_ids = [
             evidence_id
@@ -256,6 +261,7 @@ class ChatService:
                     )
                     is not None
                 ],
+                reasoning=block.reasoning,
             )
             for block in draft_answer.answer_blocks
         ]

@@ -53,6 +53,7 @@ def answer_excel_question(
             router_provider=request.router_provider,
             answer_model=request.answer_model,
             answer_provider=request.answer_provider,
+            enable_deep_thinking=request.enable_deep_thinking,
         )
     )
 
@@ -145,6 +146,7 @@ def answer_excel_session_question(
             router_provider=request.router_provider,
             answer_model=request.answer_model,
             answer_provider=request.answer_provider,
+            enable_deep_thinking=request.enable_deep_thinking,
         )
     )
 
@@ -184,6 +186,7 @@ def answer_excel_routed_session_question(
             answer_model=request.answer_model,
             answer_provider=request.answer_provider,
             selected_version_ids=request.selected_version_ids,
+            enable_deep_thinking=request.enable_deep_thinking,
         )
     )
 
@@ -289,6 +292,7 @@ def _to_chat_answer_response(answer: ChatAnswer) -> ChatAnswerResponse:
             ChatAnswerBlockResponse(
                 text=block.text,
                 citation_ids=block.citation_ids,
+                reasoning=block.reasoning,
             )
             for block in answer.answer_blocks
         ],

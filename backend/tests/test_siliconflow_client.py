@@ -188,7 +188,7 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     ]
     assert "enable_thinking" not in requests[0]
     assert "enable_thinking" not in requests[1]
-    assert requests[2]["enable_thinking"] is False
+    assert "enable_thinking" not in requests[2]
     assert '"evidence_id": "string"' in requests[2]["messages"][-1]["content"]
     assert '"version_id": "string"' in requests[2]["messages"][-1]["content"]
     assert '"sheet_id": "string"' in requests[2]["messages"][-1]["content"]
@@ -671,10 +671,143 @@ def test_siliconflow_uses_enable_thinking_false_for_supported_models() -> None:
             )
         ],
         max_documents=3,
-        model="Qwen/Qwen3.6-27B",
+        model="Pro/deepseek-ai/DeepSeek-V3.2",
     )
 
     assert requests[0]["enable_thinking"] is False
+
+
+def test_siliconflow_uses_enable_thinking_true_when_enabled() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_blocks": [
+                                        {
+                                            "text": "answer",
+                                            "evidence_ids": ["version_1::sheet_1::S001_R1"],
+                                        }
+                                    ],
+                                    "citations": [
+                                        {
+                                            "evidence_id": "version_1::sheet_1::S001_R1",
+                                            "quote": "row",
+                                        }
+                                    ],
+                                    "insufficient_evidence": False,
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Pro/deepseek-ai/DeepSeek-V3.2",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+
+    client.answer_with_rows(
+        "question",
+        [SelectedDocument(file_id="file_1", version_id="version_1", reason="test")],
+        [
+            {
+                "evidence_id": "version_1::sheet_1::S001_R1",
+                "file_id": "file_1",
+                "version_id": "version_1",
+                "sheet_id": "sheet_1",
+                "sheet_name": "Sheet 1",
+                "row_id": "S001_R1",
+                "cells": ["S001_R1", "value"],
+            }
+        ],
+        model="Pro/deepseek-ai/DeepSeek-V3.2",
+        enable_deep_thinking=True,
+    )
+
+    assert requests[0]["enable_thinking"] is True
+
+
+def test_siliconflow_filters_deep_thinking_for_unsupported_models() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_blocks": [
+                                        {
+                                            "text": "answer",
+                                            "evidence_ids": ["version_1::sheet_1::S001_R1"],
+                                        }
+                                    ],
+                                    "citations": [],
+                                    "insufficient_evidence": False,
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+
+    client.answer_with_rows(
+        "question",
+        [SelectedDocument(file_id="file_1", version_id="version_1", reason="test")],
+        [
+            {
+                "evidence_id": "version_1::sheet_1::S001_R1",
+                "file_id": "file_1",
+                "version_id": "version_1",
+                "sheet_id": "sheet_1",
+                "sheet_name": "Sheet 1",
+                "row_id": "S001_R1",
+                "cells": ["S001_R1", "value"],
+            }
+        ],
+        model="Qwen/Qwen3.6-27B",
+        enable_deep_thinking=True,
+    )
+
+    assert "enable_thinking" not in requests[0]
 
 
 def test_deepseek_official_provider_uses_official_url_and_json_mode() -> None:
@@ -752,3 +885,83 @@ def test_deepseek_official_provider_uses_official_url_and_json_mode() -> None:
     assert requests[0]["model"] == "deepseek-v4-flash"
     assert requests[0]["response_format"] == {"type": "json_object"}
     assert requests[0]["thinking"] == {"type": "disabled"}
+
+
+def test_deepseek_official_answer_enables_thinking_when_requested() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.deepseek.test/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_blocks": [
+                                        {
+                                            "text": "answer",
+                                            "evidence_ids": ["version_1::sheet_1::S001_R1"],
+                                        }
+                                    ],
+                                    "citations": [],
+                                    "insufficient_evidence": False,
+                                }
+                            ),
+                            "reasoning_content": "I should inspect the cited rows first.",
+                        },
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.siliconflow.test/v1",
+            api_key="siliconflow-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="deepseek-ai/DeepSeek-V4-Pro",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+        extra_providers={
+            "deepseek": LlmProviderConfig(
+                provider="deepseek",
+                label="DeepSeek Official",
+                api_base_url="https://api.deepseek.test",
+                api_key="deepseek-key",
+                summary_model="deepseek-v4-pro",
+                router_model="deepseek-v4-flash",
+                answer_model="deepseek-v4-pro",
+            )
+        },
+    )
+
+    answer = client.answer_with_rows(
+        "question",
+        [SelectedDocument(file_id="file_1", version_id="version_1", reason="test")],
+        [
+            {
+                "evidence_id": "version_1::sheet_1::S001_R1",
+                "file_id": "file_1",
+                "version_id": "version_1",
+                "sheet_id": "sheet_1",
+                "sheet_name": "Sheet 1",
+                "row_id": "S001_R1",
+                "cells": ["S001_R1", "value"],
+            }
+        ],
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        enable_deep_thinking=True,
+    )
+
+    assert requests[0]["response_format"] == {"type": "json_object"}
+    assert requests[0]["thinking"] == {"type": "enabled"}
+    assert requests[0]["reasoning_effort"] == "high"
+    assert answer.answer_blocks[0].reasoning == "I should inspect the cited rows first."

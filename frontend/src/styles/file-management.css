@@ -13,7 +13,7 @@
   display: block;
   flex: 1 1 auto;
   min-height: 0;
-  height: calc(100vh - 64px);
+  height: auto;
   width: 100%;
   max-width: none;
   margin: 0;

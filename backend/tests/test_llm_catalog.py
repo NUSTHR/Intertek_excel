@@ -9,6 +9,7 @@ from app.core.llm_catalog import (
     SILICONFLOW_LLM_MODELS,
     SILICONFLOW_PROVIDER,
     list_supported_llm_provider_options,
+    supports_deep_thinking,
 )
 
 
@@ -24,3 +25,20 @@ def test_stage_defaults_match_business_model_policy() -> None:
 def test_siliconflow_provider_still_lists_ling_flash_first() -> None:
     assert SILICONFLOW_LLM_MODELS[0] == "inclusionAI/Ling-flash-2.0"
     assert list_supported_llm_provider_options()[0]["models"][0] == "inclusionAI/Ling-flash-2.0"
+
+
+def test_provider_options_expose_deep_thinking_capabilities() -> None:
+    options = {
+        option["provider"]: option
+        for option in list_supported_llm_provider_options()
+    }
+
+    assert options[SILICONFLOW_PROVIDER]["deep_thinking_models"] == [
+        "Pro/deepseek-ai/DeepSeek-V3.2",
+    ]
+    assert options[DEEPSEEK_PROVIDER]["deep_thinking_models"] == [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+    ]
+    assert supports_deep_thinking(SILICONFLOW_PROVIDER, "Pro/deepseek-ai/DeepSeek-V3.2")
+    assert not supports_deep_thinking(SILICONFLOW_PROVIDER, "Qwen/Qwen3.6-27B")

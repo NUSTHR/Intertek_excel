@@ -12,6 +12,7 @@ class ChatWorkflowRequest:
     router_provider: str | None = None
     answer_model: str | None = None
     answer_provider: str | None = None
+    enable_deep_thinking: bool = False
 
 
 class ChatWorkflowActions(Protocol):
@@ -34,6 +35,7 @@ class ChatWorkflowActions(Protocol):
         answer_model: str | None = None,
         answer_provider: str | None = None,
         selected_version_ids: list[str] | None = None,
+        enable_deep_thinking: bool = False,
     ) -> ChatAnswer:
         ...
 

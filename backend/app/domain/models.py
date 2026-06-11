@@ -182,6 +182,7 @@ class ChatTurn:
 class DraftAnswerBlock:
     text: str
     evidence_ids: list[str]
+    reasoning: str = ""
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,7 @@ class ExcelCitation:
 class ChatAnswerBlock:
     text: str
     citation_ids: list[str]
+    reasoning: str = ""
 
 
 @dataclass(frozen=True)

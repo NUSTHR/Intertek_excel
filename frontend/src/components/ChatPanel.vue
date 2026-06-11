@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import {
   askExcelQuestion,
@@ -17,13 +17,20 @@ interface ChatHistoryEntry {
   createdAt: string
 }
 
+interface RenderedAnswerBlock {
+  body: string
+  thinking: string
+}
+
 const draftSessionKey = '__draft__'
+const renderedBlockCacheLimit = 180
 
 const props = defineProps<{
   routerProvider: string | null
   routerModel: string | null
   answerProvider: string | null
   answerModel: string | null
+  answerSupportsDeepThinking: boolean
   sessionId: string
   sessionTitle: string
   documentTitles: Record<string, string>
@@ -43,13 +50,34 @@ const historiesBySession = ref<Record<string, ChatHistoryEntry[]>>({})
 const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
 const isHistoryLoading = ref<boolean>(false)
+const enableDeepThinking = ref<boolean>(false)
+const copiedKey = ref<string>('')
 const chatScrollRegion = ref<HTMLElement | null>(null)
 const chatInput = ref<HTMLTextAreaElement | null>(null)
 const activeSourceIndex = ref<number>(0)
 let nextHistoryEntryId = 0
 let historyLoadRequestId = 0
+let copiedKeyTimer: number | null = null
+const renderedBlockCache = new Map<string, RenderedAnswerBlock>()
 
 const currentSessionKey = computed(() => props.sessionId || draftSessionKey)
+const effectiveDeepThinkingEnabled = computed(
+  () => enableDeepThinking.value && props.answerSupportsDeepThinking,
+)
+const deepThinkingTitle = computed(() => {
+  if (!props.answerSupportsDeepThinking) {
+    return 'Deep thinking is not available for the selected answer model'
+  }
+  return enableDeepThinking.value
+    ? 'Deep thinking on: the model may spend more time reasoning through evidence'
+    : 'Deep thinking off'
+})
+const deepThinkingAriaLabel = computed(() => {
+  if (!props.answerSupportsDeepThinking) {
+    return 'Deep thinking unavailable for selected answer model'
+  }
+  return enableDeepThinking.value ? 'Disable deep thinking' : 'Enable deep thinking'
+})
 
 const history = computed<ChatHistoryEntry[]>(() => {
   return historiesBySession.value[currentSessionKey.value] ?? []
@@ -122,6 +150,20 @@ watch(
   },
 )
 
+watch(
+  () => props.answerSupportsDeepThinking,
+  (supported) => {
+    if (!supported) {
+      enableDeepThinking.value = false
+    }
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  clearCopiedTimer()
+})
+
 async function scrollChatToBottom(): Promise<void> {
   await nextTick()
   const element = chatScrollRegion.value
@@ -187,6 +229,10 @@ async function submitQuestion(): Promise<void> {
   let createdSession = false
 
   try {
+    question.value = ''
+    await nextTick()
+    resizeChatInput()
+
     if (!targetSessionId) {
       const session = await createChatSession()
       targetSessionId = session.session_id
@@ -213,6 +259,7 @@ async function submitQuestion(): Promise<void> {
         routerModel: props.routerModel ?? '',
         answerProvider: props.answerProvider ?? '',
         answerModel: props.answerModel ?? '',
+        enableDeepThinking: effectiveDeepThinkingEnabled.value,
       },
     )
     setHistory(
@@ -228,9 +275,6 @@ async function submitQuestion(): Promise<void> {
       emit('sessionTitleSuggested', answer.session_id, titleFromQuestion(trimmedQuestion))
     }
 
-    question.value = ''
-    await nextTick()
-    resizeChatInput()
   } catch (error: unknown) {
     if (entry) {
       const failedEntry = entry
@@ -244,6 +288,41 @@ async function submitQuestion(): Promise<void> {
   } finally {
     isAsking.value = false
   }
+}
+
+async function regenerateLatestAnswer(): Promise<void> {
+  const lastEntry = latestCompleteEntry()
+  if (!lastEntry || isAsking.value) {
+    return
+  }
+  await submitQuestionText(lastEntry.question)
+}
+
+async function editLatestQuestion(): Promise<void> {
+  const lastEntry = latestCompleteEntry()
+  if (!lastEntry || isAsking.value) {
+    return
+  }
+  question.value = lastEntry.question
+  await nextTick()
+  resizeChatInput()
+  chatInput.value?.focus()
+}
+
+async function submitQuestionText(value: string): Promise<void> {
+  question.value = value
+  await nextTick()
+  await submitQuestion()
+}
+
+function latestCompleteEntry(): ChatHistoryEntry | null {
+  for (let index = history.value.length - 1; index >= 0; index -= 1) {
+    const entry = history.value[index]
+    if (entry?.answer) {
+      return entry
+    }
+  }
+  return null
 }
 
 function historyForSession(sessionKey: string): ChatHistoryEntry[] {
@@ -261,6 +340,111 @@ function selectCitationById(answer: ChatAnswer, citationId: string): void {
   const citation = answer.citations.find((item) => item.citation_id === citationId)
   if (citation) {
     emit('selectCitation', citation)
+  }
+}
+
+function renderAnswerBlock(markdown: string, reasoning = ''): RenderedAnswerBlock {
+  const cacheKey = `${reasoning}\n\x00\n${markdown}`
+  const cached = renderedBlockCache.get(cacheKey)
+  if (cached) {
+    renderedBlockCache.delete(cacheKey)
+    renderedBlockCache.set(cacheKey, cached)
+    return cached
+  }
+  const rendered = splitThinkingFromAnswer(markdown)
+  if (reasoning.trim()) {
+    rendered.thinking = [reasoning.trim(), rendered.thinking].filter(Boolean).join('\n\n')
+  }
+  renderedBlockCache.set(cacheKey, rendered)
+  trimRenderedBlockCache()
+  return rendered
+}
+
+function trimRenderedBlockCache(): void {
+  while (renderedBlockCache.size > renderedBlockCacheLimit) {
+    const oldestKey = renderedBlockCache.keys().next().value
+    if (typeof oldestKey !== 'string') {
+      return
+    }
+    renderedBlockCache.delete(oldestKey)
+  }
+}
+
+function splitThinkingFromAnswer(value: string): RenderedAnswerBlock {
+  let remaining = value.replace(/\r\n?/g, '\n').trim()
+  const thinkingParts: string[] = []
+  const taggedThinkingPattern = /<(?:think|thinking|reasoning)>\s*([\s\S]*?)\s*<\/(?:think|thinking|reasoning)>/gi
+  remaining = remaining.replace(taggedThinkingPattern, (_match, thinking: string) => {
+    if (thinking.trim()) {
+      thinkingParts.push(thinking.trim())
+    }
+    return '\n'
+  }).trim()
+
+  const labeledMatch = /^(?:思考过程|思考|推理过程|Reasoning|Thinking)\s*[:：]\s*([\s\S]*?)(?:\n{2,}(?:正文|答案|Answer)\s*[:：]\s*|\n{2,}(?=#+\s)|$)([\s\S]*)$/i.exec(remaining)
+  if (labeledMatch) {
+    const thinking = labeledMatch[1]?.trim() ?? ''
+    const body = labeledMatch[2]?.trim() ?? ''
+    if (thinking) {
+      thinkingParts.push(thinking)
+    }
+    remaining = body || remaining
+  }
+
+  return {
+    thinking: thinkingParts.join('\n\n'),
+    body: remaining.trim(),
+  }
+}
+
+function answerPlainText(answer: ChatAnswer): string {
+  return answer.answer_blocks
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+async function copyText(value: string, key: string): Promise<void> {
+  if (!value.trim()) {
+    return
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+    } else {
+      legacyCopyText(value)
+    }
+    showCopied(key)
+  } catch (error: unknown) {
+    errorMessage.value = error instanceof Error ? error.message : 'Failed to copy text.'
+  }
+}
+
+function legacyCopyText(value: string): void {
+  const textArea = document.createElement('textarea')
+  textArea.value = value
+  textArea.setAttribute('readonly', 'true')
+  textArea.style.position = 'fixed'
+  textArea.style.left = '-9999px'
+  document.body.appendChild(textArea)
+  textArea.select()
+  document.execCommand('copy')
+  textArea.remove()
+}
+
+function showCopied(key: string): void {
+  copiedKey.value = key
+  clearCopiedTimer()
+  copiedKeyTimer = window.setTimeout(() => {
+    copiedKey.value = ''
+    copiedKeyTimer = null
+  }, 1600)
+}
+
+function clearCopiedTimer(): void {
+  if (copiedKeyTimer !== null) {
+    window.clearTimeout(copiedKeyTimer)
+    copiedKeyTimer = null
   }
 }
 
@@ -404,7 +588,33 @@ function resizeChatInput(): void {
       <div class="chat-history">
         <template v-for="(entry, entryIndex) in history" :key="entry.id">
           <div class="chat-message user">
-            <div class="user-bubble">{{ entry.question }}</div>
+            <div class="user-message-stack">
+              <div class="user-bubble">{{ entry.question }}</div>
+              <div class="message-actions user-actions">
+                <button
+                  type="button"
+                  class="message-action-button"
+                  :aria-label="copiedKey === `question-${entry.id}` ? 'Question copied' : 'Copy question'"
+                  :title="copiedKey === `question-${entry.id}` ? 'Copied' : 'Copy question'"
+                  @click="copyText(entry.question, `question-${entry.id}`)"
+                >
+                  <AppIcon :name="copiedKey === `question-${entry.id}` ? 'check' : 'content_copy'" />
+                  <span>{{ copiedKey === `question-${entry.id}` ? 'Copied' : 'Copy' }}</span>
+                </button>
+                <button
+                  v-if="entry.answer && entry.id === latestCompleteEntry()?.id"
+                  type="button"
+                  class="message-action-button"
+                  :disabled="isAsking"
+                  aria-label="Edit latest question"
+                  title="Edit latest question"
+                  @click="editLatestQuestion"
+                >
+                  <AppIcon name="edit" />
+                  <span>Edit</span>
+                </button>
+              </div>
+            </div>
             <span class="chat-message-time">{{ formatMessageTime(entry.createdAt) }}</span>
           </div>
 
@@ -425,7 +635,24 @@ function resizeChatInput(): void {
                   :key="`${entry.answer.created_at}-${blockIndex}`"
                   class="answer-block"
                 >
-                  <div class="markdown-body" v-html="renderMarkdown(block.text)"></div>
+                  <details
+                    v-if="renderAnswerBlock(block.text, block.reasoning).thinking"
+                    class="thinking-details"
+                  >
+                    <summary>
+                      <AppIcon name="psychology" />
+                      <span>Model reasoning</span>
+                    </summary>
+                    <div
+                      class="markdown-body thinking-markdown"
+                      v-html="renderMarkdown(renderAnswerBlock(block.text, block.reasoning).thinking)"
+                    ></div>
+                  </details>
+                  <div
+                    v-if="renderAnswerBlock(block.text, block.reasoning).body"
+                    class="markdown-body"
+                    v-html="renderMarkdown(renderAnswerBlock(block.text, block.reasoning).body)"
+                  ></div>
                   <button
                     v-for="citationId in block.citation_ids"
                     :key="`${entry.answer.created_at}-${blockIndex}-${citationId}`"
@@ -441,6 +668,30 @@ function resizeChatInput(): void {
                 </p>
                 <div v-if="entry.answer.warnings.length > 0" class="warning-list">
                   <p v-for="warning in entry.answer.warnings" :key="warning">{{ warning }}</p>
+                </div>
+                <div class="message-actions assistant-actions">
+                  <button
+                    type="button"
+                    class="message-action-button"
+                    :aria-label="copiedKey === `answer-${entry.id}` ? 'Answer copied' : 'Copy answer'"
+                    :title="copiedKey === `answer-${entry.id}` ? 'Copied' : 'Copy answer'"
+                    @click="copyText(answerPlainText(entry.answer), `answer-${entry.id}`)"
+                  >
+                    <AppIcon :name="copiedKey === `answer-${entry.id}` ? 'check' : 'content_copy'" />
+                    <span>{{ copiedKey === `answer-${entry.id}` ? 'Copied' : 'Copy' }}</span>
+                  </button>
+                  <button
+                    v-if="entry.id === latestCompleteEntry()?.id"
+                    type="button"
+                    class="message-action-button"
+                    :disabled="isAsking"
+                    aria-label="Regenerate latest answer"
+                    title="Regenerate latest answer"
+                    @click="regenerateLatestAnswer"
+                  >
+                    <AppIcon name="refresh" />
+                    <span>Regenerate</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -461,15 +712,15 @@ function resizeChatInput(): void {
                 <strong>ExcelAI</strong>
               </div>
               <div class="assistant-bubble loading-message">
-                <span class="loading-dots" aria-label="Waiting for model response">
+                <div class="loading-dots" aria-hidden="true">
                   <span></span>
                   <span></span>
                   <span></span>
-                </span>
-                <span class="loading-lines" aria-hidden="true">
-                  <span></span>
-                  <span></span>
-                </span>
+                </div>
+                <div class="thinking-copy">
+                  <strong>{{ effectiveDeepThinkingEnabled ? 'Deep thinking enabled' : 'Working on your answer' }}</strong>
+                  <span>{{ effectiveDeepThinkingEnabled ? 'Querying files, parsing evidence, then organizing the answer.' : 'Querying files, parsing data, and organizing the answer.' }}</span>
+                </div>
               </div>
             </div>
           </article>
@@ -493,11 +744,18 @@ function resizeChatInput(): void {
         />
         <div class="chat-input-actions">
           <div class="chat-tools">
-            <button type="button" class="chat-tool-button" aria-label="Attach file">
-              <AppIcon name="attach_file" />
-            </button>
-            <button type="button" class="chat-tool-button" aria-label="Add chart">
-              <AppIcon name="add_chart" />
+            <button
+              type="button"
+              class="chat-tool-button thinking-toggle"
+              :class="{ active: enableDeepThinking, unavailable: !answerSupportsDeepThinking }"
+              :aria-pressed="enableDeepThinking"
+              :aria-label="deepThinkingAriaLabel"
+              :title="deepThinkingTitle"
+              :disabled="isAsking || !answerSupportsDeepThinking"
+              @click="enableDeepThinking = !enableDeepThinking"
+            >
+              <AppIcon name="psychology" />
+              <span>Deep Think</span>
             </button>
           </div>
           <button

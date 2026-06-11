@@ -19,6 +19,7 @@ from app.api.dependencies import (
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
+from app.core.errors import LlmRequestError
 from app.domain.models import (
     AttachedDocument,
     ChatTurn,
@@ -107,6 +108,41 @@ def test_summary_generation_and_chat_framework_flow(
     assert answer["citations"][0]["row"][1:] == ["Code", "Date"]
 
 
+def test_llm_request_error_returns_user_safe_api_error(tmp_path: Path) -> None:
+    class FailingSummaryLlmClient(FakeLlmClient):
+        def generate_document_summary(self, profile, *, model=None, provider=None):
+            _ = profile, model, provider
+            raise LlmRequestError(
+                stage="summary",
+                model="private-model",
+                duration_seconds=1.25,
+                cause=RuntimeError("provider secret failure"),
+            )
+
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_xlsx_fixture(workbook_path)
+    with _client_with_llm(tmp_path, FailingSummaryLlmClient()) as client:
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "standards.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        version_id = upload_response.json()["version"]["version_id"]
+
+        response = client.post(f"/api/excel/versions/{version_id}/summary/generate")
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "The model request failed. Please try again shortly."
+    }
+
+
 def test_document_summary_can_be_updated(
     client: TestClient,
     tmp_path: Path,
@@ -133,6 +169,7 @@ def test_document_summary_can_be_updated(
     update_response = client.patch(
         f"/api/excel/versions/{version_id}/summary",
         json={
+            "document_title": "Editable generated title",
             "summary_text": "Updated workbook summary.",
             "business_domain": "standards operations",
             "key_topics": ["Standards", "Standards", "DOW", ""],
@@ -142,6 +179,7 @@ def test_document_summary_can_be_updated(
     )
     assert update_response.status_code == 200
     updated_summary = update_response.json()
+    assert updated_summary["document_title"] == "Editable generated title"
     assert updated_summary["summary_text"] == "Updated workbook summary."
     assert updated_summary["business_domain"] == "standards operations"
     assert updated_summary["key_topics"] == ["Standards", "DOW"]
@@ -150,6 +188,7 @@ def test_document_summary_can_be_updated(
 
     persisted_response = client.get(f"/api/excel/versions/{version_id}/summary")
     assert persisted_response.status_code == 200
+    assert persisted_response.json()["document_title"] == "Editable generated title"
     assert persisted_response.json()["key_topics"] == ["Standards", "DOW"]
 
 
@@ -331,6 +370,41 @@ def test_chat_route_returns_documents_before_answer_stage(
         )
 
 
+def test_chat_answer_request_passes_deep_thinking_flag(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        workbook_path = tmp_path / "standards.xlsx"
+        _write_large_xlsx_fixture(workbook_path, rows=5)
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "standards.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        version_id = upload_response.json()["version"]["version_id"]
+        client.post(f"/api/excel/versions/{version_id}/summary/generate")
+        session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+
+        response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/messages",
+            json={
+                "question": "Think carefully about the standards.",
+                "enable_deep_thinking": True,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["answer_blocks"][0]["reasoning"] == "Captured reasoning."
+        assert llm_client.answer_calls[0]["enable_deep_thinking"] is True
+
+
 def test_langgraph_workflow_runs_full_chat_chain(
     tmp_path: Path,
 ) -> None:
@@ -382,6 +456,17 @@ def test_llm_options_endpoint_and_request_level_models(
         assert "deepseek-ai/DeepSeek-V4-Pro" in options_payload["models"]
         assert "Qwen/Qwen3.6-27B" in options_payload["models"]
         assert options_payload["models"][0] == "inclusionAI/Ling-flash-2.0"
+        providers_by_id = {
+            provider["provider"]: provider
+            for provider in options_payload["providers"]
+        }
+        assert providers_by_id["deepseek"]["deep_thinking_models"] == [
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+        ]
+        assert providers_by_id["siliconflow"]["deep_thinking_models"] == [
+            "Pro/deepseek-ai/DeepSeek-V3.2",
+        ]
         assert options_payload["defaults"] == {
             "summary_provider": "deepseek",
             "summary_model": "deepseek-v4-pro",
@@ -673,6 +758,7 @@ class CapturingLlmClient(FakeLlmClient):
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        enable_deep_thinking: bool = False,
     ) -> DraftChatAnswer:
         _ = provider
         self.answer_models.append(model)
@@ -682,6 +768,7 @@ class CapturingLlmClient(FakeLlmClient):
                 "documents": documents,
                 "rows": rows,
                 "previous_turns": previous_turns or [],
+                "enable_deep_thinking": enable_deep_thinking,
             }
         )
         available_row_ids = {str(row["row_id"]) for row in rows}
@@ -696,6 +783,7 @@ class CapturingLlmClient(FakeLlmClient):
                 DraftAnswerBlock(
                     text=f"Captured answer for {question}.",
                     evidence_ids=[evidence_id],
+                    reasoning="Captured reasoning." if enable_deep_thinking else "",
                 )
             ],
             citations=[DraftCitation(evidence_id=evidence_id, quote="captured row")],

@@ -14,6 +14,7 @@ from app.core.errors import (
     FileNameConflictError,
     InvalidExcelFileError,
     InvalidLlmModelError,
+    LlmRequestError,
     UploadValidationError,
     VersionActivationError,
 )
@@ -82,6 +83,25 @@ async def handle_invalid_llm_model(
     )
 
 
+@app.exception_handler(LlmRequestError)
+async def handle_llm_request_error(
+    _request: Request,
+    exc: LlmRequestError,
+) -> JSONResponse:
+    logger.warning(
+        "llm request failed stage=%s model=%s duration_seconds=%.3f",
+        exc.stage,
+        exc.model,
+        exc.duration_seconds,
+    )
+    return JSONResponse(
+        status_code=502,
+        content=ErrorResponse(
+            detail="The model request failed. Please try again shortly."
+        ).model_dump(),
+    )
+
+
 @app.exception_handler(AssetNotFoundError)
 async def handle_asset_not_found(
     _request: Request,
@@ -145,7 +165,9 @@ async def handle_unexpected_error(
     logger.exception("unhandled application error", exc_info=exc)
     return JSONResponse(
         status_code=500,
-        content=ErrorResponse(detail="internal server error").model_dump(),
+        content=ErrorResponse(
+            detail="Something went wrong on the server. Please try again."
+        ).model_dump(),
     )
 
 

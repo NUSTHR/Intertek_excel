@@ -121,6 +121,7 @@ class DocumentSummaryResponse(BaseModel):
 
 
 class UpdateDocumentSummaryRequest(BaseModel):
+    document_title: str | None = Field(default=None, min_length=1, max_length=255)
     summary_text: str | None = Field(default=None, min_length=1, max_length=20000)
     business_domain: str | None = Field(default=None, min_length=1, max_length=255)
     key_topics: list[str] | None = None
@@ -214,6 +215,7 @@ class ChatRequest(BaseModel):
     router_provider: str | None = None
     answer_model: str | None = None
     answer_provider: str | None = None
+    enable_deep_thinking: bool = False
 
 
 class ChatAnswerRequest(BaseModel):
@@ -221,6 +223,7 @@ class ChatAnswerRequest(BaseModel):
     answer_model: str | None = None
     answer_provider: str | None = None
     selected_version_ids: list[str] = Field(default_factory=list)
+    enable_deep_thinking: bool = False
 
 
 class ChatRouteRequest(BaseModel):
@@ -292,6 +295,7 @@ class ExcelCitationResponse(BaseModel):
 class ChatAnswerBlockResponse(BaseModel):
     text: str
     citation_ids: list[str] = Field(default_factory=list)
+    reasoning: str = ""
 
 
 class ChatAnswerResponse(BaseModel):
@@ -344,6 +348,7 @@ class LlmProviderOptionResponse(BaseModel):
     provider: str
     label: str
     models: list[str] = Field(default_factory=list)
+    deep_thinking_models: list[str] = Field(default_factory=list)
 
 
 class LlmModelOptionsResponse(BaseModel):
