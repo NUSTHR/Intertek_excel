@@ -56,7 +56,10 @@ def test_api_rejects_oversized_upload(
     monkeypatch.setattr(
         excel_assets,
         "get_settings",
-        lambda: SimpleNamespace(excel_max_upload_bytes=4),
+        lambda: SimpleNamespace(
+            excel_max_upload_bytes=4,
+            supported_excel_extensions=(".xls", ".xlsx", ".xlsm", ".xltx", ".xltm"),
+        ),
     )
 
     response = client.post(
@@ -224,7 +227,7 @@ def test_api_rename_file_updates_list_and_detail(
     assert list_response.json()["files"][0]["display_name"] == "standards-renamed.xlsx"
 
 
-def test_api_delete_file_requires_confirmation_and_hard_deletes(
+def test_api_delete_file_requires_confirmation_and_soft_deletes_from_management(
     client: TestClient,
     tmp_path: Path,
 ) -> None:
@@ -254,12 +257,16 @@ def test_api_delete_file_requires_confirmation_and_hard_deletes(
     assert delete_response.status_code == 200
     deleted = delete_response.json()
     assert deleted["file_id"] == file_id
-    assert deleted["deleted_versions"] == 1
-    assert deleted["deleted_sheets"] == 2
-    assert deleted["deleted_artifacts"] == 5
+    assert deleted["deleted_versions"] == 0
+    assert deleted["deleted_sheets"] == 0
+    assert deleted["deleted_artifacts"] == 0
 
     missing_response = client.get(f"/api/excel/files/{file_id}")
     assert missing_response.status_code == 404
+
+    list_response = client.get("/api/excel/files")
+    assert list_response.status_code == 200
+    assert list_response.json()["files"] == []
 
 
 def _write_xlsx_fixture(path: Path) -> None:

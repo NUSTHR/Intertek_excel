@@ -1,10 +1,14 @@
 import hashlib
-import logging
-from time import perf_counter
 
+from app.application.chat.cancellation import (
+    ChatCancellationToken,
+    ChatRequestCancelledError,
+)
 from app.application.chat.policy import ChatServicePolicy
 from app.application.document_summaries.service import DocumentSummaryService
+from app.application.excel_assets.access import FileAccessContext
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.llm_preferences.service import WorkspaceLlmPreferenceService
 from app.core.errors import AssetNotFoundError
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
@@ -14,19 +18,18 @@ from app.domain.models import (
     ChatAnswerBlock,
     ChatRouteResult,
     ChatSession,
-    ChatStageTiming,
     ChatTurn,
+    DraftAnswerBlock,
+    DraftChatAnswer,
     ExcelCitation,
     ExcelSheet,
     LlmPreference,
     SelectedDocument,
+    UserRole,
 )
 from app.ports.chat_workflow import ChatWorkflow, ChatWorkflowRequest
 from app.ports.llm_client import LlmClient
 from app.ports.repository import ChatSessionRepository
-
-logger = logging.getLogger(__name__)
-DEFAULT_PREFERENCE_SCOPE = "workspace"
 
 
 class ChatService:
@@ -36,6 +39,7 @@ class ChatService:
         summaries: DocumentSummaryService,
         llm_client: LlmClient,
         sessions: ChatSessionRepository,
+        llm_preferences: WorkspaceLlmPreferenceService,
         max_routed_documents: int = 3,
         row_page_size: int = 5000,
         max_answer_rows: int = 20_000,
@@ -51,6 +55,7 @@ class ChatService:
         self._summaries = summaries
         self._llm_client = llm_client
         self._sessions = sessions
+        self._llm_preferences = llm_preferences
         self._workflow = workflow
 
     def create_session(self) -> ChatSession:
@@ -123,59 +128,29 @@ class ChatService:
             return None
         return self._sessions.list_turns(session_id)
 
-    def get_llm_preference(self, scope: str = DEFAULT_PREFERENCE_SCOPE) -> LlmPreference | None:
-        return self._sessions.get_llm_preference(scope)
-
-    def save_llm_preference(
-        self,
-        *,
-        summary_provider: str,
-        summary_model: str,
-        router_provider: str,
-        router_model: str,
-        answer_provider: str,
-        answer_model: str,
-        scope: str = DEFAULT_PREFERENCE_SCOPE,
-    ) -> LlmPreference:
-        existing = self._sessions.get_llm_preference(scope)
-        now = utc_now_iso()
-        return self._sessions.save_llm_preference(
-            LlmPreference(
-                scope=scope,
-                summary_provider=summary_provider,
-                summary_model=summary_model,
-                router_provider=router_provider,
-                router_model=router_model,
-                answer_provider=answer_provider,
-                answer_model=answer_model,
-                created_at=existing.created_at if existing is not None else now,
-                updated_at=now,
-            )
-        )
-
     def answer_question(
         self,
         question: str,
         session_id: str | None = None,
         user_id: str = "legacy",
         *,
-        router_model: str | None = None,
-        router_provider: str | None = None,
-        answer_model: str | None = None,
-        answer_provider: str | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_token: ChatCancellationToken | None = None,
+        user_role: UserRole = UserRole.MEMBER,
     ) -> ChatAnswer:
+        preference = self._llm_preferences.get_preference()
+        access = FileAccessContext(user_id=user_id, role=user_role)
+        self._raise_if_cancelled(cancellation_token)
         if self._workflow is not None:
             return self._workflow.answer_question(
                 ChatWorkflowRequest(
                     question=question,
                     session_id=session_id,
                     user_id=user_id,
-                    router_model=router_model,
-                    router_provider=router_provider,
-                    answer_model=answer_model,
-                    answer_provider=answer_provider,
                     enable_deep_thinking=enable_deep_thinking,
+                    llm_preference=preference,
+                    cancellation_token=cancellation_token,
+                    file_access=access,
                 ),
                 actions=self,
             )
@@ -183,17 +158,19 @@ class ChatService:
             question,
             session_id=session_id,
             user_id=user_id,
-            router_model=router_model,
-            router_provider=router_provider,
+            llm_preference=preference,
+            cancellation_token=cancellation_token,
+            file_access=access,
         )
         return self.answer_routed_question(
             question=question,
             session_id=route_result.session_id,
             user_id=user_id,
             route_result=route_result,
-            answer_model=answer_model,
-            answer_provider=answer_provider,
             enable_deep_thinking=enable_deep_thinking,
+            llm_preference=preference,
+            cancellation_token=cancellation_token,
+            file_access=access,
         )
 
     def route_question(
@@ -202,50 +179,63 @@ class ChatService:
         session_id: str | None = None,
         user_id: str = "legacy",
         *,
-        router_model: str | None = None,
-        router_provider: str | None = None,
+        llm_preference: LlmPreference | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
+        file_access: FileAccessContext | None = None,
     ) -> ChatRouteResult:
-        total_timer = StageTimer()
+        preference = llm_preference or self._llm_preferences.get_preference()
+        self._raise_if_cancelled(cancellation_token)
         session = self._get_or_create_session(session_id, user_id=user_id)
-        existing_turns = self._sessions.list_turns(session.session_id)
-        attached_before = self._sessions.list_attached_documents(session.session_id)
-        summaries = self._summaries.list_active_summaries()
-        with total_timer.measure("route_model"):
-            selected_documents = self._llm_client.route_documents(
-                question=question,
-                summaries=summaries,
-                max_documents=self._policy.max_routed_documents,
-                user_questions=[turn.question for turn in existing_turns] + [question],
-                attached_documents=attached_before,
-                previous_turns=existing_turns,
-                model=router_model,
-                provider=router_provider,
-            )
+        existing_turns = self._filter_accessible_turn_context(
+            self._sessions.list_turns(session.session_id),
+            access=file_access,
+        )
+        attached_before = self._filter_accessible_attached_documents(
+            self._sessions.list_attached_documents(session.session_id),
+            access=file_access,
+        )
+        summaries = self._summaries.list_active_summaries(access=file_access)
+        self._raise_if_cancelled(cancellation_token)
+        selected_documents = self._llm_client.route_documents(
+            question=question,
+            summaries=summaries,
+            max_documents=self._policy.max_routed_documents,
+            user_questions=[turn.question for turn in existing_turns] + [question],
+            attached_documents=attached_before,
+            previous_turns=existing_turns,
+            model=preference.router_model,
+            provider=preference.router_provider,
+            cancellation_checker=self._cancellation_checker(cancellation_token),
+        )
+        selected_documents = self._filter_accessible_selected_documents(
+            selected_documents,
+            access=file_access,
+        )
+        self._raise_if_cancelled(cancellation_token)
 
-        with total_timer.measure("attach_documents"):
-            newly_attached = self._attach_new_documents(
-                session_id=session.session_id,
-                selected_documents=selected_documents,
-                attached_documents=attached_before,
-            )
-        attached_after = self._sessions.list_attached_documents(session.session_id)
+        newly_attached = self._attach_new_documents(
+            session_id=session.session_id,
+            selected_documents=selected_documents,
+            attached_documents=attached_before,
+            access=file_access,
+        )
+        try:
+            self._raise_if_cancelled(cancellation_token)
+        except ChatRequestCancelledError:
+            self._rollback_new_attachments(session.session_id, newly_attached)
+            raise
+        attached_after = self._filter_accessible_attached_documents(
+            self._sessions.list_attached_documents(session.session_id),
+            access=file_access,
+        )
         created_at = utc_now_iso()
         self._sessions.touch_session(session.session_id, created_at)
-        timings = [*total_timer.timings(), total_timer.total("route_total")]
-        self._log_timings(
-            session_id=session.session_id,
-            question=question,
-            timings=timings,
-            selected_count=len(selected_documents),
-            newly_attached_count=len(newly_attached),
-        )
         return ChatRouteResult(
             session_id=session.session_id,
             question=question,
             selected_documents=selected_documents,
             newly_attached_documents=newly_attached,
             attached_documents=attached_after,
-            timings=timings,
             created_at=created_at,
         )
 
@@ -256,40 +246,66 @@ class ChatService:
         user_id: str = "legacy",
         route_result: ChatRouteResult | None = None,
         *,
-        answer_model: str | None = None,
-        answer_provider: str | None = None,
         selected_version_ids: list[str] | None = None,
         enable_deep_thinking: bool = False,
+        llm_preference: LlmPreference | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
+        file_access: FileAccessContext | None = None,
     ) -> ChatAnswer:
-        total_timer = StageTimer()
+        preference = llm_preference or self._llm_preferences.get_preference()
         session = self._get_or_create_session(session_id, user_id=user_id)
-        existing_turns = self._sessions.list_turns(session.session_id)
-        attached_documents = self._sessions.list_attached_documents(session.session_id)
-        documents_for_answer = self._resolve_documents_for_answer(
-            attached_documents=attached_documents,
-            route_result=route_result,
-            selected_version_ids=selected_version_ids,
-        )
-        with total_timer.measure("load_rows"):
-            rows, citation_index, rows_truncated = self._load_rows_for_documents(
-                documents_for_answer
+        created_turn_id: str | None = None
+        try:
+            self._raise_if_cancelled(cancellation_token)
+            existing_turns = self._filter_accessible_turn_context(
+                self._sessions.list_turns(session.session_id),
+                access=file_access,
             )
-        with total_timer.measure("answer_model"):
-            draft_answer = self._llm_client.answer_with_rows(
+            attached_documents = self._filter_accessible_attached_documents(
+                self._sessions.list_attached_documents(session.session_id),
+                access=file_access,
+            )
+            documents_for_answer = self._resolve_documents_for_answer(
+                attached_documents=attached_documents,
+                route_result=route_result,
+                selected_version_ids=selected_version_ids,
+            )
+            documents_for_answer = self._filter_accessible_selected_documents(
+                documents_for_answer,
+                access=file_access,
+            )
+            (
+                draft_answer,
+                documents_for_answer,
+                rows,
+                citation_index,
+                rows_truncated,
+            ) = self._answer_with_current_access(
                 question=question,
-                documents=documents_for_answer,
-                rows=rows,
+                initial_documents=documents_for_answer,
                 previous_turns=existing_turns,
-                model=answer_model,
-                provider=answer_provider,
+                preference=preference,
                 enable_deep_thinking=enable_deep_thinking,
+                cancellation_token=cancellation_token,
+                access=file_access,
             )
-        cited_evidence_ids = [
-            evidence_id
-            for block in draft_answer.answer_blocks
-            for evidence_id in block.evidence_ids
-        ]
-        with total_timer.measure("verify_citations"):
+            self._raise_if_cancelled(cancellation_token)
+            current_document_keys = self._document_keys(
+                self._filter_accessible_selected_documents(
+                    documents_for_answer,
+                    access=file_access,
+                )
+            )
+            if current_document_keys != self._document_keys(documents_for_answer):
+                draft_answer = self._visibility_changed_draft_answer(question)
+                documents_for_answer = []
+                citation_index = {}
+                rows_truncated = False
+            cited_evidence_ids = [
+                evidence_id
+                for block in draft_answer.answer_blocks
+                for evidence_id in block.evidence_ids
+            ]
             citations, evidence_id_to_citation_id, citation_warnings = (
                 self._build_verified_citations(
                     draft_answer.citations,
@@ -297,84 +313,367 @@ class ChatService:
                     citation_index,
                 )
             )
-        warnings = [
-            *self._row_limit_warnings(rows_truncated),
-            *citation_warnings,
-        ]
-        answer_blocks = [
-            ChatAnswerBlock(
-                text=block.text,
-                citation_ids=[
-                    citation_id
-                    for evidence_id in block.evidence_ids
-                    if (
-                        citation_id := evidence_id_to_citation_id.get(evidence_id)
-                    )
-                    is not None
-                ],
-                reasoning=block.reasoning,
+            warnings = [
+                *self._row_limit_warnings(rows_truncated),
+                *citation_warnings,
+            ]
+            answer_blocks = [
+                ChatAnswerBlock(
+                    text=block.text,
+                    citation_ids=[
+                        citation_id
+                        for evidence_id in block.evidence_ids
+                        if (
+                            citation_id := evidence_id_to_citation_id.get(evidence_id)
+                        )
+                        is not None
+                    ],
+                    reasoning=block.reasoning,
+                )
+                for block in draft_answer.answer_blocks
+            ]
+            created_at = utc_now_iso()
+            selected_documents = documents_for_answer
+            newly_attached_documents = self._filter_accessible_selected_documents(
+                route_result.newly_attached_documents if route_result is not None else [],
+                access=file_access,
             )
-            for block in draft_answer.answer_blocks
-        ]
-        created_at = utc_now_iso()
-        answer_timings = [*total_timer.timings(), total_timer.total("answer_total")]
-        timings = [*(route_result.timings if route_result else []), *answer_timings]
-        timings.append(
-            ChatStageTiming(
-                stage="chat_total",
-                duration_seconds=self._chat_total(timings),
-            )
-        )
-        selected_documents = documents_for_answer
-        newly_attached_documents = (
-            route_result.newly_attached_documents if route_result is not None else []
-        )
-        answer = ChatAnswer(
-            session_id=session.session_id,
-            question=question,
-            answer_blocks=answer_blocks,
-            selected_documents=selected_documents,
-            newly_attached_documents=newly_attached_documents,
-            attached_documents=attached_documents,
-            citations=citations,
-            insufficient_evidence=draft_answer.insufficient_evidence,
-            follow_up_suggestions=draft_answer.follow_up_suggestions,
-            warnings=warnings,
-            timings=timings,
-            created_at=created_at,
-        )
-        self._sessions.create_turn(
-            ChatTurn(
-                turn_id=new_id("turn"),
+            answer = ChatAnswer(
                 session_id=session.session_id,
                 question=question,
-                answer_text="\n".join(block.text for block in answer_blocks),
-                citation_ids=[
-                    citation_id
-                    for block in answer_blocks
-                    for citation_id in block.citation_ids
-                ],
-                selected_documents=selected_documents,
-                created_at=created_at,
                 answer_blocks=answer_blocks,
+                selected_documents=selected_documents,
                 newly_attached_documents=newly_attached_documents,
                 attached_documents=attached_documents,
                 citations=citations,
-                insufficient_evidence=answer.insufficient_evidence,
-                follow_up_suggestions=answer.follow_up_suggestions,
-                warnings=answer.warnings,
-                timings=timings,
+                insufficient_evidence=draft_answer.insufficient_evidence,
+                follow_up_suggestions=draft_answer.follow_up_suggestions,
+                warnings=warnings,
+                created_at=created_at,
             )
+            self._raise_if_cancelled(cancellation_token)
+            created_turn_id = new_id("turn")
+            self._sessions.create_turn(
+                ChatTurn(
+                    turn_id=created_turn_id,
+                    session_id=session.session_id,
+                    question=question,
+                    answer_text="\n".join(block.text for block in answer_blocks),
+                    citation_ids=[
+                        citation_id
+                        for block in answer_blocks
+                        for citation_id in block.citation_ids
+                    ],
+                    selected_documents=selected_documents,
+                    created_at=created_at,
+                    answer_blocks=answer_blocks,
+                    newly_attached_documents=newly_attached_documents,
+                    attached_documents=attached_documents,
+                    citations=citations,
+                    insufficient_evidence=answer.insufficient_evidence,
+                    follow_up_suggestions=answer.follow_up_suggestions,
+                    warnings=answer.warnings,
+                )
+            )
+            self._sessions.touch_session(session.session_id, created_at)
+            self._raise_if_cancelled(cancellation_token)
+            return answer
+        except ChatRequestCancelledError:
+            if created_turn_id is not None:
+                self._sessions.delete_turn(session.session_id, created_turn_id)
+            if route_result is not None:
+                self._rollback_new_attachments(
+                    session.session_id,
+                    route_result.newly_attached_documents,
+                )
+            raise
+
+    def _cancellation_checker(
+        self,
+        cancellation_token: ChatCancellationToken | None,
+    ):
+        if cancellation_token is None:
+            return None
+        return cancellation_token.raise_if_cancelled
+
+    def _raise_if_cancelled(
+        self,
+        cancellation_token: ChatCancellationToken | None,
+    ) -> None:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+
+    def _rollback_new_attachments(
+        self,
+        session_id: str,
+        newly_attached: list[SelectedDocument],
+    ) -> None:
+        referenced_version_ids = {
+            document.version_id
+            for turn in self._sessions.list_turns(session_id)
+            for document in [
+                *turn.selected_documents,
+                *turn.newly_attached_documents,
+                *turn.attached_documents,
+            ]
+        }
+        self._sessions.detach_documents(
+            session_id,
+            [
+                document.version_id
+                for document in newly_attached
+                if document.version_id not in referenced_version_ids
+            ],
         )
-        self._sessions.touch_session(session.session_id, created_at)
-        self._log_timings(
-            session_id=session.session_id,
+
+    def _filter_accessible_attached_documents(
+        self,
+        documents: list[AttachedDocument],
+        *,
+        access: FileAccessContext | None,
+    ) -> list[AttachedDocument]:
+        if access is None or access.can_manage_files:
+            return documents
+        return [
+            document
+            for document in documents
+            if self._can_access_document(document, access=access)
+        ]
+
+    def _filter_accessible_selected_documents(
+        self,
+        documents: list[SelectedDocument],
+        *,
+        access: FileAccessContext | None,
+    ) -> list[SelectedDocument]:
+        if access is None or access.can_manage_files:
+            return documents
+        return [
+            document
+            for document in documents
+            if self._can_access_file(document.file_id, access=access)
+        ]
+
+    def _filter_accessible_turn_context(
+        self,
+        turns: list[ChatTurn],
+        *,
+        access: FileAccessContext | None,
+    ) -> list[ChatTurn]:
+        if access is None or access.can_manage_files:
+            return turns
+        return [
+            turn
+            for turn in turns
+            if self._turn_context_is_accessible(turn, access=access)
+        ]
+
+    def _turn_context_is_accessible(
+        self,
+        turn: ChatTurn,
+        *,
+        access: FileAccessContext,
+    ) -> bool:
+        file_ids = {
+            document.file_id
+            for document in [
+                *turn.selected_documents,
+                *turn.newly_attached_documents,
+                *turn.attached_documents,
+            ]
+        }
+        file_ids.update(citation.file_id for citation in turn.citations)
+        if not file_ids:
+            return True
+        return all(self._can_access_file(file_id, access=access) for file_id in file_ids)
+
+    def _can_access_file(self, file_id: str, *, access: FileAccessContext) -> bool:
+        try:
+            self._excel_assets.get_file(file_id)
+        except AssetNotFoundError:
+            return True
+        try:
+            self._excel_assets.get_file(file_id, access=access)
+        except AssetNotFoundError:
+            return False
+        return True
+
+    def _can_access_document(
+        self,
+        document: SelectedDocument,
+        *,
+        access: FileAccessContext,
+    ) -> bool:
+        if not self._can_access_file(document.file_id, access=access):
+            return False
+        try:
+            self._excel_assets.list_sheets(document.version_id, access=access)
+        except AssetNotFoundError:
+            return self._can_use_deleted_legacy_document(document)
+        return True
+
+    def _can_use_deleted_legacy_document(self, document: SelectedDocument) -> bool:
+        try:
+            sheets = self._excel_assets.list_sheets_for_legacy_chat_context(
+                document.version_id
+            )
+        except AssetNotFoundError:
+            return False
+        return any(sheets)
+
+    def _answer_with_current_access(
+        self,
+        *,
+        question: str,
+        initial_documents: list[SelectedDocument],
+        previous_turns: list[ChatTurn],
+        preference: LlmPreference,
+        enable_deep_thinking: bool,
+        cancellation_token: ChatCancellationToken | None,
+        access: FileAccessContext | None,
+    ) -> tuple[
+        DraftChatAnswer,
+        list[SelectedDocument],
+        list[dict],
+        dict[str, ExcelCitation],
+        bool,
+    ]:
+        documents, rows, citation_index, rows_truncated = self._current_answer_inputs(
+            initial_documents,
+            access=access,
+        )
+        self._raise_if_cancelled(cancellation_token)
+        if not documents:
+            return (
+                self._insufficient_evidence_draft_answer(question),
+                documents,
+                rows,
+                citation_index,
+                rows_truncated,
+            )
+
+        draft_answer = self._llm_client.answer_with_rows(
             question=question,
-            timings=timings,
-            selected_count=len(attached_documents),
-            newly_attached_count=0,
+            documents=documents,
+            rows=rows,
+            previous_turns=previous_turns,
+            model=preference.answer_model,
+            provider=preference.answer_provider,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=self._cancellation_checker(cancellation_token),
         )
-        return answer
+        self._raise_if_cancelled(cancellation_token)
+
+        refreshed_documents = self._filter_accessible_selected_documents(
+            documents,
+            access=access,
+        )
+        if self._document_keys(refreshed_documents) == self._document_keys(documents):
+            return draft_answer, documents, rows, citation_index, rows_truncated
+
+        documents, rows, citation_index, rows_truncated = self._current_answer_inputs(
+            refreshed_documents,
+            access=access,
+        )
+        if not documents:
+            return (
+                self._insufficient_evidence_draft_answer(question),
+                documents,
+                rows,
+                citation_index,
+                rows_truncated,
+            )
+
+        draft_answer = self._llm_client.answer_with_rows(
+            question=question,
+            documents=documents,
+            rows=rows,
+            previous_turns=previous_turns,
+            model=preference.answer_model,
+            provider=preference.answer_provider,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=self._cancellation_checker(cancellation_token),
+        )
+        self._raise_if_cancelled(cancellation_token)
+
+        final_documents = self._filter_accessible_selected_documents(
+            documents,
+            access=access,
+        )
+        if self._document_keys(final_documents) != self._document_keys(documents):
+            return (
+                self._visibility_changed_draft_answer(question),
+                [],
+                [],
+                {},
+                False,
+            )
+        return draft_answer, documents, rows, citation_index, rows_truncated
+
+    def _current_answer_inputs(
+        self,
+        documents: list[SelectedDocument],
+        *,
+        access: FileAccessContext | None,
+    ) -> tuple[list[SelectedDocument], list[dict], dict[str, ExcelCitation], bool]:
+        current_documents = self._filter_accessible_selected_documents(
+            documents,
+            access=access,
+        )
+        rows, citation_index, rows_truncated = self._load_rows_for_documents(
+            current_documents,
+            access=access,
+        )
+        current_documents = self._filter_accessible_selected_documents(
+            current_documents,
+            access=access,
+        )
+        allowed_version_ids = {document.version_id for document in current_documents}
+        return (
+            current_documents,
+            [row for row in rows if row.get("version_id") in allowed_version_ids],
+            {
+                evidence_id: citation
+                for evidence_id, citation in citation_index.items()
+                if citation.version_id in allowed_version_ids
+            },
+            rows_truncated,
+        )
+
+    def _insufficient_evidence_draft_answer(self, question: str) -> DraftChatAnswer:
+        _ = question
+        return DraftChatAnswer(
+            answer_blocks=[
+                DraftAnswerBlock(
+                    text="No visible workspace evidence is available for this question.",
+                    evidence_ids=[],
+                )
+            ],
+            citations=[],
+            insufficient_evidence=True,
+            follow_up_suggestions=[],
+        )
+
+    def _visibility_changed_draft_answer(self, question: str) -> DraftChatAnswer:
+        _ = question
+        return DraftChatAnswer(
+            answer_blocks=[
+                DraftAnswerBlock(
+                    text=(
+                        "The available workspace evidence changed while this answer was "
+                        "being prepared. Send the question again to use the current file "
+                        "visibility."
+                    ),
+                    evidence_ids=[],
+                )
+            ],
+            citations=[],
+            insufficient_evidence=True,
+            follow_up_suggestions=[],
+        )
+
+    def _document_keys(self, documents: list[SelectedDocument]) -> set[tuple[str, str]]:
+        return {(document.file_id, document.version_id) for document in documents}
 
     def _resolve_documents_for_answer(
         self,
@@ -384,7 +683,9 @@ class ChatService:
         selected_version_ids: list[str] | None,
     ) -> list[SelectedDocument]:
         if route_result is not None:
-            return route_result.selected_documents
+            if route_result.selected_documents:
+                return route_result.selected_documents
+            return self._attached_to_selected_documents(attached_documents)
         if selected_version_ids:
             selected_version_id_set = set(selected_version_ids)
             return [
@@ -421,13 +722,21 @@ class ChatService:
         session_id: str,
         selected_documents: list[SelectedDocument],
         attached_documents: list[AttachedDocument],
+        *,
+        access: FileAccessContext | None,
     ) -> list[SelectedDocument]:
         attached_version_ids = {document.version_id for document in attached_documents}
         newly_attached: list[SelectedDocument] = []
         for document in selected_documents:
             if document.version_id in attached_version_ids:
                 continue
-            sheets = self._excel_assets.list_sheets(document.version_id)
+            try:
+                sheets = self._excel_assets.list_sheets(
+                    document.version_id,
+                    access=access,
+                )
+            except AssetNotFoundError:
+                continue
             attached = AttachedDocument(
                 session_id=session_id,
                 file_id=document.file_id,
@@ -436,34 +745,65 @@ class ChatService:
                 row_count=sum(sheet.row_count for sheet in sheets),
                 context_hash=self._document_context_hash(document.version_id, sheets),
             )
-            self._sessions.attach_document(attached)
-            newly_attached.append(document)
+            if self._sessions.attach_document(attached):
+                newly_attached.append(document)
         return newly_attached
 
     def _load_rows_for_attached_documents(
         self,
         attached_documents: list[AttachedDocument],
+        *,
+        access: FileAccessContext | None = None,
     ) -> tuple[list[dict], dict[str, ExcelCitation], bool]:
         return self._load_rows_for_documents(
-            self._attached_to_selected_documents(attached_documents)
+            self._attached_to_selected_documents(attached_documents),
+            access=access,
         )
 
     def _load_rows_for_documents(
         self,
         documents: list[SelectedDocument],
+        *,
+        access: FileAccessContext | None = None,
     ) -> tuple[list[dict], dict[str, ExcelCitation], bool]:
         rows: list[dict] = []
         citation_index: dict[str, ExcelCitation] = {}
         rows_truncated = False
         for document in documents:
-            for sheet in self._excel_assets.list_sheets(document.version_id):
+            try:
+                sheets = self._excel_assets.list_sheets(
+                    document.version_id,
+                    access=access,
+                )
+            except AssetNotFoundError:
+                try:
+                    sheets = self._excel_assets.list_sheets_for_legacy_chat_context(
+                        document.version_id
+                    )
+                except AssetNotFoundError:
+                    continue
+            for sheet in sheets:
                 offset = 0
                 while True:
-                    result = self._excel_assets.list_sheet_rows(
-                        sheet_id=sheet.sheet_id,
-                        offset=offset,
-                        limit=self._policy.row_page_size,
-                    )
+                    try:
+                        result = self._excel_assets.list_sheet_rows(
+                            sheet_id=sheet.sheet_id,
+                            offset=offset,
+                            limit=self._policy.row_page_size,
+                            access=access,
+                        )
+                    except AssetNotFoundError:
+                        try:
+                            result = (
+                                self._excel_assets
+                                .list_sheet_rows_for_legacy_chat_context(
+                                    sheet_id=sheet.sheet_id,
+                                    offset=offset,
+                                    limit=self._policy.row_page_size,
+                                )
+                            )
+                        except AssetNotFoundError:
+                            break
                     for row_response in result.rows:
                         if (
                             self._policy.effective_max_answer_rows is not None
@@ -661,78 +1001,3 @@ class ChatService:
             digest.update(str(sheet.row_count).encode())
             digest.update(str(sheet.column_count).encode())
         return digest.hexdigest()
-
-    def _chat_total(self, timings: list[ChatStageTiming]) -> float:
-        answer_total = next(
-            (
-                timing.duration_seconds
-                for timing in timings
-                if timing.stage == "answer_total"
-            ),
-            0.0,
-        )
-        route_total = next(
-            (
-                timing.duration_seconds
-                for timing in timings
-                if timing.stage == "route_total"
-            ),
-            0.0,
-        )
-        return route_total + answer_total
-
-    def _log_timings(
-        self,
-        session_id: str,
-        question: str,
-        timings: list[ChatStageTiming],
-        selected_count: int,
-        newly_attached_count: int,
-    ) -> None:
-        logger.info(
-            "chat timing session_id=%s selected=%s newly_attached=%s timings=%s question=%r",
-            session_id,
-            selected_count,
-            newly_attached_count,
-            {
-                timing.stage: round(timing.duration_seconds, 3)
-                for timing in timings
-            },
-            question[:160],
-        )
-
-
-class StageTimer:
-    def __init__(self) -> None:
-        self._started_at = perf_counter()
-        self._timings: list[ChatStageTiming] = []
-
-    def measure(self, stage: str) -> "StageMeasurement":
-        return StageMeasurement(stage=stage, timer=self)
-
-    def add(self, stage: str, duration_seconds: float) -> None:
-        self._timings.append(
-            ChatStageTiming(stage=stage, duration_seconds=duration_seconds)
-        )
-
-    def timings(self) -> list[ChatStageTiming]:
-        return list(self._timings)
-
-    def total(self, stage: str) -> ChatStageTiming:
-        return ChatStageTiming(
-            stage=stage,
-            duration_seconds=perf_counter() - self._started_at,
-        )
-
-
-class StageMeasurement:
-    def __init__(self, stage: str, timer: StageTimer) -> None:
-        self._stage = stage
-        self._timer = timer
-        self._started_at = 0.0
-
-    def __enter__(self) -> None:
-        self._started_at = perf_counter()
-
-    def __exit__(self, *_exc: object) -> None:
-        self._timer.add(self._stage, perf_counter() - self._started_at)

@@ -22,14 +22,15 @@ from app.domain.models import (
     AuthSession,
     ChatAnswerBlock,
     ChatSession,
-    ChatStageTiming,
     ChatTurn,
     DocumentSummary,
     ExcelArtifact,
     ExcelArtifactType,
     ExcelCitation,
     ExcelFile,
+    ExcelFileStatus,
     ExcelFileVersion,
+    ExcelFileVisibility,
     ExcelRowMapping,
     ExcelSheet,
     ExcelVersionStatus,
@@ -152,8 +153,11 @@ class SQLiteExcelAssetRepository:
             connection.execute(
                 """
                 INSERT INTO excel_files
-                  (file_id, display_name, active_version_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                  (
+                    file_id, display_name, active_version_id, created_at,
+                    updated_at, status, deleted_at, visibility
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     file.file_id,
@@ -161,13 +165,30 @@ class SQLiteExcelAssetRepository:
                     file.active_version_id,
                     file.created_at,
                     file.updated_at,
+                    file.status.value,
+                    file.deleted_at,
+                    file.visibility.value,
                 ),
             )
 
     def get_file(self, file_id: str) -> ExcelFile | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM excel_files WHERE file_id = ?",
+                """
+                SELECT * FROM excel_files
+                WHERE file_id = ? AND status = ?
+                """,
+                (file_id, ExcelFileStatus.ACTIVE.value),
+            ).fetchone()
+        return self._to_file(row)
+
+    def get_file_including_deleted(self, file_id: str) -> ExcelFile | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM excel_files
+                WHERE file_id = ?
+                """,
                 (file_id,),
             ).fetchone()
         return self._to_file(row)
@@ -175,15 +196,23 @@ class SQLiteExcelAssetRepository:
     def find_file_by_display_name(self, display_name: str) -> ExcelFile | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM excel_files WHERE display_name = ?",
-                (display_name,),
+                """
+                SELECT * FROM excel_files
+                WHERE display_name = ? AND status = ?
+                """,
+                (display_name, ExcelFileStatus.ACTIVE.value),
             ).fetchone()
         return self._to_file(row)
 
     def list_files(self) -> list[ExcelFile]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM excel_files ORDER BY updated_at DESC, display_name ASC"
+                """
+                SELECT * FROM excel_files
+                WHERE status = ?
+                ORDER BY updated_at DESC, display_name ASC
+                """,
+                (ExcelFileStatus.ACTIVE.value,),
             ).fetchall()
         return [file for row in rows if (file := self._to_file(row)) is not None]
 
@@ -198,135 +227,104 @@ class SQLiteExcelAssetRepository:
                 """
                 UPDATE excel_files
                 SET display_name = ?, updated_at = ?
-                WHERE file_id = ?
+                WHERE file_id = ? AND status = ?
                 """,
-                (display_name, updated_at, file_id),
+                (display_name, updated_at, file_id, ExcelFileStatus.ACTIVE.value),
             )
             if cursor.rowcount == 0:
                 return None
             row = connection.execute(
-                "SELECT * FROM excel_files WHERE file_id = ?",
-                (file_id,),
+                """
+                SELECT * FROM excel_files
+                WHERE file_id = ? AND status = ?
+                """,
+                (file_id, ExcelFileStatus.ACTIVE.value),
+            ).fetchone()
+        return self._to_file(row)
+
+    def update_file_visibility(
+        self,
+        file_id: str,
+        visibility: ExcelFileVisibility,
+        updated_at: str,
+    ) -> ExcelFile | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_files
+                SET visibility = ?, updated_at = ?
+                WHERE file_id = ? AND status = ?
+                """,
+                (
+                    visibility.value,
+                    updated_at,
+                    file_id,
+                    ExcelFileStatus.ACTIVE.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT * FROM excel_files
+                WHERE file_id = ? AND status = ?
+                """,
+                (file_id, ExcelFileStatus.ACTIVE.value),
             ).fetchone()
         return self._to_file(row)
 
     def delete_file(self, file_id: str) -> dict[str, int]:
         with self._connect() as connection:
-            version_rows = connection.execute(
+            row = connection.execute(
                 """
-                SELECT version_id FROM excel_file_versions
-                WHERE file_id = ?
+                SELECT display_name FROM excel_files
+                WHERE file_id = ? AND status = ?
                 """,
-                (file_id,),
-            ).fetchall()
-            version_ids = [str(row["version_id"]) for row in version_rows]
+                (file_id, ExcelFileStatus.ACTIVE.value),
+            ).fetchone()
+            if row is None:
+                return {
+                    "deleted_versions": 0,
+                    "deleted_sheets": 0,
+                    "deleted_artifacts": 0,
+                    "deleted_row_mappings": 0,
+                    "deleted_summaries": 0,
+                    "deleted_chat_session_documents": 0,
+                }
 
-            deleted_chat_session_documents = 0
-            deleted_summaries = 0
-            deleted_row_mappings = 0
-            deleted_artifacts = 0
-            deleted_sheets = 0
-            deleted_versions = 0
-
-            if version_ids:
-                placeholders = ",".join("?" for _ in version_ids)
-
-                deleted_chat_session_documents = connection.execute(
-                    f"""
-                    DELETE FROM chat_session_documents
-                    WHERE version_id IN ({placeholders})
-                    """,
-                    version_ids,
-                ).rowcount
-
-                summary_ids = connection.execute(
-                    f"""
-                    SELECT summary_id FROM document_summaries
-                    WHERE version_id IN ({placeholders})
-                    """,
-                    version_ids,
-                ).fetchall()
-                if summary_ids:
-                    summary_id_values = [str(row["summary_id"]) for row in summary_ids]
-                    summary_placeholders = ",".join("?" for _ in summary_id_values)
-                    connection.execute(
-                        f"""
-                        DELETE FROM document_sheet_summaries
-                        WHERE summary_id IN ({summary_placeholders})
-                        """,
-                        summary_id_values,
-                    )
-                deleted_summaries = connection.execute(
-                    f"""
-                    DELETE FROM document_summaries
-                    WHERE version_id IN ({placeholders})
-                    """,
-                    version_ids,
-                ).rowcount
-
-                sheet_rows = connection.execute(
-                    f"""
-                    SELECT sheet_id FROM excel_sheets
-                    WHERE version_id IN ({placeholders})
-                    """,
-                    version_ids,
-                ).fetchall()
-                sheet_ids = [str(row["sheet_id"]) for row in sheet_rows]
-                if sheet_ids:
-                    sheet_placeholders = ",".join("?" for _ in sheet_ids)
-                    deleted_row_mappings = connection.execute(
-                        f"""
-                        DELETE FROM excel_row_mappings
-                        WHERE sheet_id IN ({sheet_placeholders})
-                        """,
-                        sheet_ids,
-                    ).rowcount
-
-                deleted_artifacts = connection.execute(
-                    f"""
-                    DELETE FROM excel_artifacts
-                    WHERE version_id IN ({placeholders})
-                    """,
-                    version_ids,
-                ).rowcount
-                deleted_sheets = connection.execute(
-                    f"""
-                    DELETE FROM excel_sheets
-                    WHERE version_id IN ({placeholders})
-                    """,
-                    version_ids,
-                ).rowcount
-                deleted_versions = connection.execute(
-                    """
-                    DELETE FROM excel_file_versions
-                    WHERE file_id = ?
-                    """,
-                    (file_id,),
-                ).rowcount
-
+            deleted_at = utc_now_iso()
+            archived_display_name = self._deleted_file_display_name(
+                file_id=file_id,
+                display_name=str(row["display_name"]),
+            )
             connection.execute(
                 """
                 UPDATE excel_files
-                SET active_version_id = NULL
-                WHERE file_id = ?
+                SET
+                  display_name = ?,
+                  active_version_id = NULL,
+                  status = ?,
+                  deleted_at = ?,
+                  updated_at = ?
+                WHERE file_id = ? AND status = ?
                 """,
-                (file_id,),
-            )
-            connection.execute(
-                """
-                DELETE FROM excel_files
-                WHERE file_id = ?
-                """,
-                (file_id,),
+                (
+                    archived_display_name,
+                    ExcelFileStatus.DELETED.value,
+                    deleted_at,
+                    deleted_at,
+                    file_id,
+                    ExcelFileStatus.ACTIVE.value,
+                ),
             )
 
         return {
-            "deleted_versions": deleted_versions,
-            "deleted_sheets": deleted_sheets,
-            "deleted_artifacts": deleted_artifacts,
-            "deleted_row_mappings": deleted_row_mappings,
-            "deleted_summaries": deleted_summaries,
-            "deleted_chat_session_documents": deleted_chat_session_documents,
+            "deleted_versions": 0,
+            "deleted_sheets": 0,
+            "deleted_artifacts": 0,
+            "deleted_row_mappings": 0,
+            "deleted_summaries": 0,
+            "deleted_chat_session_documents": 0,
         }
 
     def create_version(self, version: ExcelFileVersion) -> None:
@@ -766,9 +764,9 @@ class SQLiteExcelAssetRepository:
             )
         return cursor.rowcount > 0
 
-    def attach_document(self, document: AttachedDocument) -> None:
+    def attach_document(self, document: AttachedDocument) -> bool:
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO chat_session_documents
                   (
@@ -786,6 +784,20 @@ class SQLiteExcelAssetRepository:
                     document.context_hash,
                     document.status,
                 ),
+            )
+        return cursor.rowcount > 0
+
+    def detach_documents(self, session_id: str, version_ids: list[str]) -> None:
+        if not version_ids:
+            return
+        placeholders = ",".join("?" for _version_id in version_ids)
+        with self._connect() as connection:
+            connection.execute(
+                f"""
+                DELETE FROM chat_session_documents
+                WHERE session_id = ? AND version_id IN ({placeholders})
+                """,
+                (session_id, *version_ids),
             )
 
     def list_attached_documents(self, session_id: str) -> list[AttachedDocument]:
@@ -810,9 +822,9 @@ class SQLiteExcelAssetRepository:
                     citation_ids_json, selected_documents_json, created_at,
                     answer_blocks_json, newly_attached_documents_json,
                     attached_documents_json, citations_json, insufficient_evidence,
-                    follow_up_suggestions_json, warnings_json, timings_json
+                    follow_up_suggestions_json, warnings_json
                   )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn.turn_id,
@@ -833,8 +845,17 @@ class SQLiteExcelAssetRepository:
                     1 if turn.insufficient_evidence else 0,
                     self._dump_json(turn.follow_up_suggestions),
                     self._dump_json(turn.warnings),
-                    self._dump_json(self._timings_payload(turn.timings)),
                 ),
+            )
+
+    def delete_turn(self, session_id: str, turn_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM chat_turns
+                WHERE session_id = ? AND turn_id = ?
+                """,
+                (session_id, turn_id),
             )
 
     def list_turns(self, session_id: str) -> list[ChatTurn]:
@@ -1170,6 +1191,13 @@ class SQLiteExcelAssetRepository:
             active_version_id=row["active_version_id"],
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            status=ExcelFileStatus(
+                self._row_str(row, "status", ExcelFileStatus.ACTIVE.value)
+            ),
+            deleted_at=self._row_value(row, "deleted_at"),
+            visibility=ExcelFileVisibility(
+                self._row_str(row, "visibility", ExcelFileVisibility.VISIBLE.value)
+            ),
         )
 
     def _to_version(self, row: sqlite3.Row | None) -> ExcelFileVersion | None:
@@ -1402,9 +1430,6 @@ class SQLiteExcelAssetRepository:
                 self._row_value(row, "follow_up_suggestions_json", "[]")
             ),
             warnings=self._load_string_list(self._row_value(row, "warnings_json", "[]")),
-            timings=self._timings_from_payload(
-                self._load_object_list(self._row_value(row, "timings_json", "[]"))
-            ),
         )
 
     def _to_llm_preference(self, row: sqlite3.Row | None) -> LlmPreference | None:
@@ -1571,30 +1596,6 @@ class SQLiteExcelAssetRepository:
             )
         return citations
 
-    def _timings_payload(self, timings: list[ChatStageTiming]) -> list[dict[str, object]]:
-        return [
-            {
-                "stage": timing.stage,
-                "duration_seconds": timing.duration_seconds,
-            }
-            for timing in timings
-        ]
-
-    def _timings_from_payload(self, payload: list[dict]) -> list[ChatStageTiming]:
-        timings: list[ChatStageTiming] = []
-        for timing in payload:
-            stage = str(timing.get("stage", ""))
-            if not stage:
-                continue
-            duration = timing.get("duration_seconds", 0.0)
-            timings.append(
-                ChatStageTiming(
-                    stage=stage,
-                    duration_seconds=float(duration) if isinstance(duration, int | float) else 0.0,
-                )
-            )
-        return timings
-
     def _dump_json(self, value: object) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -1655,3 +1656,6 @@ class SQLiteExcelAssetRepository:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _deleted_file_display_name(self, *, file_id: str, display_name: str) -> str:
+        return f"deleted:{file_id}:{display_name}"

@@ -11,6 +11,7 @@ import {
   previewExcelSheet,
   renameExcelFile,
   searchExcelVersionRows,
+  setExcelFileVisibility,
   uploadExcelFile,
 } from '../api/excel-assets-api'
 import {
@@ -33,6 +34,35 @@ import AuthPanel from '../components/AuthPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import DocumentSummaryCard from '../components/DocumentSummaryCard.vue'
 import SheetSearchResults from '../components/SheetSearchResults.vue'
+import { useTransientFeedback } from './use-transient-feedback'
+import {
+  defaultExcelCellWidth,
+  defaultExcelRowHeight,
+  filePageSize,
+  maxChatColumnWidth,
+  maxExcelCellWidth,
+  maxExcelRowHeight,
+  maxUploadBytes,
+  minChatColumnWidth,
+  minExcelCellWidth,
+  minExcelRowHeight,
+  pinnedFileStorageKey,
+  previewLimit,
+  primaryNavItems,
+  sheetSearchLimit,
+} from './workspace-constants'
+import {
+  clamp,
+  columnLabel,
+  csvEscape,
+  fileIcon,
+  fileTypeLabel,
+  formatDate,
+  isAllowedUploadFile,
+  rowDomId,
+  shortId,
+  toErrorMessage,
+} from './workspace-utils'
 import type { AuthResponse, AuthUser } from '../types/auth'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
@@ -45,67 +75,17 @@ import type {
   SheetSearchMatch,
   SheetPreviewResponse,
 } from '../types/excel-assets'
-
-type ActiveView = 'files' | 'chat'
-type FileInsightTab = 'summary' | 'preview' | 'schema'
-type ModelStage = 'summary' | 'router' | 'answer'
-type PrimaryNavKey = ActiveView | 'settings'
-type RenameDialog =
-  | { kind: 'file'; file: ExcelFile }
-  | { kind: 'session'; session: ChatSession }
-type ConfirmDialog =
-  | { kind: 'file'; file: ExcelFile }
-  | { kind: 'session'; session: ChatSession }
-type UploadDialog =
-  | { kind: 'new'; file: File }
-  | { kind: 'replace'; file: File }
-type FeedbackTone = 'info' | 'success' | 'warning' | 'error'
-
-interface SelectSheetOptions {
-  preserveSheetSearch?: boolean
-}
-
-interface FeedbackMessage {
-  tone: FeedbackTone
-  message: string
-}
-
-interface SelectedCell {
-  rowKey: string
-  rowNumber: number
-  columnIndex: number
-  address: string
-  value: string
-}
-
-interface PrimaryNavItem {
-  key: PrimaryNavKey
-  label: string
-  icon: string
-  disabled?: boolean
-}
-
-const previewLimit = 250
-const sheetSearchLimit = 50
-const filePageSize = 6
-const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm']
-const pinnedFileStorageKey = 'excelai-pinned-file-ids'
-const defaultRouterProvider = 'deepseek'
-const defaultRouterModel = 'deepseek-v4-flash'
-const maxUploadBytes = 50 * 1024 * 1024
-const minChatColumnWidth = 360
-const maxChatColumnWidth = 560
-const defaultExcelCellWidth = 120
-const defaultExcelRowHeight = 42
-const minExcelCellWidth = 92
-const maxExcelCellWidth = 260
-const minExcelRowHeight = 30
-const maxExcelRowHeight = 86
-const primaryNavItems: PrimaryNavItem[] = [
-  { key: 'chat', label: 'Chat', icon: 'chat_bubble' },
-  { key: 'files', label: 'Files', icon: 'folder_open' },
-  { key: 'settings', label: 'Settings', icon: 'settings', disabled: true },
-]
+import type {
+  ActiveView,
+  ConfirmDialog,
+  FileInsightTab,
+  ModelStage,
+  PrimaryNavItem,
+  RenameDialog,
+  SelectedCell,
+  SelectSheetOptions,
+  UploadDialog,
+} from './workspace-types'
 
 const initialActiveView: ActiveView =
   typeof window !== 'undefined' && window.location.hash === '#files' ? 'files' : 'chat'
@@ -140,9 +120,16 @@ const uploadDialog = ref<UploadDialog | null>(null)
 const dialogError = ref<string>('')
 const openFileActionMenuId = ref<string>('')
 const openChatSessionActionMenuId = ref<string>('')
-const operationFeedback = ref<FeedbackMessage | null>(null)
-const chatSessionFeedback = ref<FeedbackMessage | null>(null)
-const errorMessage = ref<string>('')
+const {
+  feedback: operationFeedback,
+  show: showOperationFeedback,
+  clear: clearOperationFeedback,
+} = useTransientFeedback(3200)
+const {
+  feedback: chatSessionFeedback,
+  show: showChatSessionFeedback,
+  clear: clearChatSessionFeedback,
+} = useTransientFeedback(2800)
 const fileSearchTerm = ref<string>('')
 const documentSearchTerm = ref<string>('')
 const sheetSearchTerm = ref<string>('')
@@ -163,6 +150,15 @@ const routerProvider = ref<string>('siliconflow')
 const routerModel = ref<string>('')
 const answerProvider = ref<string>('siliconflow')
 const answerModel = ref<string>('')
+const draftSummaryProvider = ref<string>('siliconflow')
+const draftSummaryModel = ref<string>('')
+const draftRouterProvider = ref<string>('siliconflow')
+const draftRouterModel = ref<string>('')
+const draftAnswerProvider = ref<string>('siliconflow')
+const draftAnswerModel = ref<string>('')
+const isModelPreferenceSaving = ref<boolean>(false)
+const modelPreferenceFeedback = ref<string>('')
+const modelPreferenceFeedbackKind = ref<'success' | 'error'>('success')
 const pinnedFileIds = ref<string[]>(loadPinnedFileIds())
 const selectedCell = ref<SelectedCell | null>(null)
 const excelColumnWidths = ref<Record<string, number>>({})
@@ -175,11 +171,6 @@ const isExcelRowResizing = ref<boolean>(false)
 const isChatPanelCollapsed = ref<boolean>(false)
 const isChatAnswerPending = ref<boolean>(false)
 const filePage = ref<number>(1)
-let operationFeedbackTimer: number | null = null
-let chatSessionFeedbackTimer: number | null = null
-let modelPreferenceSaveTimer: number | null = null
-let isModelPreferenceReady = false
-let isApplyingModelPreference = false
 let excelResizeStartX = 0
 let excelResizeStartY = 0
 let excelResizeStartWidth = 0
@@ -411,6 +402,21 @@ const answerSupportsDeepThinking = computed(() => {
   return provider?.deep_thinking_models.includes(answerModel.value) ?? false
 })
 
+const hasModelPreferenceDraftChanges = computed(() => {
+  return (
+    draftSummaryProvider.value !== summaryProvider.value ||
+    draftSummaryModel.value !== summaryModel.value ||
+    draftRouterProvider.value !== routerProvider.value ||
+    draftRouterModel.value !== routerModel.value ||
+    draftAnswerProvider.value !== answerProvider.value ||
+    draftAnswerModel.value !== answerModel.value
+  )
+})
+
+const canSaveModelPreference = computed(() => {
+  return hasModelPreferenceDraftChanges.value && isCompleteModelPreference()
+})
+
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
 
 const visiblePrimaryNavItems = computed(() => {
@@ -428,6 +434,9 @@ onMounted(() => {
   if (typeof window !== 'undefined') {
     window.addEventListener('hashchange', syncActiveViewFromLocation)
   }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('pointerdown', handleDocumentPointerDown)
+  }
   void restoreAuthentication()
 })
 
@@ -435,27 +444,15 @@ onBeforeUnmount(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('hashchange', syncActiveViewFromLocation)
   }
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('pointerdown', handleDocumentPointerDown)
+  }
   clearOperationFeedback()
   clearChatSessionFeedback()
-  clearModelPreferenceSave()
   stopChatResize()
   stopExcelColumnResize()
   stopExcelRowResize()
 })
-
-watch(
-  () => [
-    summaryProvider.value,
-    summaryModel.value,
-    routerProvider.value,
-    routerModel.value,
-    answerProvider.value,
-    answerModel.value,
-  ],
-  () => {
-    queueModelPreferenceSave()
-  },
-)
 
 watch(
   () => filteredFiles.value.length,
@@ -530,7 +527,7 @@ async function resetWorkspaceState(): Promise<void> {
   selectedSheetId.value = ''
   selectedCell.value = null
   clearSheetSearch()
-  errorMessage.value = ''
+  clearWorkspaceError()
   chatSessionError.value = ''
   isChatAnswerPending.value = false
   closeActionMenus()
@@ -540,32 +537,26 @@ async function loadLlmModelOptions(): Promise<void> {
   const options = await getLlmModelOptions()
   availableLlmModels.value = options.models
   availableLlmProviders.value = options.providers
-  isApplyingModelPreference = true
+  applyModelDefaults(options.defaults)
   try {
-    applyModelDefaults(options.defaults)
-    try {
-      const preference = await getLlmPreference()
-      applyModelDefaults(preference)
-    } catch (error: unknown) {
-      errorMessage.value = toErrorMessage(error)
-    }
-  } finally {
-    await nextTick()
-    isApplyingModelPreference = false
-    isModelPreferenceReady = true
+    const preference = await getLlmPreference()
+    applyModelDefaults(preference)
+  } catch (error: unknown) {
+    showWorkspaceError(error)
   }
 }
 
 function applyModelDefaults(defaults: LlmModelDefaults): void {
   summaryProvider.value = defaults.summary_provider
   summaryModel.value = defaults.summary_model
-  routerProvider.value = preferredRouterProvider(defaults.router_provider)
-  routerModel.value = preferredRouterModel(defaults.router_model)
+  routerProvider.value = defaults.router_provider
+  routerModel.value = defaults.router_model
   answerProvider.value = defaults.answer_provider
   answerModel.value = defaults.answer_model
   ensureStageModel('summary')
   ensureStageModel('router')
   ensureStageModel('answer')
+  resetModelPreferenceDraft()
 }
 
 function setActiveView(view: ActiveView): void {
@@ -634,6 +625,20 @@ function closeActionMenus(): void {
   openChatSessionActionMenuId.value = ''
 }
 
+function handleDocumentPointerDown(event: PointerEvent): void {
+  if (!openFileActionMenuId.value && !openChatSessionActionMenuId.value) {
+    return
+  }
+  if (isActionMenuTarget(event.target)) {
+    return
+  }
+  closeActionMenus()
+}
+
+function isActionMenuTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('.item-action-menu, .menu-trigger'))
+}
+
 function setFilePage(page: number): void {
   filePage.value = clamp(page, 1, filePageCount.value)
   closeActionMenus()
@@ -654,6 +659,18 @@ function expandChatPanel(): void {
 
 function showNotificationsNotice(): void {
   showOperationFeedback('info', 'No new file notifications.')
+}
+
+function showWorkspaceError(error: unknown, durationMs = 4200): void {
+  showOperationFeedback('error', toErrorMessage(error), durationMs)
+}
+
+function showWorkspaceErrorMessage(message: string, durationMs = 4200): void {
+  showOperationFeedback('error', message, durationMs)
+}
+
+function clearWorkspaceError(): void {
+  clearOperationFeedback()
 }
 
 async function loadChatSessions(preferredSessionId: string | null = null): Promise<void> {
@@ -837,6 +854,28 @@ function toggleFilePin(file: ExcelFile): void {
   savePinnedFileIds(nextIds)
 }
 
+async function toggleFileVisibility(file: ExcelFile): Promise<void> {
+  if (!ensureWorkspaceMutationAllowed()) {
+    return
+  }
+  closeActionMenus()
+  const busyRequestId = beginWorkspaceBusy()
+  clearWorkspaceError()
+  try {
+    const updatedFile = await setExcelFileVisibility(
+      file.file_id,
+      !file.visible_to_members,
+    )
+    files.value = files.value.map((item) => (
+      item.file_id === updatedFile.file_id ? updatedFile : item
+    ))
+  } catch (error: unknown) {
+    showWorkspaceError(error)
+  } finally {
+    finishWorkspaceBusy(busyRequestId)
+  }
+}
+
 function loadPinnedFileIds(): string[] {
   if (typeof window === 'undefined') {
     return []
@@ -889,7 +928,7 @@ async function refreshFiles(): Promise<void> {
   }
   const requestId = ++fileListRequestId
   const busyRequestId = beginWorkspaceBusy()
-  errorMessage.value = ''
+  clearWorkspaceError()
   try {
     const nextFiles = await listExcelFiles()
     if (requestId !== fileListRequestId) {
@@ -906,7 +945,7 @@ async function refreshFiles(): Promise<void> {
     }
   } catch (error: unknown) {
     if (requestId === fileListRequestId) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
   } finally {
     if (requestId === fileListRequestId) {
@@ -920,7 +959,7 @@ async function chooseFile(file: ExcelFile, view: ActiveView | null = null): Prom
     return
   }
   closeActionMenus()
-  errorMessage.value = ''
+  clearWorkspaceError()
   const requestId = nextWorkspaceSelectionRequestId()
   const busyRequestId = beginWorkspaceBusy()
   try {
@@ -930,7 +969,7 @@ async function chooseFile(file: ExcelFile, view: ActiveView | null = null): Prom
     }
   } catch (error: unknown) {
     if (isCurrentWorkspaceSelection(requestId)) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
   } finally {
     finishWorkspaceBusy(busyRequestId)
@@ -1051,7 +1090,7 @@ async function loadPreviewPage(offset: number): Promise<void> {
   }
   const requestId = nextWorkspaceSelectionRequestId()
   const sheetId = selectedSheetId.value
-  errorMessage.value = ''
+  clearWorkspaceError()
   try {
     const safeOffset = Math.max(0, offset)
     rowLookup.value = null
@@ -1063,7 +1102,7 @@ async function loadPreviewPage(offset: number): Promise<void> {
     preview.value = nextPreview
   } catch (error: unknown) {
     if (isCurrentWorkspaceSelection(requestId)) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
   }
 }
@@ -1158,19 +1197,17 @@ function isCurrentSheetSearch(
 
 async function generateSummaryForSelectedVersion(): Promise<void> {
   if (!selectedVersionId.value) {
-    errorMessage.value = 'Select a version first.'
+    showWorkspaceErrorMessage('Select a version first.')
     return
   }
   const versionId = selectedVersionId.value
   const selectionRequestId = workspaceSelectionRequestId
   const generationRequestId = ++summaryGenerationRequestId
-  errorMessage.value = ''
+  clearWorkspaceError()
   isSummaryLoading.value = true
   try {
     const nextSummary = await generateDocumentSummary(
       versionId,
-      summaryModel.value || null,
-      summaryProvider.value || null,
     )
     if (
       generationRequestId === summaryGenerationRequestId &&
@@ -1186,7 +1223,7 @@ async function generateSummaryForSelectedVersion(): Promise<void> {
       isCurrentWorkspaceSelection(selectionRequestId) &&
       selectedVersionId.value === versionId
     ) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
   } finally {
     if (generationRequestId === summaryGenerationRequestId) {
@@ -1200,14 +1237,14 @@ async function saveDocumentSummary(
   onSaved: (saved: boolean) => void,
 ): Promise<void> {
   if (!selectedVersionId.value) {
-    errorMessage.value = 'Select a version first.'
+    showWorkspaceErrorMessage('Select a version first.')
     onSaved(false)
     return
   }
   const versionId = selectedVersionId.value
   const selectionRequestId = workspaceSelectionRequestId
   const saveRequestId = ++summarySaveRequestId
-  errorMessage.value = ''
+  clearWorkspaceError()
   isSummarySaving.value = true
   try {
     const nextSummary = await updateDocumentSummary(versionId, payload)
@@ -1226,7 +1263,7 @@ async function saveDocumentSummary(
       isCurrentWorkspaceSelection(selectionRequestId) &&
       selectedVersionId.value === versionId
     ) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
     onSaved(false)
   } finally {
@@ -1285,15 +1322,17 @@ function setUploadFile(file: File | null): void {
   }
   if (!isAllowedUploadFile(file)) {
     selectedUploadFile.value = null
-    errorMessage.value = 'Only Excel files are supported: .xls, .xlsx, .xlsm, .xltx, .xltm.'
+    showWorkspaceErrorMessage(
+      'Only Excel files are supported: .xls, .xlsx, .xlsm, .xltx, .xltm.',
+    )
     return
   }
   if (file.size > maxUploadBytes) {
     selectedUploadFile.value = null
-    errorMessage.value = 'File is larger than 50MB.'
+    showWorkspaceErrorMessage('File is larger than 50MB.')
     return
   }
-  errorMessage.value = ''
+  clearWorkspaceError()
   selectedUploadFile.value = file
   uploadDialog.value = { kind: 'new', file }
 }
@@ -1306,12 +1345,12 @@ function requestDeleteFile(file: ExcelFile): void {
   confirmDialog.value = { kind: 'file', file }
   pendingDeleteFile.value = null
   dialogError.value = ''
-  errorMessage.value = ''
+  clearWorkspaceError()
 }
 
 function exportPreviewCsv(): void {
   if (!preview.value || preview.value.rows.length === 0) {
-    errorMessage.value = 'No preview rows are available to download.'
+    showWorkspaceErrorMessage('No preview rows are available to download.')
     return
   }
   const csvText = preview.value.rows
@@ -1389,7 +1428,7 @@ async function submitRenameDialog(): Promise<void> {
   const busyRequestId = dialog.kind === 'file' ? beginWorkspaceBusy() : null
   try {
     if (dialog.kind === 'file') {
-      errorMessage.value = ''
+      clearWorkspaceError()
       const renamedFile = await renameExcelFile(dialog.file.file_id, trimmedValue)
       files.value = files.value.map((item) => (
         item.file_id === renamedFile.file_id ? renamedFile : item
@@ -1421,7 +1460,7 @@ async function confirmDeleteFile(): Promise<void> {
     return
   }
 
-  errorMessage.value = ''
+  clearWorkspaceError()
   const requestId = nextWorkspaceSelectionRequestId()
   const busyRequestId = beginWorkspaceBusy()
   try {
@@ -1441,8 +1480,8 @@ async function confirmDeleteFile(): Promise<void> {
     }
     showOperationFeedback(
       'success',
-      `${result.display_name} deleted. Removed ${result.deleted_versions} version(s), ${result.deleted_sheets} sheet(s), ${result.deleted_artifacts} artifact(s), ${result.deleted_summaries} summary record(s), and ${result.deleted_chat_session_documents} chat attachment(s).`,
-      5200,
+      `${result.display_name} removed from file management.`,
+      3600,
     )
   } catch (error: unknown) {
     if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
@@ -1465,11 +1504,11 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
   }
   const file = replaceExisting ? pendingReplaceFile.value : selectedUploadFile.value
   if (!file) {
-    errorMessage.value = 'Choose an Excel workbook first.'
+    showWorkspaceErrorMessage('Choose an Excel workbook first.')
     return
   }
 
-  errorMessage.value = ''
+  clearWorkspaceError()
   const requestId = nextWorkspaceSelectionRequestId()
   const busyRequestId = beginWorkspaceBusy()
   try {
@@ -1503,7 +1542,7 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
       if (uploadDialog.value) {
         dialogError.value = toErrorMessage(error)
       } else {
-        errorMessage.value = toErrorMessage(error)
+        showWorkspaceError(error)
       }
     }
   } finally {
@@ -1522,7 +1561,7 @@ async function lookupVisibleRow(row: string[]): Promise<void> {
 async function lookupRowInSheet(sheetId: string, rowId: string): Promise<void> {
   const requestId = ++rowLookupRequestId
   const selectionRequestId = workspaceSelectionRequestId
-  errorMessage.value = ''
+  clearWorkspaceError()
   isLookupLoading.value = true
   try {
     const result = await lookupExcelRow(sheetId, rowId)
@@ -1547,7 +1586,7 @@ async function lookupRowInSheet(sheetId: string, rowId: string): Promise<void> {
     }
   } catch (error: unknown) {
     if (isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
   } finally {
     if (requestId === rowLookupRequestId) {
@@ -1587,7 +1626,7 @@ async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
     return
   }
   setActiveView('chat')
-  errorMessage.value = ''
+  clearWorkspaceError()
   const requestId = nextWorkspaceSelectionRequestId()
   try {
     let targetFile = files.value.find((file) => file.file_id === citation.file_id)
@@ -1615,7 +1654,7 @@ async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
     await lookupRowInSheet(citation.sheet_id, citation.row_id)
   } catch (error: unknown) {
     if (isCurrentWorkspaceSelection(requestId)) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
   }
 }
@@ -1652,13 +1691,13 @@ async function runWorkspaceAction(
   if (!ensureWorkspaceMutationAllowed()) {
     return
   }
-  errorMessage.value = ''
+  clearWorkspaceError()
   const busyRequestId = beginWorkspaceBusy()
   try {
     await action(requestId)
   } catch (error: unknown) {
     if (isCurrentWorkspaceSelection(requestId)) {
-      errorMessage.value = toErrorMessage(error)
+      showWorkspaceError(error)
     }
   } finally {
     finishWorkspaceBusy(busyRequestId)
@@ -1745,10 +1784,6 @@ function stopChatResize(): void {
   window.removeEventListener('pointermove', handleChatResize)
   window.removeEventListener('pointerup', stopChatResize)
   window.removeEventListener('pointercancel', stopChatResize)
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
 }
 
 function excelColumnKey(columnIndex: number): string {
@@ -1877,82 +1912,8 @@ function stopExcelRowResize(): void {
   window.removeEventListener('pointercancel', stopExcelRowResize)
 }
 
-function rowDomId(rowId: string): string {
-  return `excel-row-${rowId.replace(/[^a-zA-Z0-9_-]/g, '-')}`
-}
-
-function isAllowedUploadFile(file: File): boolean {
-  const name = file.name.toLowerCase()
-  return allowedUploadExtensions.some((extension) => name.endsWith(extension))
-}
-
-function fileTypeLabel(file: ExcelFile): string {
-  const extension = file.display_name.split('.').pop()?.toLowerCase()
-  if (!extension) {
-    return 'Excel'
-  }
-  return extension.includes('xls') ? 'Excel' : extension.toUpperCase()
-}
-
-function fileIcon(file: ExcelFile): string {
-  const name = file.display_name.toLowerCase()
-  if (name.endsWith('.csv') || name.includes('analysis')) {
-    return 'analytics'
-  }
-  if (name.includes('warehouse') || name.includes('inventory')) {
-    return 'description'
-  }
-  if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.xlsm')) {
-    return 'table_chart'
-  }
-  return 'description'
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) {
-    return '-'
-  }
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date)
-}
-
-function shortId(value: string | null | undefined): string {
-  if (!value) {
-    return '-'
-  }
-  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value
-}
-
 function modelsForProvider(provider: string): string[] {
   return availableLlmProviders.value.find((item) => item.provider === provider)?.models ?? []
-}
-
-function preferredRouterProvider(fallbackProvider: string): string {
-  return availableLlmProviders.value.some((provider) => provider.provider === defaultRouterProvider)
-    ? defaultRouterProvider
-    : fallbackProvider
-}
-
-function preferredRouterModel(fallbackModel: string): string {
-  const providerModels = modelsForProvider(routerProvider.value)
-  const exactMatch = providerModels.find((model) => model === defaultRouterModel)
-  if (exactMatch) {
-    return exactMatch
-  }
-  const semanticMatch = providerModels.find((model) => {
-    const normalizedModel = model.toLowerCase()
-    return normalizedModel.includes('deepseek') && normalizedModel.includes('flash')
-  })
-  return semanticMatch ?? fallbackModel
 }
 
 function ensureStageModel(stage: ModelStage): void {
@@ -1974,133 +1935,83 @@ function ensureStageModel(stage: ModelStage): void {
   }
 }
 
+function ensureDraftStageModel(stage: ModelStage): void {
+  const provider =
+    stage === 'summary'
+      ? draftSummaryProvider.value
+      : stage === 'router'
+        ? draftRouterProvider.value
+        : draftAnswerProvider.value
+  const models = modelsForProvider(provider)
+  if (stage === 'summary' && !models.includes(draftSummaryModel.value)) {
+    draftSummaryModel.value = models[0] ?? ''
+  }
+  if (stage === 'router' && !models.includes(draftRouterModel.value)) {
+    draftRouterModel.value = models[0] ?? ''
+  }
+  if (stage === 'answer' && !models.includes(draftAnswerModel.value)) {
+    draftAnswerModel.value = models[0] ?? ''
+  }
+}
+
 function handleModelProviderChange(stage: ModelStage): void {
-  ensureStageModel(stage)
-  queueModelPreferenceSave()
+  ensureDraftStageModel(stage)
+  modelPreferenceFeedback.value = ''
 }
 
-function queueModelPreferenceSave(): void {
-  if (!isModelPreferenceReady || isApplyingModelPreference || typeof window === 'undefined') {
-    return
-  }
+function handleModelDraftChange(): void {
+  modelPreferenceFeedback.value = ''
+}
+
+function resetModelPreferenceDraft(): void {
+  draftSummaryProvider.value = summaryProvider.value
+  draftSummaryModel.value = summaryModel.value
+  draftRouterProvider.value = routerProvider.value
+  draftRouterModel.value = routerModel.value
+  draftAnswerProvider.value = answerProvider.value
+  draftAnswerModel.value = answerModel.value
+  modelPreferenceFeedback.value = ''
+}
+
+async function saveModelPreferenceDefaults(): Promise<void> {
   if (!isCompleteModelPreference()) {
+    modelPreferenceFeedbackKind.value = 'error'
+    modelPreferenceFeedback.value = 'Select a provider and model for every stage.'
     return
   }
-  if (modelPreferenceSaveTimer !== null) {
-    window.clearTimeout(modelPreferenceSaveTimer)
-  }
-  modelPreferenceSaveTimer = window.setTimeout(() => {
-    modelPreferenceSaveTimer = null
-    void persistModelPreference()
-  }, 350)
-}
-
-async function persistModelPreference(): Promise<void> {
+  isModelPreferenceSaving.value = true
+  modelPreferenceFeedback.value = ''
   try {
-    await saveLlmPreference({
-      summary_provider: summaryProvider.value,
-      summary_model: summaryModel.value,
-      router_provider: routerProvider.value,
-      router_model: routerModel.value,
-      answer_provider: answerProvider.value,
-      answer_model: answerModel.value,
+    const preference = await saveLlmPreference({
+      summary_provider: draftSummaryProvider.value,
+      summary_model: draftSummaryModel.value,
+      router_provider: draftRouterProvider.value,
+      router_model: draftRouterModel.value,
+      answer_provider: draftAnswerProvider.value,
+      answer_model: draftAnswerModel.value,
     })
+    applyModelDefaults(preference)
+    modelPreferenceFeedbackKind.value = 'success'
+    modelPreferenceFeedback.value = 'Saved as workspace defaults.'
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
-  }
-}
-
-function clearModelPreferenceSave(): void {
-  if (modelPreferenceSaveTimer !== null) {
-    window.clearTimeout(modelPreferenceSaveTimer)
-    modelPreferenceSaveTimer = null
+    modelPreferenceFeedbackKind.value = 'error'
+    modelPreferenceFeedback.value = toErrorMessage(error)
+  } finally {
+    isModelPreferenceSaving.value = false
   }
 }
 
 function isCompleteModelPreference(): boolean {
   return Boolean(
-    summaryProvider.value &&
-      summaryModel.value &&
-      routerProvider.value &&
-      routerModel.value &&
-      answerProvider.value &&
-      answerModel.value,
+    draftSummaryProvider.value &&
+      draftSummaryModel.value &&
+      draftRouterProvider.value &&
+      draftRouterModel.value &&
+      draftAnswerProvider.value &&
+      draftAnswerModel.value,
   )
 }
 
-function columnLabel(index: number): string {
-  let value = index
-  let label = ''
-  while (value > 0) {
-    const remainder = (value - 1) % 26
-    label = String.fromCharCode(65 + remainder) + label
-    value = Math.floor((value - 1) / 26)
-  }
-  return label
-}
-
-function csvEscape(value: string): string {
-  if (/[",\n\r]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`
-  }
-  return value
-}
-
-function showOperationFeedback(
-  tone: FeedbackTone,
-  message: string,
-  durationMs = 3200,
-): void {
-  operationFeedback.value = { tone, message }
-  if (operationFeedbackTimer !== null) {
-    window.clearTimeout(operationFeedbackTimer)
-  }
-  operationFeedbackTimer = window.setTimeout(() => {
-    operationFeedback.value = null
-    operationFeedbackTimer = null
-  }, durationMs)
-}
-
-function clearOperationFeedback(): void {
-  if (operationFeedbackTimer !== null) {
-    window.clearTimeout(operationFeedbackTimer)
-    operationFeedbackTimer = null
-  }
-  operationFeedback.value = null
-}
-
-function showChatSessionFeedback(
-  tone: FeedbackTone,
-  message: string,
-  durationMs = 2800,
-): void {
-  chatSessionFeedback.value = { tone, message }
-  if (chatSessionFeedbackTimer !== null) {
-    window.clearTimeout(chatSessionFeedbackTimer)
-  }
-  chatSessionFeedbackTimer = window.setTimeout(() => {
-    chatSessionFeedback.value = null
-    chatSessionFeedbackTimer = null
-  }, durationMs)
-}
-
-function clearChatSessionFeedback(): void {
-  if (chatSessionFeedbackTimer !== null) {
-    window.clearTimeout(chatSessionFeedbackTimer)
-    chatSessionFeedbackTimer = null
-  }
-  chatSessionFeedback.value = null
-}
-
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    if (error.message === 'internal server error') {
-      return 'Something went wrong on the server. Please try again.'
-    }
-    return error.message
-  }
-  return 'Unexpected error.'
-}
 </script>
 
 <template>
@@ -2215,10 +2126,6 @@ function toErrorMessage(error: unknown): string {
         </template>
       </header>
 
-      <div v-if="errorMessage" class="notice-row">
-        <p v-if="errorMessage" class="error-note tone-error">{{ errorMessage }}</p>
-      </div>
-
       <div
         v-if="activeView === 'files' && operationFeedback"
         class="floating-toast"
@@ -2288,6 +2195,14 @@ function toErrorMessage(error: unknown): string {
                 <span class="file-meta-line">
                   {{ fileTypeLabel(file) }} - Modified {{ formatDate(file.updated_at) }}
                 </span>
+                <span
+                  v-if="!file.visible_to_members"
+                  class="file-visibility-chip"
+                  title="Hidden from workspace users"
+                >
+                  <AppIcon name="visibility_off" />
+                  Admin only
+                </span>
               </span>
               <span class="file-card-actions" @click.stop>
                 <button
@@ -2317,6 +2232,14 @@ function toErrorMessage(error: unknown): string {
                 >
                   <AppIcon name="edit" />
                   Rename
+                </button>
+                <button
+                  type="button"
+                  :disabled="blocksWorkspaceMutation"
+                  @click="toggleFileVisibility(file)"
+                >
+                  <AppIcon :name="file.visible_to_members ? 'visibility_off' : 'visibility'" />
+                  {{ file.visible_to_members ? 'Hide from members' : 'Show to members' }}
                 </button>
                 <button
                   type="button"
@@ -2431,7 +2354,10 @@ function toErrorMessage(error: unknown): string {
                   <div class="model-config-grid">
                     <div class="model-setting-row">
                       <span>Summary Model</span>
-                      <select v-model="summaryProvider" @change="handleModelProviderChange('summary')">
+                      <select
+                        v-model="draftSummaryProvider"
+                        @change="handleModelProviderChange('summary')"
+                      >
                         <option
                           v-for="provider in availableLlmProviders"
                           :key="`summary-provider-${provider.provider}`"
@@ -2440,9 +2366,9 @@ function toErrorMessage(error: unknown): string {
                           {{ provider.label }}
                         </option>
                       </select>
-                      <select v-model="summaryModel" @change="queueModelPreferenceSave">
+                      <select v-model="draftSummaryModel" @change="handleModelDraftChange">
                         <option
-                          v-for="model in modelsForProvider(summaryProvider)"
+                          v-for="model in modelsForProvider(draftSummaryProvider)"
                           :key="`summary-model-${model}`"
                           :value="model"
                         >
@@ -2452,7 +2378,10 @@ function toErrorMessage(error: unknown): string {
                     </div>
                     <div class="model-setting-row">
                       <span>Router Model</span>
-                      <select v-model="routerProvider" @change="handleModelProviderChange('router')">
+                      <select
+                        v-model="draftRouterProvider"
+                        @change="handleModelProviderChange('router')"
+                      >
                         <option
                           v-for="provider in availableLlmProviders"
                           :key="`router-provider-${provider.provider}`"
@@ -2461,9 +2390,9 @@ function toErrorMessage(error: unknown): string {
                           {{ provider.label }}
                         </option>
                       </select>
-                      <select v-model="routerModel" @change="queueModelPreferenceSave">
+                      <select v-model="draftRouterModel" @change="handleModelDraftChange">
                         <option
-                          v-for="model in modelsForProvider(routerProvider)"
+                          v-for="model in modelsForProvider(draftRouterProvider)"
                           :key="`router-model-${model}`"
                           :value="model"
                         >
@@ -2473,7 +2402,10 @@ function toErrorMessage(error: unknown): string {
                     </div>
                     <div class="model-setting-row">
                       <span>Chat Model</span>
-                      <select v-model="answerProvider" @change="handleModelProviderChange('answer')">
+                      <select
+                        v-model="draftAnswerProvider"
+                        @change="handleModelProviderChange('answer')"
+                      >
                         <option
                           v-for="provider in availableLlmProviders"
                           :key="`answer-provider-${provider.provider}`"
@@ -2482,9 +2414,9 @@ function toErrorMessage(error: unknown): string {
                           {{ provider.label }}
                         </option>
                       </select>
-                      <select v-model="answerModel" @change="queueModelPreferenceSave">
+                      <select v-model="draftAnswerModel" @change="handleModelDraftChange">
                         <option
-                          v-for="model in modelsForProvider(answerProvider)"
+                          v-for="model in modelsForProvider(draftAnswerProvider)"
                           :key="`answer-model-${model}`"
                           :value="model"
                         >
@@ -2492,6 +2424,24 @@ function toErrorMessage(error: unknown): string {
                         </option>
                       </select>
                     </div>
+                  </div>
+                  <div class="model-config-actions">
+                    <p
+                      v-if="modelPreferenceFeedback"
+                      class="model-config-feedback"
+                      :class="modelPreferenceFeedbackKind"
+                    >
+                      {{ modelPreferenceFeedback }}
+                    </p>
+                    <button
+                      type="button"
+                      class="model-save-button"
+                      :disabled="!canSaveModelPreference || isModelPreferenceSaving"
+                      @click="saveModelPreferenceDefaults"
+                    >
+                      <AppIcon name="check" />
+                      <span>{{ isModelPreferenceSaving ? 'Saving' : 'Set Default' }}</span>
+                    </button>
                   </div>
                 </article>
 
@@ -3163,7 +3113,7 @@ function toErrorMessage(error: unknown): string {
         <p class="dialog-copy">
           {{
             confirmDialog.kind === 'file'
-              ? `Delete "${confirmDialog.file.display_name}" and all related versions, artifacts, summaries, and chat attachments?`
+              ? `Delete "${confirmDialog.file.display_name}" from file management? Active chats keep their existing context.`
               : `Delete "${confirmDialog.session.title}"?`
           }}
         </p>

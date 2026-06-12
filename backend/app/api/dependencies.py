@@ -19,13 +19,19 @@ from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetReposito
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
 from app.application.auth.service import AuthService
+from app.application.chat.cancellation import ChatCancellationRegistry
 from app.application.chat.policy import ChatServicePolicy
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.llm_preferences import WorkspaceLlmPreferenceService
 from app.core.config import get_settings
 from app.core.errors import AuthenticationError, AuthorizationError
-from app.core.llm_catalog import DEEPSEEK_PROVIDER, SILICONFLOW_PROVIDER
+from app.core.llm_catalog import (
+    DEEPSEEK_PROVIDER,
+    SILICONFLOW_PROVIDER,
+    VOLCENGINE_ARK_PROVIDER,
+)
 from app.domain.models import AuthenticatedUser, UserRole
 from app.ports.chat_workflow import ChatWorkflow
 from app.ports.llm_client import LlmClient
@@ -72,6 +78,7 @@ def get_document_summary_service() -> DocumentSummaryService:
         excel_assets=get_excel_asset_service(),
         llm_client=get_llm_client(),
         repository=get_excel_repository(),
+        llm_preferences=get_llm_preference_service(),
     )
 
 
@@ -83,8 +90,17 @@ def get_chat_service() -> ChatService:
         summaries=get_document_summary_service(),
         llm_client=get_llm_client(),
         sessions=get_excel_repository(),
+        llm_preferences=get_llm_preference_service(),
         policy=ChatServicePolicy(max_answer_rows=settings.llm_answer_max_rows),
         workflow=get_chat_workflow(),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_llm_preference_service() -> WorkspaceLlmPreferenceService:
+    return WorkspaceLlmPreferenceService(
+        repository=get_excel_repository(),
+        settings=get_settings(),
     )
 
 
@@ -132,6 +148,11 @@ def get_chat_workflow() -> ChatWorkflow:
 
 
 @lru_cache(maxsize=1)
+def get_chat_cancellation_registry() -> ChatCancellationRegistry:
+    return ChatCancellationRegistry()
+
+
+@lru_cache(maxsize=1)
 def get_llm_client() -> LlmClient:
     settings = get_settings()
     if settings.llm_provider.lower() == "fake":
@@ -155,7 +176,16 @@ def get_llm_client() -> LlmClient:
                 summary_model=settings.deepseek_summary_model,
                 router_model=settings.deepseek_router_model,
                 answer_model=settings.deepseek_answer_model,
-            )
+            ),
+            VOLCENGINE_ARK_PROVIDER: LlmProviderConfig(
+                provider=VOLCENGINE_ARK_PROVIDER,
+                label="Volcengine Ark",
+                api_base_url=settings.volcengine_ark_api_base_url,
+                api_key=settings.volcengine_ark_api_key,
+                summary_model=settings.volcengine_ark_summary_model,
+                router_model=settings.volcengine_ark_router_model,
+                answer_model=settings.volcengine_ark_answer_model,
+            ),
         },
         default_providers={
             "summary": settings.llm_summary_provider or SILICONFLOW_PROVIDER,

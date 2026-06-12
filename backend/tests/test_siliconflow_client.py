@@ -887,6 +887,87 @@ def test_deepseek_official_provider_uses_official_url_and_json_mode() -> None:
     assert requests[0]["thinking"] == {"type": "disabled"}
 
 
+def test_volcengine_ark_provider_uses_openai_compatible_chat_request() -> None:
+    requests: list[dict[str, Any]] = []
+    headers: list[dict[str, str]] = []
+    urls: list[str] = []
+
+    def post(url: str, **kwargs: Any) -> httpx2.Response:
+        urls.append(url)
+        headers.append(kwargs["headers"])
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", url),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "document_for_this_turn": [],
+                                    "decision_reason": "no match",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.siliconflow.test/v1",
+            api_key="siliconflow-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="deepseek-ai/DeepSeek-V4-Pro",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+        extra_providers={
+            "volcengine_ark": LlmProviderConfig(
+                provider="volcengine_ark",
+                label="Volcengine Ark",
+                api_base_url="https://ark.cn-beijing.volces.test/api/v3",
+                api_key="ark-test-key",
+                summary_model="doubao-seed-2-0-pro-260215",
+                router_model="doubao-seed-2-0-lite-260428",
+                answer_model="deepseek-v4-pro-260425",
+            )
+        },
+    )
+
+    client.route_documents(
+        "question",
+        [
+            DocumentSummary(
+                summary_id="summary_1",
+                file_id="file_1",
+                version_id="version_1",
+                summary_text="summary",
+                business_domain="domain",
+                key_topics=[],
+                suitable_questions=[],
+                unsuitable_questions=[],
+                sheet_summaries=[],
+                created_at="now",
+            )
+        ],
+        max_documents=3,
+        provider="volcengine_ark",
+    )
+
+    assert urls == ["https://ark.cn-beijing.volces.test/api/v3/chat/completions"]
+    assert headers[0]["Authorization"] == "Bearer ark-test-key"
+    assert headers[0]["Content-Type"] == "application/json"
+    assert requests[0]["model"] == "doubao-seed-2-0-lite-260428"
+    assert "response_format" not in requests[0]
+    assert "thinking" not in requests[0]
+    assert "enable_thinking" not in requests[0]
+
+
 def test_deepseek_official_answer_enables_thinking_when_requested() -> None:
     requests: list[dict[str, Any]] = []
 

@@ -23,6 +23,7 @@ from app.api.schemas import (
     RenameExcelFileRequest,
     RowLookupResponse,
     RowMappingResponse,
+    SetExcelFileVisibilityRequest,
     SheetPreviewResponse,
     SheetProfileResponse,
     SheetRowResponse,
@@ -33,14 +34,17 @@ from app.api.schemas import (
     WorkbookProfileResponse,
     WorkbookSearchResponse,
 )
+from app.application.excel_assets.access import FileAccessContext
 from app.application.excel_assets.models import SheetSearchMatch
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.excel_assets.upload_policy import ExcelUploadPolicy
 from app.core.config import get_settings
-from app.core.errors import UploadValidationError
 from app.domain.models import (
+    AuthenticatedUser,
     ExcelArtifact,
     ExcelFile,
     ExcelFileVersion,
+    ExcelFileVisibility,
     ExcelRowMapping,
     ExcelSheet,
     SheetProfile,
@@ -48,13 +52,12 @@ from app.domain.models import (
 )
 
 router = APIRouter(prefix="/api/excel", tags=["excel-assets"])
-SUPPORTED_EXCEL_EXTENSIONS = {".xls", ".xlsx", ".xlsm", ".xltx", ".xltm"}
 ExcelAssetServiceDependency = Annotated[
     ExcelAssetService,
     Depends(get_excel_asset_service),
 ]
-AuthenticatedDependency = Annotated[object, Depends(get_current_user)]
-AdminDependency = Annotated[object, Depends(require_admin_user)]
+AuthenticatedDependency = Annotated[AuthenticatedUser, Depends(get_current_user)]
+AdminDependency = Annotated[AuthenticatedUser, Depends(require_admin_user)]
 
 
 @router.post("/files/check-name", response_model=CheckFileNameResponse)
@@ -97,10 +100,13 @@ async def upload_excel_file(
 @router.get("/files", response_model=ListExcelFilesResponse)
 def list_excel_files(
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> ListExcelFilesResponse:
     return ListExcelFilesResponse(
-        files=[_to_file_response(file) for file in service.list_files()]
+        files=[
+            _to_file_response(file)
+            for file in service.list_files(access=_file_access(user))
+        ]
     )
 
 
@@ -108,9 +114,9 @@ def list_excel_files(
 def get_excel_file(
     file_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> ExcelFileResponse:
-    return _to_file_response(service.get_file(file_id))
+    return _to_file_response(service.get_file(file_id, access=_file_access(user)))
 
 
 @router.patch("/files/{file_id}", response_model=ExcelFileResponse)
@@ -121,6 +127,21 @@ def rename_excel_file(
     _admin: AdminDependency,
 ) -> ExcelFileResponse:
     return _to_file_response(service.rename_file(file_id, request.display_name))
+
+
+@router.patch("/files/{file_id}/visibility", response_model=ExcelFileResponse)
+def set_excel_file_visibility(
+    file_id: str,
+    request: SetExcelFileVisibilityRequest,
+    service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
+) -> ExcelFileResponse:
+    return _to_file_response(
+        service.set_file_visibility(
+            file_id,
+            visible_to_members=request.visible_to_members,
+        )
+    )
 
 
 @router.delete("/files/{file_id}", response_model=DeleteExcelFileResponse)
@@ -147,11 +168,13 @@ def delete_excel_file(
 def get_active_excel_file_version(
     file_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> ActiveExcelFileResponse:
     return ActiveExcelFileResponse(
-        file=_to_file_response(service.get_file(file_id)),
-        version=_to_version_response(service.get_active_file_version(file_id)),
+        file=_to_file_response(service.get_file(file_id, access=_file_access(user))),
+        version=_to_version_response(
+            service.get_active_file_version(file_id, access=_file_access(user))
+        ),
     )
 
 
@@ -159,10 +182,13 @@ def get_active_excel_file_version(
 def list_excel_file_versions(
     file_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> ListExcelVersionsResponse:
     return ListExcelVersionsResponse(
-        versions=[_to_version_response(version) for version in service.list_versions(file_id)]
+        versions=[
+            _to_version_response(version)
+            for version in service.list_versions(file_id, access=_file_access(user))
+        ]
     )
 
 
@@ -183,10 +209,13 @@ def activate_excel_file_version(
 def list_excel_sheets(
     version_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> ListExcelSheetsResponse:
     return ListExcelSheetsResponse(
-        sheets=[_to_sheet_response(sheet) for sheet in service.list_sheets(version_id)]
+        sheets=[
+            _to_sheet_response(sheet)
+            for sheet in service.list_sheets(version_id, access=_file_access(user))
+        ]
     )
 
 
@@ -194,9 +223,9 @@ def list_excel_sheets(
 def get_excel_version_profile(
     version_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> WorkbookProfileResponse:
-    return _to_profile_response(service.get_profile(version_id))
+    return _to_profile_response(service.get_profile(version_id, access=_file_access(user)))
 
 
 @router.get("/versions/{version_id}/artifacts", response_model=ListExcelArtifactsResponse)
@@ -217,11 +246,16 @@ def list_excel_version_artifacts(
 def search_excel_version_rows(
     version_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
     query: Annotated[str, Query(min_length=1, max_length=200)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> WorkbookSearchResponse:
-    result = service.search_version_rows(version_id=version_id, query=query, limit=limit)
+    result = service.search_version_rows(
+        version_id=version_id,
+        query=query,
+        limit=limit,
+        access=_file_access(user),
+    )
     return WorkbookSearchResponse(
         version_id=result.version_id,
         query=result.query,
@@ -235,11 +269,16 @@ def search_excel_version_rows(
 def preview_excel_sheet(
     sheet_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
 ) -> SheetPreviewResponse:
-    result = service.preview_sheet(sheet_id=sheet_id, offset=offset, limit=limit)
+    result = service.preview_sheet(
+        sheet_id=sheet_id,
+        offset=offset,
+        limit=limit,
+        access=_file_access(user),
+    )
     return SheetPreviewResponse(
         sheet=_to_sheet_response(result.sheet),
         rows=result.rows,
@@ -253,11 +292,16 @@ def preview_excel_sheet(
 def list_excel_sheet_rows(
     sheet_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
 ) -> SheetRowsResponse:
-    result = service.list_sheet_rows(sheet_id=sheet_id, offset=offset, limit=limit)
+    result = service.list_sheet_rows(
+        sheet_id=sheet_id,
+        offset=offset,
+        limit=limit,
+        access=_file_access(user),
+    )
     return SheetRowsResponse(
         sheet=_to_sheet_response(result.sheet),
         rows=[
@@ -277,11 +321,16 @@ def list_excel_sheet_rows(
 def search_excel_sheet_rows(
     sheet_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
     query: Annotated[str, Query(min_length=1, max_length=200)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> SheetSearchResponse:
-    result = service.search_sheet_rows(sheet_id=sheet_id, query=query, limit=limit)
+    result = service.search_sheet_rows(
+        sheet_id=sheet_id,
+        query=query,
+        limit=limit,
+        access=_file_access(user),
+    )
     return SheetSearchResponse(
         sheet=_to_sheet_response(result.sheet),
         query=result.query,
@@ -296,9 +345,13 @@ def lookup_excel_row(
     sheet_id: str,
     row_id: str,
     service: ExcelAssetServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> RowLookupResponse:
-    result = service.lookup_row(sheet_id=sheet_id, row_id=row_id)
+    result = service.lookup_row(
+        sheet_id=sheet_id,
+        row_id=row_id,
+        access=_file_access(user),
+    )
     return RowLookupResponse(
         sheet=_to_sheet_response(result.sheet),
         mapping=_to_mapping_response(result.mapping),
@@ -313,7 +366,12 @@ def _to_file_response(file: ExcelFile) -> ExcelFileResponse:
         active_version_id=file.active_version_id,
         created_at=file.created_at,
         updated_at=file.updated_at,
+        visible_to_members=file.visibility == ExcelFileVisibility.VISIBLE,
     )
+
+
+def _file_access(user: AuthenticatedUser) -> FileAccessContext:
+    return FileAccessContext(user_id=user.user_id, role=user.role)
 
 
 def _to_version_response(version: ExcelFileVersion) -> ExcelFileVersionResponse:
@@ -394,16 +452,8 @@ def _to_artifact_response(artifact: ExcelArtifact) -> ExcelArtifactResponse:
 
 
 def _validate_upload(filename: str, content: bytes) -> None:
-    extension = f".{filename.rsplit('.', maxsplit=1)[-1].lower()}" if "." in filename else ""
-    if extension not in SUPPORTED_EXCEL_EXTENSIONS:
-        raise UploadValidationError(
-            "unsupported Excel file extension; supported extensions are "
-            ".xls, .xlsx, .xlsm, .xltx, and .xltm"
-        )
-    if not content:
-        raise UploadValidationError("uploaded Excel file is empty")
-    max_upload_bytes = get_settings().excel_max_upload_bytes
-    if len(content) > max_upload_bytes:
-        raise UploadValidationError(
-            f"uploaded Excel file exceeds the {max_upload_bytes} byte limit"
-        )
+    settings = get_settings()
+    ExcelUploadPolicy(
+        supported_extensions=settings.supported_excel_extensions,
+        max_bytes=settings.excel_max_upload_bytes,
+    ).validate(filename, content)

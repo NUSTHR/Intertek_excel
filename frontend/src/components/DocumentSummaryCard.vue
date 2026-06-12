@@ -282,7 +282,7 @@ function isSameText(first: string, second: string): boolean {
       <div class="summary-head-actions">
         <button
           type="button"
-          class="summary-action-button"
+          class="summary-action-button primary"
           :disabled="isGenerating || isSavingSummary || !canGenerate"
           @click="emit('generate')"
         >
@@ -292,13 +292,14 @@ function isSameText(first: string, second: string): boolean {
         <button
           v-if="summary && !isEditing"
           type="button"
-          class="summary-icon-button"
+          class="summary-action-button secondary"
           :disabled="isSavingSummary || isGenerating"
           aria-label="Edit summary"
           title="Edit summary"
           @click="startEditing"
         >
           <AppIcon name="edit" />
+          <span>Edit</span>
         </button>
       </div>
     </header>
@@ -488,11 +489,12 @@ function isSameText(first: string, second: string): boolean {
           :disabled="isSavingSummary"
           @click="cancelEditing"
         >
+          <AppIcon name="close" />
           Cancel
         </button>
         <button
           type="submit"
-          class="summary-action-button"
+          class="summary-action-button primary"
           :disabled="isSavingSummary || isGenerating"
         >
           <AppIcon name="save" />
@@ -507,7 +509,7 @@ function isSameText(first: string, second: string): boolean {
       <p>Select a file and generate a summary to see workbook-level routing context.</p>
       <button
         type="button"
-        class="primary-action"
+        class="summary-action-button primary"
         :disabled="isGenerating || !canGenerate"
         @click="emit('generate')"
       >

@@ -11,6 +11,7 @@ from app.domain.models import (
     SheetSummary,
     WorkbookProfile,
 )
+from app.ports.llm_client import CancellationChecker
 
 
 class FakeLlmClient:
@@ -95,8 +96,11 @@ class FakeLlmClient:
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> list[SelectedDocument]:
         _ = user_questions, attached_documents, previous_turns, model, provider
+        if cancellation_checker is not None:
+            cancellation_checker()
         scored = sorted(
             summaries,
             key=lambda summary: self._score(question, summary),
@@ -122,8 +126,11 @@ class FakeLlmClient:
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> DraftChatAnswer:
         _ = previous_turns, model, provider, enable_deep_thinking
+        if cancellation_checker is not None:
+            cancellation_checker()
         cited_evidence_ids = [str(row["evidence_id"]) for row in rows[:3]]
         selected_count = len(documents)
         row_count = len(rows)

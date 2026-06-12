@@ -340,4 +340,46 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=7,
+        name="remove_chat_turn_performance_timings",
+        statements=(
+            """
+            ALTER TABLE chat_turns
+            DROP COLUMN timings_json
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=8,
+        name="soft_delete_excel_files",
+        statements=(
+            """
+            ALTER TABLE excel_files
+            ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
+            """,
+            """
+            ALTER TABLE excel_files
+            ADD COLUMN deleted_at TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_excel_files_status
+              ON excel_files(status, updated_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=9,
+        name="add_excel_file_visibility",
+        statements=(
+            """
+            ALTER TABLE excel_files
+            ADD COLUMN visibility TEXT NOT NULL DEFAULT 'visible'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_excel_files_visibility
+              ON excel_files(status, visibility, updated_at)
+            """,
+        ),
+    ),
 )

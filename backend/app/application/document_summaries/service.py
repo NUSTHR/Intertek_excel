@@ -1,4 +1,6 @@
+from app.application.excel_assets.access import FileAccessContext
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.llm_preferences.service import WorkspaceLlmPreferenceService
 from app.core.errors import AssetNotFoundError
 from app.domain.models import DocumentSummary, SheetSummary
 from app.ports.llm_client import LlmClient
@@ -11,29 +13,41 @@ class DocumentSummaryService:
         excel_assets: ExcelAssetService,
         llm_client: LlmClient,
         repository: DocumentSummaryRepository,
+        llm_preferences: WorkspaceLlmPreferenceService,
     ) -> None:
         self._excel_assets = excel_assets
         self._llm_client = llm_client
         self._repository = repository
+        self._llm_preferences = llm_preferences
 
     def generate_summary(
         self,
         version_id: str,
-        *,
-        model: str | None = None,
-        provider: str | None = None,
     ) -> DocumentSummary:
+        preference = self._llm_preferences.get_preference()
         profile = self._excel_assets.get_summary_profile(version_id)
+        self._excel_assets.get_file(profile.file_id)
         summary = self._llm_client.generate_document_summary(
             profile,
-            model=model,
-            provider=provider,
+            model=preference.summary_model,
+            provider=preference.summary_provider,
         )
         self._repository.save_summary(summary)
         return summary
 
-    def get_summary(self, version_id: str) -> DocumentSummary | None:
-        return self._repository.get_summary(version_id)
+    def get_summary(
+        self,
+        version_id: str,
+        access: FileAccessContext | None = None,
+    ) -> DocumentSummary | None:
+        summary = self._repository.get_summary(version_id)
+        if summary is None:
+            return None
+        try:
+            self._excel_assets.get_file(summary.file_id, access=access)
+        except AssetNotFoundError:
+            return None
+        return summary
 
     def update_summary(
         self,
@@ -54,6 +68,7 @@ class DocumentSummaryService:
         current = self._repository.get_summary(version_id)
         if current is None:
             raise AssetNotFoundError("document summary was not found")
+        self._excel_assets.get_file(current.file_id)
 
         updated = DocumentSummary(
             summary_id=current.summary_id,
@@ -96,10 +111,13 @@ class DocumentSummaryService:
         self._repository.save_summary(updated)
         return updated
 
-    def list_active_summaries(self) -> list[DocumentSummary]:
+    def list_active_summaries(
+        self,
+        access: FileAccessContext | None = None,
+    ) -> list[DocumentSummary]:
         active_version_ids = {
             file.active_version_id
-            for file in self._excel_assets.list_files()
+            for file in self._excel_assets.list_files(access=access)
             if file.active_version_id is not None
         }
         return [

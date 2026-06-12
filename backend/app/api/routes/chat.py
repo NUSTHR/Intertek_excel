@@ -2,9 +2,17 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.api.dependencies import get_chat_service, get_current_user, require_admin_user
+from app.api.dependencies import (
+    get_chat_cancellation_registry,
+    get_chat_service,
+    get_current_user,
+    get_llm_preference_service,
+    require_admin_user,
+)
 from app.api.schemas import (
     AttachedDocumentResponse,
+    CancelChatRequest,
+    CancelChatResponse,
     ChatAnswerBlockResponse,
     ChatAnswerRequest,
     ChatAnswerResponse,
@@ -13,7 +21,6 @@ from app.api.schemas import (
     ChatRouteResponse,
     ChatSessionListResponse,
     ChatSessionResponse,
-    ChatStageTimingResponse,
     ChatTurnListResponse,
     ChatTurnResponse,
     ExcelCitationResponse,
@@ -25,9 +32,14 @@ from app.api.schemas import (
     RenameChatSessionRequest,
     SelectedDocumentResponse,
 )
+from app.application.chat.cancellation import (
+    ChatCancellationRegistry,
+    ChatRequestCancelledError,
+)
 from app.application.chat.service import ChatService
-from app.core.config import get_settings
-from app.core.errors import AssetNotFoundError, InvalidLlmModelError
+from app.application.excel_assets.access import FileAccessContext
+from app.application.llm_preferences import WorkspaceLlmPreferenceService
+from app.core.errors import AssetNotFoundError, ChatRequestCancelled, InvalidLlmModelError
 from app.core.llm_catalog import (
     is_supported_llm_model_for_provider,
     is_supported_llm_provider,
@@ -45,6 +57,14 @@ from app.domain.models import (
 
 router = APIRouter(prefix="/api/excel", tags=["chat"])
 ChatServiceDependency = Annotated[ChatService, Depends(get_chat_service)]
+ChatCancellationRegistryDependency = Annotated[
+    ChatCancellationRegistry,
+    Depends(get_chat_cancellation_registry),
+]
+LlmPreferenceServiceDependency = Annotated[
+    WorkspaceLlmPreferenceService,
+    Depends(get_llm_preference_service),
+]
 CurrentUserDependency = Annotated[AuthenticatedUser, Depends(get_current_user)]
 AdminDependency = Annotated[AuthenticatedUser, Depends(require_admin_user)]
 
@@ -53,20 +73,25 @@ AdminDependency = Annotated[AuthenticatedUser, Depends(require_admin_user)]
 def answer_excel_question(
     request: ChatRequest,
     service: ChatServiceDependency,
+    cancellations: ChatCancellationRegistryDependency,
     user: CurrentUserDependency,
 ) -> ChatAnswerResponse:
-    return _to_chat_answer_response(
-        service.answer_question(
-            request.question,
-            session_id=request.session_id,
-            user_id=user.user_id,
-            router_model=request.router_model,
-            router_provider=request.router_provider,
-            answer_model=request.answer_model,
-            answer_provider=request.answer_provider,
-            enable_deep_thinking=request.enable_deep_thinking,
+    token = cancellations.register(request.request_id)
+    try:
+        return _to_chat_answer_response(
+            service.answer_question(
+                request.question,
+                session_id=request.session_id,
+                user_id=user.user_id,
+                enable_deep_thinking=request.enable_deep_thinking,
+                cancellation_token=token,
+                user_role=user.role,
+            )
         )
-    )
+    except ChatRequestCancelledError as exc:
+        raise ChatRequestCancelled(str(exc)) from exc
+    finally:
+        cancellations.unregister(request.request_id)
 
 
 @router.post("/chat/sessions", response_model=ChatSessionResponse)
@@ -159,6 +184,19 @@ def delete_chat_session(
 
 
 @router.post(
+    "/chat/cancel",
+    response_model=CancelChatResponse,
+)
+def cancel_chat_request(
+    request: CancelChatRequest,
+    cancellations: ChatCancellationRegistryDependency,
+    _user: CurrentUserDependency,
+) -> CancelChatResponse:
+    cancelled = cancellations.cancel(request.request_id)
+    return CancelChatResponse(request_id=request.request_id, cancelled=cancelled)
+
+
+@router.post(
     "/chat/sessions/{session_id}/messages",
     response_model=ChatAnswerResponse,
 )
@@ -166,20 +204,25 @@ def answer_excel_session_question(
     session_id: str,
     request: ChatRequest,
     service: ChatServiceDependency,
+    cancellations: ChatCancellationRegistryDependency,
     user: CurrentUserDependency,
 ) -> ChatAnswerResponse:
-    return _to_chat_answer_response(
-        service.answer_question(
-            request.question,
-            session_id=session_id,
-            user_id=user.user_id,
-            router_model=request.router_model,
-            router_provider=request.router_provider,
-            answer_model=request.answer_model,
-            answer_provider=request.answer_provider,
-            enable_deep_thinking=request.enable_deep_thinking,
+    token = cancellations.register(request.request_id)
+    try:
+        return _to_chat_answer_response(
+            service.answer_question(
+                request.question,
+                session_id=session_id,
+                user_id=user.user_id,
+                enable_deep_thinking=request.enable_deep_thinking,
+                cancellation_token=token,
+                user_role=user.role,
+            )
         )
-    )
+    except ChatRequestCancelledError as exc:
+        raise ChatRequestCancelled(str(exc)) from exc
+    finally:
+        cancellations.unregister(request.request_id)
 
 
 @router.post(
@@ -197,8 +240,7 @@ def route_excel_session_question(
             request.question,
             session_id=session_id,
             user_id=user.user_id,
-            router_model=request.router_model,
-            router_provider=request.router_provider,
+            file_access=FileAccessContext(user_id=user.user_id, role=user.role),
         )
     )
 
@@ -211,74 +253,68 @@ def answer_excel_routed_session_question(
     session_id: str,
     request: ChatAnswerRequest,
     service: ChatServiceDependency,
+    cancellations: ChatCancellationRegistryDependency,
     user: CurrentUserDependency,
 ) -> ChatAnswerResponse:
-    return _to_chat_answer_response(
-        service.answer_routed_question(
-            request.question,
-            session_id=session_id,
-            user_id=user.user_id,
-            answer_model=request.answer_model,
-            answer_provider=request.answer_provider,
-            selected_version_ids=request.selected_version_ids,
-            enable_deep_thinking=request.enable_deep_thinking,
+    token = cancellations.register(request.request_id)
+    try:
+        return _to_chat_answer_response(
+            service.answer_routed_question(
+                request.question,
+                session_id=session_id,
+                user_id=user.user_id,
+                selected_version_ids=request.selected_version_ids,
+                enable_deep_thinking=request.enable_deep_thinking,
+                cancellation_token=token,
+                file_access=FileAccessContext(user_id=user.user_id, role=user.role),
+            )
         )
-    )
+    except ChatRequestCancelledError as exc:
+        raise ChatRequestCancelled(str(exc)) from exc
+    finally:
+        cancellations.unregister(request.request_id)
 
 
 @router.get("/llm/options", response_model=LlmModelOptionsResponse)
-def get_llm_model_options(_user: CurrentUserDependency) -> LlmModelOptionsResponse:
-    return _default_llm_model_options()
+def get_llm_model_options(
+    preferences: LlmPreferenceServiceDependency,
+    _user: CurrentUserDependency,
+) -> LlmModelOptionsResponse:
+    return _llm_model_options(preferences.get_preference())
 
 
-def _default_llm_model_options() -> LlmModelOptionsResponse:
-    settings = get_settings()
+def _llm_model_options(preference: LlmPreference) -> LlmModelOptionsResponse:
     return LlmModelOptionsResponse(
         models=list_supported_llm_models(),
         providers=list_supported_llm_provider_options(),
         defaults=LlmModelDefaultsResponse(
-            summary_provider=settings.llm_summary_provider,
-            summary_model=settings.llm_summary_model,
-            router_provider=settings.llm_router_provider,
-            router_model=settings.llm_router_model,
-            answer_provider=settings.llm_answer_provider,
-            answer_model=settings.llm_answer_model,
+            summary_provider=preference.summary_provider,
+            summary_model=preference.summary_model,
+            router_provider=preference.router_provider,
+            router_model=preference.router_model,
+            answer_provider=preference.answer_provider,
+            answer_model=preference.answer_model,
         ),
     )
 
 
 @router.get("/llm/preferences", response_model=LlmPreferenceResponse)
 def get_llm_preference(
-    service: ChatServiceDependency,
+    preferences: LlmPreferenceServiceDependency,
     _user: CurrentUserDependency,
 ) -> LlmPreferenceResponse:
-    preference = service.get_llm_preference()
-    if preference is not None:
-        return _to_llm_preference_response(preference)
-
-    defaults = _default_llm_model_options().defaults
-    return LlmPreferenceResponse(
-        scope="workspace",
-        summary_provider=defaults.summary_provider,
-        summary_model=defaults.summary_model,
-        router_provider=defaults.router_provider,
-        router_model=defaults.router_model,
-        answer_provider=defaults.answer_provider,
-        answer_model=defaults.answer_model,
-        created_at="",
-        updated_at="",
-    )
+    return _to_llm_preference_response(preferences.get_preference())
 
 
 @router.patch("/llm/preferences", response_model=LlmPreferenceResponse)
 def save_llm_preference(
     request: LlmPreferenceRequest,
-    service: ChatServiceDependency,
+    preferences: LlmPreferenceServiceDependency,
     _admin: AdminDependency,
 ) -> LlmPreferenceResponse:
     _validate_llm_preference(request)
     return _to_llm_preference_response(
-        service.save_llm_preference(
+        preferences.save_preference(
             summary_provider=request.summary_provider,
             summary_model=request.summary_model,
             router_provider=request.router_provider,
@@ -319,7 +355,6 @@ def _to_chat_turn_response(turn: ChatTurn) -> ChatTurnResponse:
                 insufficient_evidence=turn.insufficient_evidence,
                 follow_up_suggestions=turn.follow_up_suggestions,
                 warnings=turn.warnings,
-                timings=turn.timings,
                 created_at=turn.created_at,
             )
         ),
@@ -385,13 +420,6 @@ def _to_chat_answer_response(answer: ChatAnswer) -> ChatAnswerResponse:
         insufficient_evidence=answer.insufficient_evidence,
         follow_up_suggestions=answer.follow_up_suggestions,
         warnings=answer.warnings,
-        timings=[
-            ChatStageTimingResponse(
-                stage=timing.stage,
-                duration_seconds=timing.duration_seconds,
-            )
-            for timing in answer.timings
-        ],
         created_at=answer.created_at,
     )
 
@@ -442,13 +470,6 @@ def _to_chat_route_response(route_result: ChatRouteResult) -> ChatRouteResponse:
                 status=document.status,
             )
             for document in route_result.attached_documents
-        ],
-        timings=[
-            ChatStageTimingResponse(
-                stage=timing.stage,
-                duration_seconds=timing.duration_seconds,
-            )
-            for timing in route_result.timings
         ],
         created_at=route_result.created_at,
     )

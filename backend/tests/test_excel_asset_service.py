@@ -205,7 +205,7 @@ def test_summary_profile_loads_full_rows_without_internal_row_ids(
     ]
 
 
-def test_delete_file_requires_confirmation_and_removes_related_data(
+def test_delete_file_requires_confirmation_and_soft_deletes_management_record(
     service: ExcelAssetService,
 ) -> None:
     result = service.upload_workbook("risk.xlsx", b"first")
@@ -217,13 +217,14 @@ def test_delete_file_requires_confirmation_and_removes_related_data(
 
     assert deleted.file_id == result.file.file_id
     assert deleted.display_name == "risk.xlsx"
-    assert deleted.deleted_versions == 1
-    assert deleted.deleted_sheets == 2
-    assert deleted.deleted_artifacts == 5
-    assert deleted.deleted_row_mappings == 5
+    assert deleted.deleted_versions == 0
+    assert deleted.deleted_sheets == 0
+    assert deleted.deleted_artifacts == 0
+    assert deleted.deleted_row_mappings == 0
     assert deleted.deleted_summaries == 0
     assert deleted.deleted_chat_session_documents == 0
-    assert not (service._storage._storage_root / "files" / result.file.file_id).exists()
+    assert (service._storage._storage_root / "files" / result.file.file_id).exists()
+    assert service.check_display_name("risk.xlsx").exists is False
 
     with pytest.raises(AssetNotFoundError):
         service.get_file(result.file.file_id)

@@ -16,11 +16,18 @@ from app.api.dependencies import (
     get_current_user,
     get_document_summary_service,
     get_excel_asset_service,
+    get_llm_preference_service,
     require_admin_user,
+)
+from app.application.chat.cancellation import (
+    ChatCancellationToken,
+    ChatRequestCancelledError,
 )
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.llm_preferences import WorkspaceLlmPreferenceService
+from app.core.config import Settings
 from app.core.errors import LlmRequestError
 from app.domain.models import (
     AttachedDocument,
@@ -30,11 +37,12 @@ from app.domain.models import (
     DraftChatAnswer,
     DraftCitation,
     ExcelCitation,
+    LlmPreference,
     SelectedDocument,
 )
 from app.main import app
 from app.ports.chat_workflow import ChatWorkflow
-from tests.auth_helpers import admin_user
+from tests.auth_helpers import admin_user, member_user
 
 
 @pytest.fixture
@@ -47,20 +55,24 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     )
     excel_assets.initialize()
     llm_client = FakeLlmClient()
+    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
         llm_client=llm_client,
         repository=repository,
+        llm_preferences=llm_preferences,
     )
     chat = ChatService(
         excel_assets=excel_assets,
         summaries=summaries,
         llm_client=llm_client,
         sessions=repository,
+        llm_preferences=llm_preferences,
     )
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
     app.dependency_overrides[get_document_summary_service] = lambda: summaries
     app.dependency_overrides[get_chat_service] = lambda: chat
+    app.dependency_overrides[get_llm_preference_service] = lambda: llm_preferences
     app.dependency_overrides[get_current_user] = admin_user
     app.dependency_overrides[require_admin_user] = admin_user
     with TestClient(app) as test_client:
@@ -120,6 +132,7 @@ def test_llm_request_error_returns_user_safe_api_error(tmp_path: Path) -> None:
             raise LlmRequestError(
                 stage="summary",
                 model="private-model",
+                provider="private-provider",
                 duration_seconds=1.25,
                 cause=RuntimeError("provider secret failure"),
             )
@@ -144,7 +157,9 @@ def test_llm_request_error_returns_user_safe_api_error(tmp_path: Path) -> None:
 
     assert response.status_code == 502
     assert response.json() == {
-        "detail": "The model request failed. Please try again shortly."
+        "detail": (
+            "The summary model request failed. Check the selected model or try again shortly."
+        )
     }
 
 
@@ -271,6 +286,57 @@ def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
         assert persisted_turns[0]["answer"]["citations"][0]["row"] == (
             first_answer["citations"][0]["row"]
         )
+
+
+def test_file_referenced_by_chat_attachment_can_be_deleted_without_breaking_chat(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        workbook_path = tmp_path / "standards.xlsx"
+        _write_large_xlsx_fixture(workbook_path, rows=5)
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "standards.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        assert upload_response.status_code == 200
+        file_id = upload_response.json()["file"]["file_id"]
+        version_id = upload_response.json()["version"]["version_id"]
+        assert client.post(f"/api/excel/versions/{version_id}/summary/generate").status_code == 200
+
+        session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+        answer_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/messages",
+            json={"question": "Attach this workbook."},
+        )
+        assert answer_response.status_code == 200
+
+        delete_response = client.delete(f"/api/excel/files/{file_id}?confirm_delete=true")
+        assert delete_response.status_code == 200
+        assert delete_response.json()["file_id"] == file_id
+
+        file_response = client.get(f"/api/excel/files/{file_id}")
+        assert file_response.status_code == 404
+        summary_after_delete_response = client.get(f"/api/excel/versions/{version_id}/summary")
+        assert summary_after_delete_response.status_code == 404
+        list_response = client.get("/api/excel/files")
+        assert list_response.status_code == 200
+        assert list_response.json()["files"] == []
+
+        follow_up_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/messages",
+            json={"question": "Can this session still use the workbook?"},
+        )
+        assert follow_up_response.status_code == 200
+        assert follow_up_response.json()["selected_documents"][0]["version_id"] == version_id
+        assert len(llm_client.answer_calls[-1]["rows"]) == 6
 
 
 def test_chat_answer_row_limit_caps_loaded_rows_and_persists_warning(
@@ -402,11 +468,7 @@ def test_chat_route_returns_documents_before_answer_stage(
         assert route_payload["selected_documents"][0]["version_id"] == version_id
         assert route_payload["newly_attached_documents"][0]["version_id"] == version_id
         assert route_payload["attached_documents"][0]["row_count"] == 6
-        assert [timing["stage"] for timing in route_payload["timings"]] == [
-            "route_model",
-            "attach_documents",
-            "route_total",
-        ]
+        assert "timings" not in route_payload
         assert llm_client.answer_calls == []
 
         answer_response = client.post(
@@ -417,9 +479,7 @@ def test_chat_route_returns_documents_before_answer_stage(
         answer_payload = answer_response.json()
         assert answer_payload["newly_attached_documents"] == []
         assert answer_payload["answer_blocks"][0]["citation_ids"] == ["C1"]
-        assert {"load_rows", "answer_model", "verify_citations", "answer_total"}.issubset(
-            {timing["stage"] for timing in answer_payload["timings"]}
-        )
+        assert "timings" not in answer_payload
 
 
 def test_chat_answer_request_passes_deep_thinking_flag(
@@ -492,12 +552,10 @@ def test_langgraph_workflow_runs_full_chat_chain(
         assert llm_client.route_calls[0]["question"] == "What standards are listed?"
         assert llm_client.answer_calls[0]["question"] == "What standards are listed?"
         assert answer_payload["selected_documents"][0]["version_id"] == version_id
-        assert {"route_total", "answer_total", "chat_total"}.issubset(
-            {timing["stage"] for timing in answer_payload["timings"]}
-        )
+        assert "timings" not in answer_payload
 
 
-def test_llm_options_endpoint_and_request_level_models(
+def test_llm_options_endpoint_and_workspace_models(
     tmp_path: Path,
 ) -> None:
     llm_client = CapturingLlmClient()
@@ -516,6 +574,13 @@ def test_llm_options_endpoint_and_request_level_models(
             "deepseek-v4-pro",
             "deepseek-v4-flash",
         ]
+        assert providers_by_id["volcengine_ark"]["models"][:3] == [
+            "doubao-seed-2-0-pro-260215",
+            "doubao-seed-2-0-lite-260428",
+            "doubao-seed-2-0-mini-260428",
+        ]
+        assert "deepseek-v4-pro-260425" in providers_by_id["volcengine_ark"]["models"]
+        assert providers_by_id["volcengine_ark"]["deep_thinking_models"] == []
         assert providers_by_id["siliconflow"]["deep_thinking_models"] == [
             "Pro/deepseek-ai/DeepSeek-V3.2",
         ]
@@ -543,10 +608,24 @@ def test_llm_options_endpoint_and_request_level_models(
             )
         version_id = upload_response.json()["version"]["version_id"]
 
-        summary_response = client.post(
-            f"/api/excel/versions/{version_id}/summary/generate",
-            json={"model": "Qwen/Qwen3.6-27B"},
+        save_response = client.patch(
+            "/api/excel/llm/preferences",
+            json={
+                "summary_provider": "siliconflow",
+                "summary_model": "Qwen/Qwen3.6-27B",
+                "router_provider": "deepseek",
+                "router_model": "deepseek-v4-flash",
+                "answer_provider": "siliconflow",
+                "answer_model": "deepseek-ai/DeepSeek-V4-Pro",
+            },
         )
+        assert save_response.status_code == 200
+
+        updated_options_response = client.get("/api/excel/llm/options")
+        assert updated_options_response.status_code == 200
+        assert updated_options_response.json()["defaults"]["router_model"] == "deepseek-v4-flash"
+
+        summary_response = client.post(f"/api/excel/versions/{version_id}/summary/generate")
         assert summary_response.status_code == 200
 
         session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
@@ -573,8 +652,210 @@ def test_llm_options_endpoint_and_request_level_models(
         assert answer_response.status_code == 200
 
         assert llm_client.summary_models == ["Qwen/Qwen3.6-27B"]
-        assert llm_client.route_models == ["inclusionAI/Ling-flash-2.0"]
+        assert llm_client.route_models == ["deepseek-v4-flash"]
         assert llm_client.answer_models == ["deepseek-ai/DeepSeek-V4-Pro"]
+
+
+def test_chat_turn_uses_model_preference_snapshot_when_defaults_change_mid_turn(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    excel_assets = ExcelAssetService(
+        repository=repository,
+        storage=FilesystemExcelArtifactStorage(tmp_path / "storage"),
+        workbook_reader=OpenpyxlWorkbookReader(),
+    )
+    excel_assets.initialize()
+    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences.save_preference(
+        summary_provider="initial-summary-provider",
+        summary_model="initial-summary-model",
+        router_provider="initial-router-provider",
+        router_model="initial-router-model",
+        answer_provider="initial-answer-provider",
+        answer_model="initial-answer-model",
+    )
+    llm_client = PreferenceMutatingLlmClient(llm_preferences)
+    summaries = DocumentSummaryService(
+        excel_assets=excel_assets,
+        llm_client=llm_client,
+        repository=repository,
+        llm_preferences=llm_preferences,
+    )
+    chat = ChatService(
+        excel_assets=excel_assets,
+        summaries=summaries,
+        llm_client=llm_client,
+        sessions=repository,
+        llm_preferences=llm_preferences,
+        workflow=LangGraphChatWorkflow(),
+    )
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_large_xlsx_fixture(workbook_path, rows=5)
+    upload = excel_assets.upload_workbook("standards.xlsx", workbook_path.read_bytes())
+    summaries.generate_summary(upload.version.version_id)
+
+    answer = chat.answer_question("Which standards are listed?")
+
+    assert answer.selected_documents[0].version_id == upload.version.version_id
+    assert llm_client.route_models[-1] == "initial-router-model"
+    assert llm_client.answer_models[-1] == "initial-answer-model"
+    assert llm_preferences.get_preference().answer_model == "next-answer-model"
+
+
+def test_cancelled_chat_turn_is_not_persisted_or_used_as_context(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    excel_assets = ExcelAssetService(
+        repository=repository,
+        storage=FilesystemExcelArtifactStorage(tmp_path / "storage"),
+        workbook_reader=OpenpyxlWorkbookReader(),
+    )
+    excel_assets.initialize()
+    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    cancellation = ChatCancellationToken(request_id="chat-cancel-test")
+    llm_client = CancellingAfterRouteLlmClient(cancellation)
+    summaries = DocumentSummaryService(
+        excel_assets=excel_assets,
+        llm_client=llm_client,
+        repository=repository,
+        llm_preferences=llm_preferences,
+    )
+    chat = ChatService(
+        excel_assets=excel_assets,
+        summaries=summaries,
+        llm_client=llm_client,
+        sessions=repository,
+        llm_preferences=llm_preferences,
+    )
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_large_xlsx_fixture(workbook_path, rows=5)
+    upload = excel_assets.upload_workbook("standards.xlsx", workbook_path.read_bytes())
+    summaries.generate_summary(upload.version.version_id)
+    session = chat.create_session_for_user("user_1")
+
+    with pytest.raises(ChatRequestCancelledError):
+        chat.answer_question(
+            "This turn will be cancelled.",
+            session_id=session.session_id,
+            user_id="user_1",
+            cancellation_token=cancellation,
+        )
+
+    assert chat.list_turns(session.session_id, user_id="user_1") == []
+    assert repository.list_attached_documents(session.session_id) == []
+
+    llm_client.cancel_after_route = False
+    cancellation = ChatCancellationToken(request_id="chat-next-turn")
+    answer = chat.answer_question(
+        "Next turn should not see cancelled context.",
+        session_id=session.session_id,
+        user_id="user_1",
+        cancellation_token=cancellation,
+    )
+
+    assert answer.question == "Next turn should not see cancelled context."
+    assert llm_client.answer_calls[-1]["previous_turns"] == []
+
+
+def test_hidden_file_is_not_routed_or_used_for_member_chat(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    excel_assets = ExcelAssetService(
+        repository=repository,
+        storage=FilesystemExcelArtifactStorage(tmp_path / "storage"),
+        workbook_reader=OpenpyxlWorkbookReader(),
+    )
+    excel_assets.initialize()
+    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_client = CapturingLlmClient()
+    summaries = DocumentSummaryService(
+        excel_assets=excel_assets,
+        llm_client=llm_client,
+        repository=repository,
+        llm_preferences=llm_preferences,
+    )
+    chat = ChatService(
+        excel_assets=excel_assets,
+        summaries=summaries,
+        llm_client=llm_client,
+        sessions=repository,
+        llm_preferences=llm_preferences,
+    )
+
+    public_path = tmp_path / "public.xlsx"
+    hidden_path = tmp_path / "hidden.xlsx"
+    _write_xlsx_fixture(public_path)
+    _write_xlsx_fixture(hidden_path)
+    public_upload = excel_assets.upload_workbook("public.xlsx", public_path.read_bytes())
+    hidden_upload = excel_assets.upload_workbook("hidden.xlsx", hidden_path.read_bytes())
+    summaries.generate_summary(public_upload.version.version_id)
+    summaries.generate_summary(hidden_upload.version.version_id)
+    excel_assets.set_file_visibility(hidden_upload.file.file_id, visible_to_members=False)
+
+    answer = chat.answer_question(
+        "Which standards are available?",
+        user_id="user_member_test",
+        user_role=member_user().role,
+    )
+
+    routed_summary_versions = [
+        summary.version_id
+        for call in llm_client.route_calls
+        for summary in call["summaries"]
+    ]
+    assert hidden_upload.version.version_id not in routed_summary_versions
+    assert answer.selected_documents[0].version_id == public_upload.version.version_id
+
+
+def test_member_chat_revalidates_visibility_after_model_answer(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    excel_assets = ExcelAssetService(
+        repository=repository,
+        storage=FilesystemExcelArtifactStorage(tmp_path / "storage"),
+        workbook_reader=OpenpyxlWorkbookReader(),
+    )
+    excel_assets.initialize()
+    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_client = VisibilityHidingLlmClient(excel_assets)
+    summaries = DocumentSummaryService(
+        excel_assets=excel_assets,
+        llm_client=llm_client,
+        repository=repository,
+        llm_preferences=llm_preferences,
+    )
+    chat = ChatService(
+        excel_assets=excel_assets,
+        summaries=summaries,
+        llm_client=llm_client,
+        sessions=repository,
+        llm_preferences=llm_preferences,
+    )
+
+    workbook_path = tmp_path / "temporary-visible.xlsx"
+    _write_xlsx_fixture(workbook_path)
+    upload = excel_assets.upload_workbook(
+        "temporary-visible.xlsx",
+        workbook_path.read_bytes(),
+    )
+    summaries.generate_summary(upload.version.version_id)
+    llm_client.hide_file_id_on_answer = upload.file.file_id
+
+    answer = chat.answer_question(
+        "Use the temporary file.",
+        user_id="user_member_visibility_race",
+        user_role=member_user().role,
+    )
+
+    assert len(llm_client.answer_calls) == 1
+    assert answer.insufficient_evidence is True
+    assert answer.selected_documents == []
+    assert answer.citations == []
+    assert answer.answer_blocks[0].citation_ids == []
 
 
 def test_llm_preferences_are_persisted(
@@ -614,6 +895,7 @@ def test_verifier_uses_evidence_id_to_keep_correct_file() -> None:
         summaries=None,  # type: ignore[arg-type]
         llm_client=FakeLlmClient(),
         sessions=None,  # type: ignore[arg-type]
+        llm_preferences=_fake_llm_preferences(),
     )
     citation_index = {
         "version_a::sheet_a::S001_R5": ExcelCitation(
@@ -662,6 +944,7 @@ def test_verifier_rejects_ambiguous_legacy_row_id() -> None:
         summaries=None,  # type: ignore[arg-type]
         llm_client=FakeLlmClient(),
         sessions=None,  # type: ignore[arg-type]
+        llm_preferences=_fake_llm_preferences(),
     )
     citation_index = {
         "version_a::sheet_a::S001_R5": ExcelCitation(
@@ -703,6 +986,7 @@ def test_verifier_rejects_invalid_evidence_id() -> None:
         summaries=None,  # type: ignore[arg-type]
         llm_client=FakeLlmClient(),
         sessions=None,  # type: ignore[arg-type]
+        llm_preferences=_fake_llm_preferences(),
     )
     citation_index = {
         "version_a::sheet_a::S001_R5": ExcelCitation(
@@ -779,8 +1063,9 @@ class CapturingLlmClient(FakeLlmClient):
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        cancellation_checker=None,
     ) -> list[SelectedDocument]:
-        _ = provider
+        _ = provider, cancellation_checker
         self.route_models.append(model)
         self.route_calls.append(
             {
@@ -788,6 +1073,7 @@ class CapturingLlmClient(FakeLlmClient):
                 "user_questions": user_questions or [],
                 "attached_documents": attached_documents or [],
                 "previous_turns": previous_turns or [],
+                "summaries": summaries,
             }
         )
         if not summaries:
@@ -811,8 +1097,9 @@ class CapturingLlmClient(FakeLlmClient):
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_checker=None,
     ) -> DraftChatAnswer:
-        _ = provider
+        _ = provider, cancellation_checker
         self.answer_models.append(model)
         self.answer_calls.append(
             {
@@ -824,24 +1111,107 @@ class CapturingLlmClient(FakeLlmClient):
             }
         )
         available_row_ids = {str(row["row_id"]) for row in rows}
-        row_id = "S001_R205" if "S001_R205" in available_row_ids else str(rows[-1]["row_id"])
-        evidence_id = next(
-            str(row["evidence_id"])
-            for row in rows
-            if str(row["row_id"]) == row_id
+        row_id = (
+            "S001_R205"
+            if "S001_R205" in available_row_ids
+            else str(rows[-1]["row_id"])
+            if rows
+            else ""
+        )
+        evidence_id = ""
+        if row_id:
+            evidence_id = next(
+                str(row["evidence_id"])
+                for row in rows
+                if str(row["row_id"]) == row_id
+            )
+        evidence_ids = [evidence_id] if evidence_id else []
+        citations = (
+            [DraftCitation(evidence_id=evidence_id, quote="captured row")]
+            if evidence_id
+            else []
         )
         return DraftChatAnswer(
             answer_blocks=[
                 DraftAnswerBlock(
                     text=f"Captured answer for {question}.",
-                    evidence_ids=[evidence_id],
+                    evidence_ids=evidence_ids,
                     reasoning="Captured reasoning." if enable_deep_thinking else "",
                 )
             ],
-            citations=[DraftCitation(evidence_id=evidence_id, quote="captured row")],
-            insufficient_evidence=False,
+            citations=citations,
+            insufficient_evidence=not rows,
             follow_up_suggestions=[],
         )
+
+
+class PreferenceMutatingLlmClient(CapturingLlmClient):
+    def __init__(self, preferences: WorkspaceLlmPreferenceService) -> None:
+        super().__init__()
+        self._preferences = preferences
+
+    def route_documents(
+        self,
+        question: str,
+        summaries: list[DocumentSummary],
+        max_documents: int,
+        user_questions: list[str] | None = None,
+        attached_documents: list[AttachedDocument] | None = None,
+        previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        cancellation_checker=None,
+    ) -> list[SelectedDocument]:
+        selected_documents = super().route_documents(
+            question=question,
+            summaries=summaries,
+            max_documents=max_documents,
+            user_questions=user_questions,
+            attached_documents=attached_documents,
+            previous_turns=previous_turns,
+            model=model,
+            provider=provider,
+            cancellation_checker=cancellation_checker,
+        )
+        self._preferences.save_preference(
+            summary_provider="next-summary-provider",
+            summary_model="next-summary-model",
+            router_provider="next-router-provider",
+            router_model="next-router-model",
+            answer_provider="next-answer-provider",
+            answer_model="next-answer-model",
+        )
+        return selected_documents
+
+
+class VisibilityHidingLlmClient(CapturingLlmClient):
+    def __init__(self, excel_assets: ExcelAssetService) -> None:
+        super().__init__()
+        self._excel_assets = excel_assets
+        self.hide_file_id_on_answer: str | None = None
+
+    def answer_with_rows(self, *args, **kwargs) -> DraftChatAnswer:
+        answer = super().answer_with_rows(*args, **kwargs)
+        if self.hide_file_id_on_answer is not None:
+            self._excel_assets.set_file_visibility(
+                self.hide_file_id_on_answer,
+                visible_to_members=False,
+            )
+            self.hide_file_id_on_answer = None
+        return answer
+
+
+class CancellingAfterRouteLlmClient(CapturingLlmClient):
+    def __init__(self, cancellation: ChatCancellationToken) -> None:
+        super().__init__()
+        self._cancellation = cancellation
+        self.cancel_after_route = True
+
+    def route_documents(self, *args, **kwargs) -> list[SelectedDocument]:
+        selected_documents = super().route_documents(*args, **kwargs)
+        if self.cancel_after_route:
+            self._cancellation.cancel()
+        return selected_documents
 
 
 @contextmanager
@@ -858,24 +1228,48 @@ def _client_with_llm(
         workbook_reader=OpenpyxlWorkbookReader(),
     )
     excel_assets.initialize()
+    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
         llm_client=llm_client,
         repository=repository,
+        llm_preferences=llm_preferences,
     )
     chat = ChatService(
         excel_assets=excel_assets,
         summaries=summaries,
         llm_client=llm_client,
         sessions=repository,
+        llm_preferences=llm_preferences,
         max_answer_rows=max_answer_rows,
         workflow=workflow,
     )
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
     app.dependency_overrides[get_document_summary_service] = lambda: summaries
     app.dependency_overrides[get_chat_service] = lambda: chat
+    app.dependency_overrides[get_llm_preference_service] = lambda: llm_preferences
     app.dependency_overrides[get_current_user] = admin_user
     app.dependency_overrides[require_admin_user] = admin_user
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+class _StaticLlmPreferences:
+    def get_preference(self) -> LlmPreference:
+        settings = Settings()
+        return LlmPreference(
+            scope="workspace",
+            summary_provider=settings.llm_summary_provider,
+            summary_model=settings.llm_summary_model,
+            router_provider=settings.llm_router_provider,
+            router_model=settings.llm_router_model,
+            answer_provider=settings.llm_answer_provider,
+            answer_model=settings.llm_answer_model,
+            created_at="",
+            updated_at="",
+        )
+
+
+def _fake_llm_preferences() -> _StaticLlmPreferences:
+    return _StaticLlmPreferences()

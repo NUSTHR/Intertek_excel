@@ -2,15 +2,18 @@ from collections.abc import Iterable
 
 SILICONFLOW_PROVIDER = "siliconflow"
 DEEPSEEK_PROVIDER = "deepseek"
+VOLCENGINE_ARK_PROVIDER = "volcengine_ark"
 
 SUPPORTED_LLM_PROVIDERS: tuple[str, ...] = (
     SILICONFLOW_PROVIDER,
     DEEPSEEK_PROVIDER,
+    VOLCENGINE_ARK_PROVIDER,
 )
 
 LLM_PROVIDER_LABELS: dict[str, str] = {
     SILICONFLOW_PROVIDER: "SiliconFlow",
     DEEPSEEK_PROVIDER: "DeepSeek Official",
+    VOLCENGINE_ARK_PROVIDER: "Volcengine Ark",
 }
 
 SILICONFLOW_LLM_MODELS: tuple[str, ...] = (
@@ -26,9 +29,21 @@ DEEPSEEK_OFFICIAL_LLM_MODELS: tuple[str, ...] = (
     "deepseek-v4-flash",
 )
 
+VOLCENGINE_ARK_LLM_MODELS: tuple[str, ...] = (
+    "doubao-seed-2-0-pro-260215",
+    "doubao-seed-2-0-lite-260428",
+    "doubao-seed-2-0-mini-260428",
+    "doubao-seed-2-0-lite-260215",
+    "doubao-seed-1-8-251228",
+    "deepseek-v4-pro-260425",
+    "deepseek-v4-flash-260425",
+    "deepseek-v3.2",
+)
+
 SUPPORTED_LLM_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
     SILICONFLOW_PROVIDER: SILICONFLOW_LLM_MODELS,
     DEEPSEEK_PROVIDER: DEEPSEEK_OFFICIAL_LLM_MODELS,
+    VOLCENGINE_ARK_PROVIDER: VOLCENGINE_ARK_LLM_MODELS,
 }
 
 SUPPORTED_LLM_MODELS: tuple[str, ...] = tuple(
@@ -36,6 +51,7 @@ SUPPORTED_LLM_MODELS: tuple[str, ...] = tuple(
         [
             *SILICONFLOW_LLM_MODELS,
             *DEEPSEEK_OFFICIAL_LLM_MODELS,
+            *VOLCENGINE_ARK_LLM_MODELS,
         ]
     )
 )
@@ -49,6 +65,9 @@ DEFAULT_ANSWER_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_SUMMARY_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_ROUTER_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_ANSWER_MODEL = "deepseek-v4-pro"
+DEFAULT_VOLCENGINE_ARK_SUMMARY_MODEL = "doubao-seed-2-0-pro-260215"
+DEFAULT_VOLCENGINE_ARK_ROUTER_MODEL = "doubao-seed-2-0-lite-260428"
+DEFAULT_VOLCENGINE_ARK_ANSWER_MODEL = "deepseek-v4-pro-260425"
 
 DEEP_THINKING_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
     SILICONFLOW_PROVIDER: (

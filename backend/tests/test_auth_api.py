@@ -14,11 +14,14 @@ from app.api.dependencies import (
     get_chat_service,
     get_document_summary_service,
     get_excel_asset_service,
+    get_llm_preference_service,
 )
 from app.application.auth.service import AuthService
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.llm_preferences import WorkspaceLlmPreferenceService
+from app.core.config import Settings
 from app.main import app
 
 
@@ -32,16 +35,19 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     )
     excel_assets.initialize()
     llm_client = FakeLlmClient()
+    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
         llm_client=llm_client,
         repository=repository,
+        llm_preferences=llm_preferences,
     )
     chat = ChatService(
         excel_assets=excel_assets,
         summaries=summaries,
         llm_client=llm_client,
         sessions=repository,
+        llm_preferences=llm_preferences,
     )
     auth = AuthService(
         repository=repository,
@@ -55,6 +61,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
     app.dependency_overrides[get_document_summary_service] = lambda: summaries
     app.dependency_overrides[get_chat_service] = lambda: chat
+    app.dependency_overrides[get_llm_preference_service] = lambda: llm_preferences
     app.dependency_overrides[get_auth_service] = lambda: auth
     with TestClient(app) as test_client:
         yield test_client
@@ -102,6 +109,93 @@ def test_admin_can_login_and_member_cannot_manage_files(
     shared_files_response = client.get("/api/excel/files", headers=member_auth)
     assert shared_files_response.status_code == 200
     assert shared_files_response.json()["files"][0]["display_name"] == "standards.xlsx"
+
+
+def test_admin_can_hide_files_from_members(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    admin_auth = _login(client, "969348539@qq.com", "Intertek_AI")
+    member_auth = _register(client, "visibility@example.com", "member-pass-123")
+
+    workbook_path = tmp_path / "restricted.xlsx"
+    _write_xlsx_fixture(workbook_path)
+    with workbook_path.open("rb") as workbook_file:
+        upload_response = client.post(
+            "/api/excel/files",
+            headers=admin_auth,
+            files={
+                "file": (
+                    "restricted.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+    assert upload_response.status_code == 200
+    file_id = upload_response.json()["file"]["file_id"]
+    assert upload_response.json()["file"]["visible_to_members"] is True
+
+    hide_response = client.patch(
+        f"/api/excel/files/{file_id}/visibility",
+        headers=admin_auth,
+        json={"visible_to_members": False},
+    )
+    assert hide_response.status_code == 200
+    assert hide_response.json()["visible_to_members"] is False
+
+    member_files_response = client.get("/api/excel/files", headers=member_auth)
+    assert member_files_response.status_code == 200
+    assert member_files_response.json()["files"] == []
+
+    member_file_response = client.get(f"/api/excel/files/{file_id}", headers=member_auth)
+    assert member_file_response.status_code == 404
+
+    admin_files_response = client.get("/api/excel/files", headers=admin_auth)
+    assert admin_files_response.status_code == 200
+    assert admin_files_response.json()["files"][0]["file_id"] == file_id
+
+
+def test_llm_preferences_are_global_and_admin_managed(client: TestClient) -> None:
+    admin_auth = _login(client, "969348539@qq.com", "Intertek_AI")
+    member_auth = _register(client, "model-user@example.com", "member-pass-123")
+
+    save_response = client.patch(
+        "/api/excel/llm/preferences",
+        headers=admin_auth,
+        json={
+            "summary_provider": "siliconflow",
+            "summary_model": "Qwen/Qwen3.6-27B",
+            "router_provider": "deepseek",
+            "router_model": "deepseek-v4-flash",
+            "answer_provider": "siliconflow",
+            "answer_model": "deepseek-ai/DeepSeek-V4-Pro",
+        },
+    )
+    assert save_response.status_code == 200
+    saved = save_response.json()
+
+    member_read_response = client.get("/api/excel/llm/preferences", headers=member_auth)
+    assert member_read_response.status_code == 200
+    assert member_read_response.json() == saved
+
+    member_options_response = client.get("/api/excel/llm/options", headers=member_auth)
+    assert member_options_response.status_code == 200
+    assert member_options_response.json()["defaults"]["router_model"] == "deepseek-v4-flash"
+
+    member_save_response = client.patch(
+        "/api/excel/llm/preferences",
+        headers=member_auth,
+        json={
+            "summary_provider": "deepseek",
+            "summary_model": "deepseek-v4-pro",
+            "router_provider": "siliconflow",
+            "router_model": "Qwen/Qwen3.6-35B-A3B",
+            "answer_provider": "deepseek",
+            "answer_model": "deepseek-v4-pro",
+        },
+    )
+    assert member_save_response.status_code == 403
 
 
 def test_register_login_me_logout_and_password_reset(client: TestClient) -> None:

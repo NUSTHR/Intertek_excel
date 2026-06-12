@@ -21,14 +21,18 @@ export class ExcelWorkspaceApiError extends Error {
   }
 }
 
+export interface RequestOptions {
+  apiBaseUrl?: string
+  abortMessage?: string
+  signal?: AbortSignal
+  timeoutMs?: number
+  timeoutMessage?: string
+}
+
 export async function requestJson<T>(
   path: string,
   init: RequestInit = {},
-  options: {
-    apiBaseUrl?: string
-    timeoutMs?: number
-    timeoutMessage?: string
-  } = {},
+  options: RequestOptions = {},
 ): Promise<T> {
   const response = await request(path, init, options)
   return (await response.json()) as T
@@ -37,11 +41,7 @@ export async function requestJson<T>(
 export async function requestEmpty(
   path: string,
   init: RequestInit = {},
-  options: {
-    apiBaseUrl?: string
-    timeoutMs?: number
-    timeoutMessage?: string
-  } = {},
+  options: RequestOptions = {},
 ): Promise<void> {
   await request(path, init, options)
 }
@@ -49,20 +49,31 @@ export async function requestEmpty(
 async function request(
   path: string,
   init: RequestInit,
-  options: {
-    apiBaseUrl?: string
-    timeoutMs?: number
-    timeoutMessage?: string
-  },
+  options: RequestOptions,
 ): Promise<Response> {
   const controller = new AbortController()
   const timeoutMs = options.timeoutMs ?? 30000
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+  const externalSignal = options.signal ?? init.signal ?? null
+  let cancelledByCaller = false
+
+  const abortFromCaller = () => {
+    cancelledByCaller = true
+    controller.abort()
+  }
+  if (externalSignal?.aborted) {
+    abortFromCaller()
+  } else {
+    externalSignal?.addEventListener('abort', abortFromCaller, { once: true })
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    controller.abort()
+  }, timeoutMs)
   try {
     const response = await fetch(`${options.apiBaseUrl ?? ''}${path}`, {
       ...init,
       headers: buildHeaders(init.headers),
-      signal: init.signal ?? controller.signal,
+      signal: controller.signal,
     })
     if (!response.ok) {
       const payload = await parseErrorPayload(response)
@@ -78,7 +89,11 @@ async function request(
       throw error
     }
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new ExcelWorkspaceApiError(options.timeoutMessage ?? 'Request timed out.')
+      throw new ExcelWorkspaceApiError(
+        cancelledByCaller
+          ? (options.abortMessage ?? 'Request cancelled.')
+          : (options.timeoutMessage ?? 'Request timed out.'),
+      )
     }
     if (error instanceof TypeError) {
       throw new ExcelWorkspaceApiError(
@@ -91,6 +106,7 @@ async function request(
     throw new ExcelWorkspaceApiError('Network error. Check whether the Excel backend is running.')
   } finally {
     window.clearTimeout(timeoutId)
+    externalSignal?.removeEventListener('abort', abortFromCaller)
   }
 }
 

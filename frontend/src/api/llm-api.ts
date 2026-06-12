@@ -1,13 +1,12 @@
 import type { LlmModelOptionsResponse, LlmPreference } from '../types/llm'
+import { defaultRequestOptions } from './config'
 import { requestJson } from './errors'
-
-const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
 
 export async function getLlmModelOptions(): Promise<LlmModelOptionsResponse> {
   return requestJson<LlmModelOptionsResponse>(
     '/api/excel/llm/options',
     { method: 'GET' },
-    { apiBaseUrl },
+    defaultRequestOptions,
   )
 }
 
@@ -15,7 +14,7 @@ export async function getLlmPreference(): Promise<LlmPreference> {
   return requestJson<LlmPreference>(
     '/api/excel/llm/preferences',
     { method: 'GET' },
-    { apiBaseUrl },
+    defaultRequestOptions,
   )
 }
 
@@ -31,6 +30,6 @@ export async function saveLlmPreference(
       },
       body: JSON.stringify(preference),
     },
-    { apiBaseUrl },
+    defaultRequestOptions,
   )
 }

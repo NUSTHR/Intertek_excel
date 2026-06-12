@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from app.application.excel_assets.access import FileAccessContext
 from app.application.excel_assets.models import (
     DeleteExcelFileResult,
     FileNameCheckResult,
@@ -28,7 +29,9 @@ from app.domain.models import (
     ExcelArtifact,
     ExcelArtifactType,
     ExcelFile,
+    ExcelFileStatus,
     ExcelFileVersion,
+    ExcelFileVisibility,
     ExcelRowMapping,
     ExcelSheet,
     ExcelVersionStatus,
@@ -129,11 +132,19 @@ class ExcelAssetService:
             )
             raise
 
-    def list_files(self) -> list[ExcelFile]:
-        return self._repository.list_files()
+    def list_files(self, access: FileAccessContext | None = None) -> list[ExcelFile]:
+        return [
+            file
+            for file in self._repository.list_files()
+            if self._can_access_file(file, access)
+        ]
 
-    def get_file(self, file_id: str) -> ExcelFile:
-        return self._require_file(file_id)
+    def get_file(
+        self,
+        file_id: str,
+        access: FileAccessContext | None = None,
+    ) -> ExcelFile:
+        return self._require_file(file_id, access=access)
 
     def rename_file(self, file_id: str, display_name: str) -> ExcelFile:
         file = self._require_file(file_id)
@@ -154,6 +165,25 @@ class ExcelAssetService:
             raise AssetNotFoundError("Excel file was not found")
         return updated_file
 
+    def set_file_visibility(
+        self,
+        file_id: str,
+        visible_to_members: bool,
+    ) -> ExcelFile:
+        self._require_file(file_id)
+        updated_file = self._repository.update_file_visibility(
+            file_id=file_id,
+            visibility=(
+                ExcelFileVisibility.VISIBLE
+                if visible_to_members
+                else ExcelFileVisibility.HIDDEN
+            ),
+            updated_at=utc_now_iso(),
+        )
+        if updated_file is None:
+            raise AssetNotFoundError("Excel file was not found")
+        return updated_file
+
     def delete_file(
         self,
         file_id: str,
@@ -166,9 +196,7 @@ class ExcelAssetService:
                 display_name=file.display_name,
                 file_id=file.file_id,
             )
-
         counts = self._repository.delete_file(file_id)
-        self._storage.delete_file_tree(file_id)
         return DeleteExcelFileResult(
             file_id=file.file_id,
             display_name=file.display_name,
@@ -180,14 +208,29 @@ class ExcelAssetService:
             deleted_chat_session_documents=counts["deleted_chat_session_documents"],
         )
 
-    def get_active_file_version(self, file_id: str) -> ExcelFileVersion:
-        file = self._require_file(file_id)
+    def get_active_file_version(
+        self,
+        file_id: str,
+        access: FileAccessContext | None = None,
+    ) -> ExcelFileVersion:
+        file = self._require_file(file_id, access=access)
         if file.active_version_id is None:
             raise AssetNotFoundError("Excel file has no active version")
         return self._require_version(file.active_version_id)
 
-    def list_versions(self, file_id: str) -> list[ExcelFileVersion]:
-        self._require_file(file_id)
+    def get_version(
+        self,
+        version_id: str,
+        access: FileAccessContext | None = None,
+    ) -> ExcelFileVersion:
+        return self._require_version(version_id, access=access)
+
+    def list_versions(
+        self,
+        file_id: str,
+        access: FileAccessContext | None = None,
+    ) -> list[ExcelFileVersion]:
+        self._require_file(file_id, access=access)
         return self._repository.list_versions(file_id)
 
     def activate_version(self, file_id: str, version_id: str) -> ExcelFileVersion:
@@ -204,12 +247,27 @@ class ExcelAssetService:
         )
         return self._require_version(version_id)
 
-    def list_sheets(self, version_id: str) -> list[ExcelSheet]:
-        self._require_version(version_id)
+    def list_sheets(
+        self,
+        version_id: str,
+        access: FileAccessContext | None = None,
+    ) -> list[ExcelSheet]:
+        self._require_version(version_id, access=access)
         return self._repository.list_sheets(version_id)
 
-    def get_profile(self, version_id: str) -> WorkbookProfile:
-        version = self._require_version(version_id)
+    def list_sheets_for_legacy_chat_context(
+        self,
+        version_id: str,
+    ) -> list[ExcelSheet]:
+        version = self._require_version_from_deleted_file(version_id)
+        return self._repository.list_sheets(version.version_id)
+
+    def get_profile(
+        self,
+        version_id: str,
+        access: FileAccessContext | None = None,
+    ) -> WorkbookProfile:
+        version = self._require_version(version_id, access=access)
         artifacts = self._repository.list_artifacts(version_id)
         profile_artifact = next(
             (
@@ -262,8 +320,9 @@ class ExcelAssetService:
         sheet_id: str,
         offset: int = 0,
         limit: int = 500,
+        access: FileAccessContext | None = None,
     ) -> SheetPreviewResult:
-        sheet = self._require_sheet(sheet_id)
+        sheet = self._require_sheet(sheet_id, access=access)
         rows = self._read_csv_rows(Path(sheet.raw_csv_path))
         safe_offset = max(0, offset)
         safe_limit = max(1, min(5000, limit))
@@ -280,8 +339,29 @@ class ExcelAssetService:
         sheet_id: str,
         offset: int = 0,
         limit: int = 500,
+        access: FileAccessContext | None = None,
     ) -> SheetRowsResult:
-        sheet = self._require_sheet(sheet_id)
+        sheet = self._require_sheet(sheet_id, access=access)
+        rows = self._read_csv_rows(Path(sheet.raw_csv_path))
+        mappings = self._repository.list_row_mappings_for_sheet(sheet_id)
+        safe_offset = max(0, offset)
+        safe_limit = max(1, min(5000, limit))
+        return SheetRowsResult(
+            sheet=sheet,
+            mappings=mappings[safe_offset : safe_offset + safe_limit],
+            rows=rows[safe_offset : safe_offset + safe_limit],
+            total_rows=len(rows),
+            offset=safe_offset,
+            limit=safe_limit,
+        )
+
+    def list_sheet_rows_for_legacy_chat_context(
+        self,
+        sheet_id: str,
+        offset: int = 0,
+        limit: int = 500,
+    ) -> SheetRowsResult:
+        sheet = self._require_sheet_from_deleted_file(sheet_id)
         rows = self._read_csv_rows(Path(sheet.raw_csv_path))
         mappings = self._repository.list_row_mappings_for_sheet(sheet_id)
         safe_offset = max(0, offset)
@@ -300,8 +380,9 @@ class ExcelAssetService:
         sheet_id: str,
         query: str,
         limit: int = 50,
+        access: FileAccessContext | None = None,
     ) -> SheetSearchResult:
-        sheet = self._require_sheet(sheet_id)
+        sheet = self._require_sheet(sheet_id, access=access)
         normalized_query = self._search_policy.normalize_query(query)
         safe_limit = self._search_policy.normalize_limit(limit)
         if not normalized_query:
@@ -320,8 +401,9 @@ class ExcelAssetService:
         version_id: str,
         query: str,
         limit: int = 50,
+        access: FileAccessContext | None = None,
     ) -> WorkbookSearchResult:
-        self._require_version(version_id)
+        self._require_version(version_id, access=access)
         normalized_query = self._search_policy.normalize_query(query)
         safe_limit = self._search_policy.normalize_limit(limit)
         if not normalized_query:
@@ -353,8 +435,13 @@ class ExcelAssetService:
             limit=safe_limit,
         )
 
-    def lookup_row(self, sheet_id: str, row_id: str) -> RowLookupResult:
-        sheet = self._require_sheet(sheet_id)
+    def lookup_row(
+        self,
+        sheet_id: str,
+        row_id: str,
+        access: FileAccessContext | None = None,
+    ) -> RowLookupResult:
+        sheet = self._require_sheet(sheet_id, access=access)
         mapping = self._repository.get_row_mapping(sheet_id=sheet_id, row_id=row_id)
         if mapping is None:
             raise AssetNotFoundError("row mapping was not found")
@@ -633,20 +720,59 @@ class ExcelAssetService:
             sheets=sheets,
         )
 
-    def _require_file(self, file_id: str) -> ExcelFile:
+    def _can_access_file(
+        self,
+        file: ExcelFile,
+        access: FileAccessContext | None,
+    ) -> bool:
+        if access is None or access.can_manage_files:
+            return True
+        return file.visibility == ExcelFileVisibility.VISIBLE
+
+    def _require_file(
+        self,
+        file_id: str,
+        access: FileAccessContext | None = None,
+    ) -> ExcelFile:
         file = self._repository.get_file(file_id)
-        if file is None:
+        if file is None or not self._can_access_file(file, access):
             raise AssetNotFoundError("Excel file was not found")
         return file
 
-    def _require_version(self, version_id: str) -> ExcelFileVersion:
+    def _require_version(
+        self,
+        version_id: str,
+        access: FileAccessContext | None = None,
+    ) -> ExcelFileVersion:
         version = self._repository.get_version(version_id)
         if version is None:
             raise AssetNotFoundError("Excel file version was not found")
+        self._require_file(version.file_id, access=access)
         return version
 
-    def _require_sheet(self, sheet_id: str) -> ExcelSheet:
+    def _require_version_from_deleted_file(self, version_id: str) -> ExcelFileVersion:
+        version = self._repository.get_version(version_id)
+        if version is None:
+            raise AssetNotFoundError("Excel file version was not found")
+        file = self._repository.get_file_including_deleted(version.file_id)
+        if file is None or file.status != ExcelFileStatus.DELETED:
+            raise AssetNotFoundError("Excel file version was not found")
+        return version
+
+    def _require_sheet(
+        self,
+        sheet_id: str,
+        access: FileAccessContext | None = None,
+    ) -> ExcelSheet:
         sheet = self._repository.get_sheet(sheet_id)
         if sheet is None:
             raise AssetNotFoundError("Excel sheet was not found")
+        self._require_version(sheet.version_id, access=access)
+        return sheet
+
+    def _require_sheet_from_deleted_file(self, sheet_id: str) -> ExcelSheet:
+        sheet = self._repository.get_sheet(sheet_id)
+        if sheet is None:
+            raise AssetNotFoundError("Excel sheet was not found")
+        self._require_version_from_deleted_file(sheet.version_id)
         return sheet

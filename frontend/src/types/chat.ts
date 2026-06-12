@@ -1,10 +1,6 @@
 export interface ChatRequest {
   question: string
   session_id?: string | null
-  router_model?: string | null
-  router_provider?: string | null
-  answer_model?: string | null
-  answer_provider?: string | null
   enable_deep_thinking?: boolean
 }
 
@@ -61,11 +57,6 @@ export interface AttachedDocument {
   status: string
 }
 
-export interface ChatStageTiming {
-  stage: string
-  duration_seconds: number
-}
-
 export interface ChatAnswerBlock {
   text: string
   citation_ids: string[]
@@ -83,7 +74,6 @@ export interface ChatAnswer {
   insufficient_evidence: boolean
   follow_up_suggestions: string[]
   warnings: string[]
-  timings: ChatStageTiming[]
   created_at: string
 }
 
@@ -93,14 +83,9 @@ export interface ChatRouteResult {
   selected_documents: SelectedDocument[]
   newly_attached_documents: SelectedDocument[]
   attached_documents: AttachedDocument[]
-  timings: ChatStageTiming[]
   created_at: string
 }
 
 export interface ChatModelSelection {
-  routerProvider: string
-  routerModel: string
-  answerProvider: string
-  answerModel: string
   enableDeepThinking?: boolean
 }

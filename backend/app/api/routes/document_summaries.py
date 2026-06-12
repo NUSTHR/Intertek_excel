@@ -9,22 +9,22 @@ from app.api.dependencies import (
 )
 from app.api.schemas import (
     DocumentSummaryResponse,
-    GenerateDocumentSummaryRequest,
     SheetSummaryResponse,
     SheetSummaryUpdateRequest,
     UpdateDocumentSummaryRequest,
 )
 from app.application.document_summaries.service import DocumentSummaryService
+from app.application.excel_assets.access import FileAccessContext
 from app.core.errors import AssetNotFoundError
-from app.domain.models import DocumentSummary, SheetSummary
+from app.domain.models import AuthenticatedUser, DocumentSummary, SheetSummary
 
 router = APIRouter(prefix="/api/excel", tags=["document-summaries"])
 DocumentSummaryServiceDependency = Annotated[
     DocumentSummaryService,
     Depends(get_document_summary_service),
 ]
-AuthenticatedDependency = Annotated[object, Depends(get_current_user)]
-AdminDependency = Annotated[object, Depends(require_admin_user)]
+AuthenticatedDependency = Annotated[AuthenticatedUser, Depends(get_current_user)]
+AdminDependency = Annotated[AuthenticatedUser, Depends(require_admin_user)]
 
 
 @router.post(
@@ -35,22 +35,20 @@ def generate_document_summary(
     version_id: str,
     service: DocumentSummaryServiceDependency,
     _admin: AdminDependency,
-    request: GenerateDocumentSummaryRequest | None = None,
 ) -> DocumentSummaryResponse:
-    model = request.model if request is not None else None
-    provider = request.provider if request is not None else None
-    return _to_summary_response(
-        service.generate_summary(version_id, model=model, provider=provider)
-    )
+    return _to_summary_response(service.generate_summary(version_id))
 
 
 @router.get("/versions/{version_id}/summary", response_model=DocumentSummaryResponse)
 def get_document_summary(
     version_id: str,
     service: DocumentSummaryServiceDependency,
-    _user: AuthenticatedDependency,
+    user: AuthenticatedDependency,
 ) -> DocumentSummaryResponse:
-    summary = service.get_summary(version_id)
+    summary = service.get_summary(
+        version_id,
+        access=FileAccessContext(user_id=user.user_id, role=user.role),
+    )
     if summary is None:
         raise AssetNotFoundError("document summary was not found")
     return _to_summary_response(summary)

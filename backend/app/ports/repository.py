@@ -9,6 +9,7 @@ from app.domain.models import (
     ExcelArtifact,
     ExcelFile,
     ExcelFileVersion,
+    ExcelFileVisibility,
     ExcelRowMapping,
     ExcelSheet,
     ExcelVersionStatus,
@@ -28,6 +29,9 @@ class ExcelAssetRepository(Protocol):
     def get_file(self, file_id: str) -> ExcelFile | None:
         ...
 
+    def get_file_including_deleted(self, file_id: str) -> ExcelFile | None:
+        ...
+
     def find_file_by_display_name(self, display_name: str) -> ExcelFile | None:
         ...
 
@@ -38,6 +42,14 @@ class ExcelAssetRepository(Protocol):
         self,
         file_id: str,
         display_name: str,
+        updated_at: str,
+    ) -> ExcelFile | None:
+        ...
+
+    def update_file_visibility(
+        self,
+        file_id: str,
+        visibility: ExcelFileVisibility,
         updated_at: str,
     ) -> ExcelFile | None:
         ...
@@ -143,7 +155,10 @@ class ChatSessionRepository(Protocol):
     def delete_session(self, session_id: str) -> bool:
         ...
 
-    def attach_document(self, document: AttachedDocument) -> None:
+    def attach_document(self, document: AttachedDocument) -> bool:
+        ...
+
+    def detach_documents(self, session_id: str, version_ids: list[str]) -> None:
         ...
 
     def list_attached_documents(self, session_id: str) -> list[AttachedDocument]:
@@ -152,13 +167,10 @@ class ChatSessionRepository(Protocol):
     def create_turn(self, turn: ChatTurn) -> None:
         ...
 
+    def delete_turn(self, session_id: str, turn_id: str) -> None:
+        ...
+
     def list_turns(self, session_id: str) -> list[ChatTurn]:
-        ...
-
-    def get_llm_preference(self, scope: str) -> LlmPreference | None:
-        ...
-
-    def save_llm_preference(self, preference: LlmPreference) -> LlmPreference:
         ...
 
 
@@ -212,4 +224,12 @@ class AuthRepository(Protocol):
         reset_token_id: str,
         used_at: str,
     ) -> None:
+        ...
+
+
+class LlmPreferenceRepository(Protocol):
+    def get_llm_preference(self, scope: str) -> LlmPreference | None:
+        ...
+
+    def save_llm_preference(self, preference: LlmPreference) -> LlmPreference:
         ...

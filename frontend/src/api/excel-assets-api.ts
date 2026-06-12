@@ -9,25 +9,17 @@ import type {
   ListExcelSheetsResponse,
   ListExcelVersionsResponse,
   RowLookupResponse,
+  SheetPreviewResponse,
   SheetSearchResponse,
   SheetRowsResponse,
-  SheetPreviewResponse,
   UploadExcelResponse,
-  WorkbookSearchResponse,
   WorkbookProfile,
+  WorkbookSearchResponse,
 } from '../types/excel-assets'
-export { ExcelWorkspaceApiError } from './errors'
+import { defaultRequestOptions } from './config'
 import { requestJson } from './errors'
 
-const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
-const requestTimeoutMs = Number(
-  import.meta.env.VITE_EXCEL_WORKSPACE_REQUEST_TIMEOUT_MS ?? 30000,
-)
-
-const requestOptions = {
-  apiBaseUrl,
-  timeoutMs: requestTimeoutMs,
-}
+export { ExcelWorkspaceApiError } from './errors'
 
 export async function uploadExcelFile(
   file: File,
@@ -42,7 +34,7 @@ export async function uploadExcelFile(
       method: 'POST',
       body: formData,
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -50,7 +42,7 @@ export async function listExcelFiles(): Promise<ExcelFile[]> {
   const response = await requestJson<ListExcelFilesResponse>(
     '/api/excel/files',
     { method: 'GET' },
-    requestOptions,
+    defaultRequestOptions,
   )
   return response.files
 }
@@ -68,7 +60,24 @@ export async function renameExcelFile(
       },
       body: JSON.stringify({ display_name: displayName }),
     },
-    requestOptions,
+    defaultRequestOptions,
+  )
+}
+
+export async function setExcelFileVisibility(
+  fileId: string,
+  visibleToMembers: boolean,
+): Promise<ExcelFile> {
+  return requestJson<ExcelFile>(
+    `/api/excel/files/${fileId}/visibility`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ visible_to_members: visibleToMembers }),
+    },
+    defaultRequestOptions,
   )
 }
 
@@ -84,7 +93,7 @@ export async function deleteExcelFile(
     {
       method: 'DELETE',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -94,7 +103,7 @@ export async function listExcelVersions(fileId: string): Promise<ExcelFileVersio
     {
       method: 'GET',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
   return response.versions
 }
@@ -103,7 +112,7 @@ export async function getActiveExcelFile(fileId: string): Promise<ActiveExcelFil
   return requestJson<ActiveExcelFileResponse>(
     `/api/excel/files/${fileId}/active`,
     { method: 'GET' },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -113,7 +122,7 @@ export async function listExcelSheets(versionId: string): Promise<ExcelSheet[]> 
     {
       method: 'GET',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
   return response.sheets
 }
@@ -122,7 +131,7 @@ export async function getExcelVersionProfile(versionId: string): Promise<Workboo
   return requestJson<WorkbookProfile>(
     `/api/excel/versions/${versionId}/profile`,
     { method: 'GET' },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -132,7 +141,7 @@ export async function listExcelArtifacts(versionId: string): Promise<ListExcelAr
     {
       method: 'GET',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -150,7 +159,7 @@ export async function previewExcelSheet(
     {
       method: 'GET',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -168,7 +177,7 @@ export async function listExcelSheetRows(
     {
       method: 'GET',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -186,7 +195,7 @@ export async function searchExcelSheetRows(
     {
       method: 'GET',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -204,7 +213,7 @@ export async function searchExcelVersionRows(
     {
       method: 'GET',
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -215,6 +224,6 @@ export async function lookupExcelRow(
   return requestJson<RowLookupResponse>(
     `/api/excel/sheets/${sheetId}/rows/${encodeURIComponent(rowId)}`,
     { method: 'GET' },
-    requestOptions,
+    defaultRequestOptions,
   )
 }

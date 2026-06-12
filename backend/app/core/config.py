@@ -13,6 +13,9 @@ from app.core.llm_catalog import (
     DEFAULT_ROUTER_PROVIDER,
     DEFAULT_SUMMARY_MODEL,
     DEFAULT_SUMMARY_PROVIDER,
+    DEFAULT_VOLCENGINE_ARK_ANSWER_MODEL,
+    DEFAULT_VOLCENGINE_ARK_ROUTER_MODEL,
+    DEFAULT_VOLCENGINE_ARK_SUMMARY_MODEL,
 )
 
 
@@ -30,6 +33,7 @@ class Settings(BaseSettings):
     app_cors_origins: str = "http://localhost:5174,http://127.0.0.1:5174"
     excel_database_path: str = ""
     excel_storage_root: str = ""
+    excel_supported_extensions: str = ".xls,.xlsx,.xlsm,.xltx,.xltm"
     excel_preview_max_rows: int = 500
     excel_max_upload_bytes: int = 50 * 1024 * 1024
     llm_provider: str = "siliconflow"
@@ -46,6 +50,11 @@ class Settings(BaseSettings):
     deepseek_summary_model: str = DEFAULT_DEEPSEEK_SUMMARY_MODEL
     deepseek_router_model: str = DEFAULT_DEEPSEEK_ROUTER_MODEL
     deepseek_answer_model: str = DEFAULT_DEEPSEEK_ANSWER_MODEL
+    volcengine_ark_api_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    volcengine_ark_api_key: str = ""
+    volcengine_ark_summary_model: str = DEFAULT_VOLCENGINE_ARK_SUMMARY_MODEL
+    volcengine_ark_router_model: str = DEFAULT_VOLCENGINE_ARK_ROUTER_MODEL
+    volcengine_ark_answer_model: str = DEFAULT_VOLCENGINE_ARK_ANSWER_MODEL
     llm_request_timeout_seconds: float = 60.0
     llm_summary_max_profile_rows: int = 10
     llm_answer_max_rows: int = 20_000
@@ -77,6 +86,18 @@ class Settings(BaseSettings):
         if self.excel_database_path.strip():
             return Path(self.excel_database_path).expanduser().resolve()
         return (self.storage_root / "excel-workspace.sqlite3").resolve()
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return self._split_csv(self.app_cors_origins)
+
+    @property
+    def supported_excel_extensions(self) -> tuple[str, ...]:
+        return tuple(item.lower() for item in self._split_csv(self.excel_supported_extensions))
+
+    @staticmethod
+    def _split_csv(value: str) -> list[str]:
+        return [item.strip() for item in value.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)

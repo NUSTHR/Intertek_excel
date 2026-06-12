@@ -10,6 +10,16 @@ class ExcelVersionStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class ExcelFileStatus(StrEnum):
+    ACTIVE = "active"
+    DELETED = "deleted"
+
+
+class ExcelFileVisibility(StrEnum):
+    VISIBLE = "visible"
+    HIDDEN = "hidden"
+
+
 class ExcelArtifactType(StrEnum):
     ORIGINAL = "original"
     RAW_CSV = "raw_csv"
@@ -24,6 +34,9 @@ class ExcelFile:
     active_version_id: str | None
     created_at: str
     updated_at: str
+    status: ExcelFileStatus = ExcelFileStatus.ACTIVE
+    deleted_at: str | None = None
+    visibility: ExcelFileVisibility = ExcelFileVisibility.VISIBLE
 
 
 @dataclass(frozen=True)
@@ -147,12 +160,6 @@ class AttachedDocument:
 
 
 @dataclass(frozen=True)
-class ChatStageTiming:
-    stage: str
-    duration_seconds: float
-
-
-@dataclass(frozen=True)
 class SelectedDocument:
     file_id: str
     version_id: str
@@ -176,7 +183,6 @@ class ChatTurn:
     insufficient_evidence: bool = False
     follow_up_suggestions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    timings: list["ChatStageTiming"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -235,7 +241,6 @@ class ChatAnswer:
     insufficient_evidence: bool
     follow_up_suggestions: list[str]
     warnings: list[str]
-    timings: list[ChatStageTiming]
     created_at: str
 
 
@@ -246,7 +251,6 @@ class ChatRouteResult:
     selected_documents: list[SelectedDocument]
     newly_attached_documents: list[SelectedDocument]
     attached_documents: list[AttachedDocument]
-    timings: list[ChatStageTiming]
     created_at: str
 
 

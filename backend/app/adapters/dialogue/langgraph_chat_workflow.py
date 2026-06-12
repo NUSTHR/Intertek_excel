@@ -50,8 +50,9 @@ class LangGraphChatWorkflow:
             request.question,
             session_id=request.session_id,
             user_id=request.user_id,
-            router_model=request.router_model,
-            router_provider=request.router_provider,
+            llm_preference=request.llm_preference,
+            cancellation_token=request.cancellation_token,
+            file_access=request.file_access,
         )
         return {"route_result": route_result}
 
@@ -63,8 +64,9 @@ class LangGraphChatWorkflow:
             session_id=route_result.session_id,
             user_id=request.user_id,
             route_result=route_result,
-            answer_model=request.answer_model,
-            answer_provider=request.answer_provider,
             enable_deep_thinking=request.enable_deep_thinking,
+            llm_preference=request.llm_preference,
+            cancellation_token=request.cancellation_token,
+            file_access=request.file_access,
         )
         return {"answer": answer}

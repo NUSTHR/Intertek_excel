@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import {
   askExcelQuestion,
+  cancelChatRequest,
   createChatSession,
   listChatSessionTurns,
 } from '../api/chat-api'
@@ -15,6 +16,11 @@ interface ChatHistoryEntry {
   question: string
   answer: ChatAnswer | null
   createdAt: string
+}
+
+interface PendingHistoryEntry {
+  sessionKey: string
+  entryId: string
 }
 
 interface RenderedAnswerBlock {
@@ -55,12 +61,15 @@ const errorMessage = ref<string>('')
 const isAsking = ref<boolean>(false)
 const isHistoryLoading = ref<boolean>(false)
 const enableDeepThinking = ref<boolean>(false)
+const activeChatRequestId = ref<string>('')
 const copiedKey = ref<string>('')
 const chatScrollRegion = ref<HTMLElement | null>(null)
 const chatInput = ref<HTMLTextAreaElement | null>(null)
 const activeSourceIndex = ref<number>(0)
 let nextHistoryEntryId = 0
 let historyLoadRequestId = 0
+let activeChatAbortController: AbortController | null = null
+let activePendingEntry: PendingHistoryEntry | null = null
 let copiedKeyTimer: number | null = null
 const renderedBlockCache = new Map<string, RenderedAnswerBlock>()
 
@@ -173,6 +182,11 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  if (activeChatRequestId.value) {
+    void cancelChatRequest(activeChatRequestId.value).catch(() => undefined)
+  }
+  activeChatAbortController?.abort()
+  activeChatAbortController = null
   clearCopiedTimer()
 })
 
@@ -193,7 +207,11 @@ async function loadSessionHistory(): Promise<void> {
     setHistory(draftSessionKey, historyForSession(draftSessionKey))
     return
   }
-  if (historyForSession(sessionId).some((entry) => entry.answer === null)) {
+  if (
+    isAsking.value
+    && activePendingEntry?.sessionKey === sessionId
+    && historyForSession(sessionId).some((entry) => entry.answer === null)
+  ) {
     isHistoryLoading.value = false
     return
   }
@@ -231,9 +249,16 @@ async function submitQuestion(): Promise<void> {
     errorMessage.value = 'Enter a question first.'
     return
   }
+  if (isAsking.value) {
+    return
+  }
 
   errorMessage.value = ''
   isAsking.value = true
+  const requestId = newChatRequestId()
+  const abortController = new AbortController()
+  activeChatRequestId.value = requestId
+  activeChatAbortController = abortController
 
   let targetSessionId = props.sessionId
   let targetSessionKey = props.sessionId || draftSessionKey
@@ -247,6 +272,9 @@ async function submitQuestion(): Promise<void> {
 
     if (!targetSessionId) {
       const session = await createChatSession()
+      if (activeChatRequestId.value !== requestId) {
+        return
+      }
       targetSessionId = session.session_id
       targetSessionKey = session.session_id
       createdSession = true
@@ -261,25 +289,30 @@ async function submitQuestion(): Promise<void> {
       createdAt: new Date().toISOString(),
     }
     setHistory(targetSessionKey, [...historyForSession(targetSessionKey), entry])
+    activePendingEntry = { sessionKey: targetSessionKey, entryId }
     await scrollChatToBottom()
 
     const answer = await askExcelQuestion(
       trimmedQuestion,
       targetSessionId,
       {
-        routerProvider: props.routerProvider ?? '',
-        routerModel: props.routerModel ?? '',
-        answerProvider: props.answerProvider ?? '',
-        answerModel: props.answerModel ?? '',
         enableDeepThinking: effectiveDeepThinkingEnabled.value,
       },
+      {
+        requestId,
+        signal: abortController.signal,
+      },
     )
+    if (activeChatRequestId.value !== requestId) {
+      return
+    }
     setHistory(
       targetSessionKey,
       historyForSession(targetSessionKey).map((item) => (
         item.id === entryId ? { ...item, answer } : item
       )),
     )
+    activePendingEntry = null
     emit('answerReceived', answer)
     await scrollChatToBottom()
 
@@ -289,16 +322,61 @@ async function submitQuestion(): Promise<void> {
 
   } catch (error: unknown) {
     if (entry) {
-      const failedEntry = entry
-      setHistory(
-        targetSessionKey,
-        historyForSession(targetSessionKey).filter((item) => item.id !== failedEntry.id),
-      )
+      if (activeChatRequestId.value === requestId) {
+        removeHistoryEntry({ sessionKey: targetSessionKey, entryId: entry.id })
+      }
+    }
+    if (isAbortError(error) || activeChatRequestId.value !== requestId) {
+      return
     }
     errorMessage.value = error instanceof Error ? error.message : 'Unexpected error.'
     await scrollChatToBottom()
   } finally {
-    isAsking.value = false
+    if (activeChatRequestId.value === requestId) {
+      activeChatRequestId.value = ''
+      activeChatAbortController = null
+      isAsking.value = false
+    }
+  }
+}
+
+async function stopCurrentAnswer(): Promise<void> {
+  const requestId = activeChatRequestId.value
+  if (!requestId) {
+    return
+  }
+  const pendingEntry = activePendingEntry
+  const restoredQuestion = pendingEntry
+    ? historyForSession(pendingEntry.sessionKey).find(
+      (entry) => entry.id === pendingEntry.entryId,
+    )?.question
+    : ''
+  const cancelPromise = cancelChatRequest(requestId).catch(() => undefined)
+  activeChatRequestId.value = ''
+  activeChatAbortController?.abort()
+  activeChatAbortController = null
+  isAsking.value = false
+  if (pendingEntry) {
+    if (restoredQuestion) {
+      question.value = restoredQuestion
+    }
+    activePendingEntry = null
+    await nextTick()
+    resizeChatInput()
+    chatInput.value?.focus()
+  }
+  errorMessage.value = ''
+  await scrollChatToBottom()
+  await cancelPromise
+}
+
+function removeHistoryEntry(entry: PendingHistoryEntry): void {
+  setHistory(
+    entry.sessionKey,
+    historyForSession(entry.sessionKey).filter((item) => item.id !== entry.entryId),
+  )
+  if (activePendingEntry?.entryId === entry.entryId) {
+    activePendingEntry = null
   }
 }
 
@@ -335,6 +413,18 @@ function latestCompleteEntry(): ChatHistoryEntry | null {
     }
   }
   return null
+}
+
+function newChatRequestId(): string {
+  const randomPart = window.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  return `chat-${randomPart}`
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (
+    error.name === 'AbortError' ||
+    error.message === 'Chat request cancelled.'
+  )
 }
 
 function historyForSession(sessionKey: string): ChatHistoryEntry[] {
@@ -555,6 +645,17 @@ function formatMessageTime(value: string): string {
 
 function handleDraftInput(): void {
   resizeChatInput()
+}
+
+function handleDraftKeydown(event: KeyboardEvent): void {
+  if (event.isComposing) {
+    return
+  }
+  if (event.key !== 'Enter' || event.shiftKey) {
+    return
+  }
+  event.preventDefault()
+  void submitQuestion()
 }
 
 function resizeChatInput(): void {
@@ -810,8 +911,7 @@ function resizeChatInput(): void {
           rows="1"
           placeholder="Ask about your data..."
           @input="handleDraftInput"
-          @keydown.meta.enter="submitQuestion"
-          @keydown.ctrl.enter="submitQuestion"
+          @keydown="handleDraftKeydown"
         />
         <div class="chat-input-actions">
           <div class="chat-tools">
@@ -830,12 +930,23 @@ function resizeChatInput(): void {
             </button>
           </div>
           <button
+            v-if="!isAsking"
             type="submit"
             class="chat-send-button"
-            :disabled="isAsking || !question.trim()"
+            :disabled="!question.trim()"
             aria-label="Send message"
           >
-            <AppIcon :name="isAsking ? 'refresh' : 'arrow_upward'" />
+            <AppIcon name="arrow_upward" />
+          </button>
+          <button
+            v-else
+            type="button"
+            class="chat-send-button stop"
+            aria-label="Stop generating"
+            title="Stop generating"
+            @click="stopCurrentAnswer"
+          >
+            <AppIcon name="stop" />
           </button>
         </div>
       </div>

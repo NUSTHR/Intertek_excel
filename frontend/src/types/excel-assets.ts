@@ -4,6 +4,7 @@ export interface ExcelFile {
   active_version_id: string | null
   created_at: string
   updated_at: string
+  visible_to_members: boolean
 }
 
 export interface ExcelFileVersion {

@@ -39,7 +39,7 @@
 .file-summary-stack .model-config-grid {
   display: grid;
   gap: 12px;
-  padding: 14px 16px 16px;
+  padding: 14px 16px 12px;
 }
 
 .file-summary-stack .model-setting-row {
@@ -72,6 +72,72 @@
   border-radius: 8px;
   background: #f8fafc;
   font-size: 12px;
+}
+
+.file-summary-stack .model-config-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  border-top: 1px solid #eef2f7;
+  padding: 12px 16px 14px;
+  background: #ffffff;
+}
+
+.file-summary-stack .model-config-feedback {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #047857;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.file-summary-stack .model-config-feedback.error {
+  color: #b42318;
+}
+
+.file-summary-stack .model-save-button,
+.summary-action-button.primary {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #ffffff;
+  background: #047857;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.file-summary-stack .model-save-button:disabled,
+.summary-action-button.primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.file-summary-stack .model-save-button:hover:not(:disabled),
+.summary-action-button.primary:hover:not(:disabled) {
+  color: #ffffff;
+  background: #065f46;
+}
+
+@media (max-width: 720px) {
+  .file-summary-stack .model-config-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .file-summary-stack .model-save-button {
+    width: 100%;
+  }
 }
 
 .document-summary-card {
@@ -174,15 +240,13 @@
 }
 
 .summary-action-button {
-  gap: 7px;
-  min-height: 34px;
-  padding: 8px 12px;
-  color: #ffffff;
-  border-color: #0f172a;
-  background: #0f172a;
+  min-height: 36px;
 }
 
 .summary-action-button.secondary {
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 12px;
   color: #475569;
   border-color: #d9e2ec;
   background: #ffffff;
@@ -207,12 +271,6 @@
   border-color: #94a3b8;
   background: #f8fafc;
   color: #0f172a;
-}
-
-.summary-action-button:not(.secondary):hover:not(:disabled) {
-  color: #ffffff;
-  border-color: #1e293b;
-  background: #1e293b;
 }
 
 .summary-action-button:active:not(:disabled),

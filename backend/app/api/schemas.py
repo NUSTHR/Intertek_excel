@@ -63,12 +63,17 @@ class RenameExcelFileRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=255)
 
 
+class SetExcelFileVisibilityRequest(BaseModel):
+    visible_to_members: bool
+
+
 class ExcelFileResponse(BaseModel):
     file_id: str
     display_name: str
     active_version_id: str | None = None
     created_at: str
     updated_at: str
+    visible_to_members: bool = True
 
 
 class ExcelFileVersionResponse(BaseModel):
@@ -273,31 +278,29 @@ class WorkbookSearchResponse(BaseModel):
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None
-    router_model: str | None = None
-    router_provider: str | None = None
-    answer_model: str | None = None
-    answer_provider: str | None = None
     enable_deep_thinking: bool = False
+    request_id: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class ChatAnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
-    answer_model: str | None = None
-    answer_provider: str | None = None
     selected_version_ids: list[str] = Field(default_factory=list)
     enable_deep_thinking: bool = False
+    request_id: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class ChatRouteRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None
-    router_model: str | None = None
-    router_provider: str | None = None
 
 
-class GenerateDocumentSummaryRequest(BaseModel):
-    model: str | None = None
-    provider: str | None = None
+class CancelChatRequest(BaseModel):
+    request_id: str = Field(min_length=8, max_length=120)
+
+
+class CancelChatResponse(BaseModel):
+    request_id: str
+    cancelled: bool
 
 
 class ChatSessionResponse(BaseModel):
@@ -329,11 +332,6 @@ class AttachedDocumentResponse(BaseModel):
     row_count: int
     context_hash: str
     status: str
-
-
-class ChatStageTimingResponse(BaseModel):
-    stage: str
-    duration_seconds: float
 
 
 class SelectedDocumentResponse(BaseModel):
@@ -372,7 +370,6 @@ class ChatAnswerResponse(BaseModel):
     insufficient_evidence: bool = False
     follow_up_suggestions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    timings: list[ChatStageTimingResponse] = Field(default_factory=list)
     created_at: str
 
 
@@ -394,7 +391,6 @@ class ChatRouteResponse(BaseModel):
     selected_documents: list[SelectedDocumentResponse] = Field(default_factory=list)
     newly_attached_documents: list[SelectedDocumentResponse] = Field(default_factory=list)
     attached_documents: list[AttachedDocumentResponse] = Field(default_factory=list)
-    timings: list[ChatStageTimingResponse] = Field(default_factory=list)
     created_at: str
 
 

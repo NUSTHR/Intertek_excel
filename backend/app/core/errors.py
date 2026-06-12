@@ -8,17 +8,25 @@ class LlmRequestError(ExcelWorkspaceError):
         *,
         stage: str,
         model: str,
+        provider: str,
         duration_seconds: float,
         cause: Exception,
     ) -> None:
         self.stage = stage
         self.model = model
+        self.provider = provider
         self.duration_seconds = duration_seconds
         super().__init__(
             "LLM request failed "
-            f"stage={stage} model={model} "
+            f"stage={stage} provider={provider} model={model} "
             f"duration_seconds={duration_seconds:.3f}: {cause}"
         )
+
+
+class ChatRequestCancelled(ExcelWorkspaceError):
+    def __init__(self, request_id: str) -> None:
+        self.request_id = request_id
+        super().__init__("chat request was cancelled")
 
 
 class FileNameConflictError(ExcelWorkspaceError):

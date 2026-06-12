@@ -29,6 +29,7 @@ from app.domain.models import (
     SheetSummary,
     WorkbookProfile,
 )
+from app.ports.llm_client import CancellationChecker
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +314,7 @@ class MultiProviderLlmClient:
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> list[SelectedDocument]:
         if not summaries:
             return []
@@ -334,6 +336,7 @@ class MultiProviderLlmClient:
             stage="route_model",
             provider_config=provider_config,
             model=resolved_model,
+            cancellation_checker=cancellation_checker,
             messages=[
                 {"role": "system", "content": DOCUMENT_ROUTER_SYSTEM_PROMPT},
                 {
@@ -436,6 +439,7 @@ class MultiProviderLlmClient:
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> DraftChatAnswer:
         provider_config, resolved_model = self._resolve_request(
             provider=provider,
@@ -460,6 +464,7 @@ class MultiProviderLlmClient:
             provider_config=provider_config,
             model=resolved_model,
             enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=cancellation_checker,
             messages=[
                 {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
                 *self._history_messages(previous_turns or []),
@@ -554,6 +559,7 @@ class MultiProviderLlmClient:
         user_prompt: str | None = None,
         messages: list[dict[str, str]] | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> tuple[dict[str, Any], str]:
         content, reasoning_content = self._chat_message_parts(
             stage=stage,
@@ -563,6 +569,7 @@ class MultiProviderLlmClient:
             user_prompt=user_prompt,
             messages=messages,
             enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=cancellation_checker,
         )
         return self._parse_json_object(content), reasoning_content
 
@@ -576,6 +583,7 @@ class MultiProviderLlmClient:
         user_prompt: str | None = None,
         messages: list[dict[str, str]] | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> dict[str, Any]:
         content, _reasoning_content = self._chat_message_parts(
             stage=stage,
@@ -585,6 +593,7 @@ class MultiProviderLlmClient:
             user_prompt=user_prompt,
             messages=messages,
             enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=cancellation_checker,
         )
         return self._parse_json_object(content)
 
@@ -598,6 +607,7 @@ class MultiProviderLlmClient:
         user_prompt: str | None = None,
         messages: list[dict[str, str]] | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> str:
         content, _reasoning_content = self._chat_message_parts(
             stage=stage,
@@ -607,6 +617,7 @@ class MultiProviderLlmClient:
             user_prompt=user_prompt,
             messages=messages,
             enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=cancellation_checker,
         )
         return content
 
@@ -620,9 +631,12 @@ class MultiProviderLlmClient:
         user_prompt: str | None = None,
         messages: list[dict[str, str]] | None = None,
         enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
     ) -> tuple[str, str]:
         if not provider_config.api_key.strip():
             raise ExcelWorkspaceError(f"{provider_config.label} API key is required for LLM calls")
+        if cancellation_checker is not None:
+            cancellation_checker()
 
         url = f"{provider_config.api_base_url.rstrip('/')}/chat/completions"
         request_payload = {
@@ -662,6 +676,8 @@ class MultiProviderLlmClient:
                 json=request_payload,
                 timeout=self._config.timeout_seconds,
             )
+            if cancellation_checker is not None:
+                cancellation_checker()
             response.raise_for_status()
         except httpx2.HTTPError as exc:
             response = getattr(exc, "response", None)
@@ -687,6 +703,7 @@ class MultiProviderLlmClient:
             raise LlmRequestError(
                 stage=stage,
                 model=model,
+                provider=provider_config.provider,
                 duration_seconds=perf_counter() - started_at,
                 cause=exc,
             ) from exc
@@ -700,6 +717,8 @@ class MultiProviderLlmClient:
             perf_counter() - started_at,
         )
         payload = response.json()
+        if cancellation_checker is not None:
+            cancellation_checker()
         try:
             message = payload["choices"][0]["message"]
             return (
@@ -965,18 +984,37 @@ class MultiProviderLlmClient:
         *,
         enable_deep_thinking: bool = False,
     ) -> dict[str, Any]:
+        return {
+            **self._json_response_format_options(provider),
+            **self._thinking_request_options(
+                provider,
+                model,
+                enable_deep_thinking=enable_deep_thinking,
+            ),
+        }
+
+    def _json_response_format_options(self, provider: str) -> dict[str, Any]:
+        if provider == DEEPSEEK_PROVIDER:
+            return {"response_format": {"type": "json_object"}}
+        return {}
+
+    def _thinking_request_options(
+        self,
+        provider: str,
+        model: str,
+        *,
+        enable_deep_thinking: bool,
+    ) -> dict[str, Any]:
         if provider == SILICONFLOW_PROVIDER and supports_deep_thinking(provider, model):
             return {"enable_thinking": bool(enable_deep_thinking)}
-        if provider == DEEPSEEK_PROVIDER:
-            options: dict[str, Any] = {"response_format": {"type": "json_object"}}
-            if supports_deep_thinking(provider, model):
-                if enable_deep_thinking:
-                    options["thinking"] = {"type": "enabled"}
-                    options["reasoning_effort"] = "high"
-                else:
-                    options["thinking"] = {"type": "disabled"}
-            return options
-        return {}
+        if provider != DEEPSEEK_PROVIDER or not supports_deep_thinking(provider, model):
+            return {}
+        if enable_deep_thinking:
+            return {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "high",
+            }
+        return {"thinking": {"type": "disabled"}}
 
     def _temperature_for_stage(self, stage: str) -> float:
         if stage == "route_model":

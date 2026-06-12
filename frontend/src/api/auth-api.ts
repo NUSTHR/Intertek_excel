@@ -1,15 +1,6 @@
 import type { AuthResponse, AuthUser, PasswordResetResponse } from '../types/auth'
+import { defaultRequestOptions } from './config'
 import { requestEmpty, requestJson } from './errors'
-
-const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
-const requestTimeoutMs = Number(
-  import.meta.env.VITE_EXCEL_WORKSPACE_REQUEST_TIMEOUT_MS ?? 30000,
-)
-
-const requestOptions = {
-  apiBaseUrl,
-  timeoutMs: requestTimeoutMs,
-}
 
 export async function register(email: string, password: string): Promise<AuthResponse> {
   return requestJson<AuthResponse>(
@@ -21,7 +12,7 @@ export async function register(email: string, password: string): Promise<AuthRes
       },
       body: JSON.stringify({ email, password }),
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -35,16 +26,16 @@ export async function login(email: string, password: string): Promise<AuthRespon
       },
       body: JSON.stringify({ email, password }),
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
 export async function getCurrentUser(): Promise<AuthUser> {
-  return requestJson<AuthUser>('/api/auth/me', { method: 'GET' }, requestOptions)
+  return requestJson<AuthUser>('/api/auth/me', { method: 'GET' }, defaultRequestOptions)
 }
 
 export async function logout(): Promise<void> {
-  return requestEmpty('/api/auth/logout', { method: 'POST' }, requestOptions)
+  return requestEmpty('/api/auth/logout', { method: 'POST' }, defaultRequestOptions)
 }
 
 export async function requestPasswordReset(
@@ -59,7 +50,7 @@ export async function requestPasswordReset(
       },
       body: JSON.stringify({ email }),
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }
 
@@ -76,6 +67,6 @@ export async function resetPassword(
       },
       body: JSON.stringify({ token, new_password: newPassword }),
     },
-    requestOptions,
+    defaultRequestOptions,
   )
 }

@@ -7,22 +7,14 @@ import type {
   ChatTurn,
   ChatTurnListResponse,
 } from '../types/chat'
+import { chatRequestOptions } from './config'
 import { requestEmpty, requestJson } from './errors'
-
-const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''
-const requestTimeoutMs = Number(import.meta.env.VITE_EXCEL_WORKSPACE_CHAT_TIMEOUT_MS ?? 180000)
-
-const requestOptions = {
-  apiBaseUrl,
-  timeoutMs: requestTimeoutMs,
-  timeoutMessage: 'Chat request timed out while waiting for the model.',
-}
 
 export async function createChatSession(): Promise<ChatSession> {
   return requestJson<ChatSession>(
     '/api/excel/chat/sessions',
     { method: 'POST' },
-    requestOptions,
+    chatRequestOptions,
   )
 }
 
@@ -30,7 +22,7 @@ export async function listChatSessions(): Promise<ChatSession[]> {
   const payload = await requestJson<ChatSessionListResponse>(
     '/api/excel/chat/sessions',
     { method: 'GET' },
-    requestOptions,
+    chatRequestOptions,
   )
   return payload.sessions
 }
@@ -39,7 +31,7 @@ export async function listChatSessionTurns(sessionId: string): Promise<ChatTurn[
   const payload = await requestJson<ChatTurnListResponse>(
     `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/turns`,
     { method: 'GET' },
-    requestOptions,
+    chatRequestOptions,
   )
   return payload.turns
 }
@@ -54,7 +46,7 @@ export async function renameChatSession(sessionId: string, title: string): Promi
       },
       body: JSON.stringify({ title }),
     },
-    requestOptions,
+    chatRequestOptions,
   )
 }
 
@@ -71,7 +63,7 @@ export async function setChatSessionPinned(
       },
       body: JSON.stringify({ pinned }),
     },
-    requestOptions,
+    chatRequestOptions,
   )
 }
 
@@ -81,7 +73,7 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
     {
       method: 'DELETE',
     },
-    requestOptions,
+    chatRequestOptions,
   )
 }
 
@@ -89,6 +81,7 @@ export async function askExcelQuestion(
   question: string,
   sessionId: string | null = null,
   modelSelection: ChatModelSelection | null = null,
+  requestOptions: { requestId?: string; signal?: AbortSignal } = {},
 ): Promise<ChatAnswer> {
   const path = sessionId
     ? `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/messages`
@@ -103,22 +96,35 @@ export async function askExcelQuestion(
       body: JSON.stringify({
         question,
         session_id: sessionId,
-        router_model: modelSelection?.routerModel ?? null,
-        router_provider: modelSelection?.routerProvider ?? null,
-        answer_model: modelSelection?.answerModel ?? null,
-        answer_provider: modelSelection?.answerProvider ?? null,
         enable_deep_thinking: modelSelection?.enableDeepThinking ?? false,
+        request_id: requestOptions.requestId ?? null,
       }),
     },
-    requestOptions,
+    {
+      ...chatRequestOptions,
+      abortMessage: 'Chat request cancelled.',
+      signal: requestOptions.signal,
+    },
+  )
+}
+
+export async function cancelChatRequest(requestId: string): Promise<void> {
+  await requestJson<{ request_id: string; cancelled: boolean }>(
+    '/api/excel/chat/cancel',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ request_id: requestId }),
+    },
+    chatRequestOptions,
   )
 }
 
 export async function routeExcelQuestion(
   question: string,
   sessionId: string,
-  routerModel: string | null = null,
-  routerProvider: string | null = null,
 ): Promise<ChatRouteResult> {
   return requestJson<ChatRouteResult>(
     `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/route`,
@@ -130,19 +136,15 @@ export async function routeExcelQuestion(
       body: JSON.stringify({
         question,
         session_id: sessionId,
-        router_model: routerModel,
-        router_provider: routerProvider,
       }),
     },
-    requestOptions,
+    chatRequestOptions,
   )
 }
 
 export async function answerRoutedExcelQuestion(
   question: string,
   sessionId: string,
-  answerModel: string | null = null,
-  answerProvider: string | null = null,
   selectedVersionIds: string[] = [],
   enableDeepThinking = false,
 ): Promise<ChatAnswer> {
@@ -155,12 +157,10 @@ export async function answerRoutedExcelQuestion(
       },
       body: JSON.stringify({
         question,
-        answer_model: answerModel,
-        answer_provider: answerProvider,
         selected_version_ids: selectedVersionIds,
         enable_deep_thinking: enableDeepThinking,
       }),
     },
-    requestOptions,
+    chatRequestOptions,
   )
 }

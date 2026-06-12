@@ -8,6 +8,8 @@ from app.core.llm_catalog import (
     DEFAULT_SUMMARY_PROVIDER,
     SILICONFLOW_LLM_MODELS,
     SILICONFLOW_PROVIDER,
+    VOLCENGINE_ARK_LLM_MODELS,
+    VOLCENGINE_ARK_PROVIDER,
     list_supported_llm_provider_options,
     supports_deep_thinking,
 )
@@ -25,6 +27,20 @@ def test_stage_defaults_match_business_model_policy() -> None:
 def test_siliconflow_provider_still_lists_ling_flash_first() -> None:
     assert SILICONFLOW_LLM_MODELS[0] == "inclusionAI/Ling-flash-2.0"
     assert list_supported_llm_provider_options()[0]["models"][0] == "inclusionAI/Ling-flash-2.0"
+
+
+def test_volcengine_ark_provider_exposes_mainstream_models() -> None:
+    options = {
+        option["provider"]: option
+        for option in list_supported_llm_provider_options()
+    }
+
+    assert options[VOLCENGINE_ARK_PROVIDER]["label"] == "Volcengine Ark"
+    assert options[VOLCENGINE_ARK_PROVIDER]["models"] == list(VOLCENGINE_ARK_LLM_MODELS)
+    assert "doubao-seed-2-0-pro-260215" in options[VOLCENGINE_ARK_PROVIDER]["models"]
+    assert "doubao-seed-2-0-lite-260428" in options[VOLCENGINE_ARK_PROVIDER]["models"]
+    assert "deepseek-v4-pro-260425" in options[VOLCENGINE_ARK_PROVIDER]["models"]
+    assert options[VOLCENGINE_ARK_PROVIDER]["deep_thinking_models"] == []
 
 
 def test_provider_options_expose_deep_thinking_capabilities() -> None:
