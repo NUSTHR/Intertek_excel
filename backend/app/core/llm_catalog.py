@@ -1,4 +1,7 @@
 from collections.abc import Iterable
+from typing import Literal
+
+ThinkingRequestStyle = Literal["siliconflow_enable_thinking", "deepseek_thinking"]
 
 SILICONFLOW_PROVIDER = "siliconflow"
 DEEPSEEK_PROVIDER = "deepseek"
@@ -76,6 +79,15 @@ DEEP_THINKING_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
     DEEPSEEK_PROVIDER: DEEPSEEK_OFFICIAL_LLM_MODELS,
 }
 
+JSON_RESPONSE_FORMAT_PROVIDERS: tuple[str, ...] = (
+    DEEPSEEK_PROVIDER,
+)
+
+THINKING_REQUEST_STYLE_BY_PROVIDER: dict[str, ThinkingRequestStyle] = {
+    SILICONFLOW_PROVIDER: "siliconflow_enable_thinking",
+    DEEPSEEK_PROVIDER: "deepseek_thinking",
+}
+
 
 def is_supported_llm_model(model: str) -> bool:
     return model in SUPPORTED_LLM_MODELS
@@ -96,11 +108,27 @@ def normalize_llm_provider(provider: str) -> str:
     return provider.strip().lower()
 
 
+def llm_provider_label(provider: str) -> str:
+    provider_id = normalize_llm_provider(provider)
+    return LLM_PROVIDER_LABELS.get(provider_id, provider_id)
+
+
 def supports_deep_thinking(provider: str, model: str) -> bool:
     return model in DEEP_THINKING_MODELS_BY_PROVIDER.get(
         normalize_llm_provider(provider),
         (),
     )
+
+
+def supports_json_response_format(provider: str) -> bool:
+    return normalize_llm_provider(provider) in JSON_RESPONSE_FORMAT_PROVIDERS
+
+
+def thinking_request_style(provider: str, model: str) -> ThinkingRequestStyle | None:
+    provider_id = normalize_llm_provider(provider)
+    if not supports_deep_thinking(provider_id, model):
+        return None
+    return THINKING_REQUEST_STYLE_BY_PROVIDER.get(provider_id)
 
 
 def list_deep_thinking_models(provider: str) -> list[str]:

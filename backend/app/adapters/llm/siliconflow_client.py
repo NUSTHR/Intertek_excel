@@ -10,12 +10,13 @@ import httpx2
 from app.core.errors import ExcelWorkspaceError, InvalidLlmModelError, LlmRequestError
 from app.core.ids import new_id
 from app.core.llm_catalog import (
-    DEEPSEEK_PROVIDER,
     SILICONFLOW_PROVIDER,
     is_supported_llm_model_for_provider,
     is_supported_llm_provider,
+    llm_provider_label,
     normalize_llm_provider,
-    supports_deep_thinking,
+    supports_json_response_format,
+    thinking_request_style,
 )
 from app.core.time import utc_now_iso
 from app.domain.models import (
@@ -189,7 +190,7 @@ class MultiProviderLlmClient:
         self._providers = {
             SILICONFLOW_PROVIDER: LlmProviderConfig(
                 provider=SILICONFLOW_PROVIDER,
-                label="SiliconFlow",
+                label=llm_provider_label(SILICONFLOW_PROVIDER),
                 api_base_url=config.api_base_url,
                 api_key=config.api_key,
                 summary_model=config.summary_model,
@@ -994,7 +995,7 @@ class MultiProviderLlmClient:
         }
 
     def _json_response_format_options(self, provider: str) -> dict[str, Any]:
-        if provider == DEEPSEEK_PROVIDER:
+        if supports_json_response_format(provider):
             return {"response_format": {"type": "json_object"}}
         return {}
 
@@ -1005,9 +1006,10 @@ class MultiProviderLlmClient:
         *,
         enable_deep_thinking: bool,
     ) -> dict[str, Any]:
-        if provider == SILICONFLOW_PROVIDER and supports_deep_thinking(provider, model):
+        request_style = thinking_request_style(provider, model)
+        if request_style == "siliconflow_enable_thinking":
             return {"enable_thinking": bool(enable_deep_thinking)}
-        if provider != DEEPSEEK_PROVIDER or not supports_deep_thinking(provider, model):
+        if request_style != "deepseek_thinking":
             return {}
         if enable_deep_thinking:
             return {

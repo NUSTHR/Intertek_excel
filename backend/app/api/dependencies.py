@@ -25,12 +25,13 @@ from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.llm_preferences import WorkspaceLlmPreferenceService
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError, AuthorizationError
 from app.core.llm_catalog import (
     DEEPSEEK_PROVIDER,
     SILICONFLOW_PROVIDER,
     VOLCENGINE_ARK_PROVIDER,
+    llm_provider_label,
 )
 from app.domain.models import AuthenticatedUser, UserRole
 from app.ports.chat_workflow import ChatWorkflow
@@ -167,29 +168,51 @@ def get_llm_client() -> LlmClient:
             timeout_seconds=settings.llm_request_timeout_seconds,
             summary_max_profile_rows=settings.llm_summary_max_profile_rows,
         ),
-        extra_providers={
-            DEEPSEEK_PROVIDER: LlmProviderConfig(
-                provider=DEEPSEEK_PROVIDER,
-                label="DeepSeek Official",
-                api_base_url=settings.deepseek_api_base_url,
-                api_key=settings.deepseek_api_key,
-                summary_model=settings.deepseek_summary_model,
-                router_model=settings.deepseek_router_model,
-                answer_model=settings.deepseek_answer_model,
-            ),
-            VOLCENGINE_ARK_PROVIDER: LlmProviderConfig(
-                provider=VOLCENGINE_ARK_PROVIDER,
-                label="Volcengine Ark",
-                api_base_url=settings.volcengine_ark_api_base_url,
-                api_key=settings.volcengine_ark_api_key,
-                summary_model=settings.volcengine_ark_summary_model,
-                router_model=settings.volcengine_ark_router_model,
-                answer_model=settings.volcengine_ark_answer_model,
-            ),
-        },
+        extra_providers=_configured_llm_providers(settings),
         default_providers={
             "summary": settings.llm_summary_provider or SILICONFLOW_PROVIDER,
             "router": settings.llm_router_provider or SILICONFLOW_PROVIDER,
             "answer": settings.llm_answer_provider or SILICONFLOW_PROVIDER,
         },
+    )
+
+
+def _configured_llm_providers(settings: Settings) -> dict[str, LlmProviderConfig]:
+    return {
+        DEEPSEEK_PROVIDER: _llm_provider_config(
+            provider=DEEPSEEK_PROVIDER,
+            api_base_url=settings.deepseek_api_base_url,
+            api_key=settings.deepseek_api_key,
+            summary_model=settings.deepseek_summary_model,
+            router_model=settings.deepseek_router_model,
+            answer_model=settings.deepseek_answer_model,
+        ),
+        VOLCENGINE_ARK_PROVIDER: _llm_provider_config(
+            provider=VOLCENGINE_ARK_PROVIDER,
+            api_base_url=settings.volcengine_ark_api_base_url,
+            api_key=settings.volcengine_ark_api_key,
+            summary_model=settings.volcengine_ark_summary_model,
+            router_model=settings.volcengine_ark_router_model,
+            answer_model=settings.volcengine_ark_answer_model,
+        ),
+    }
+
+
+def _llm_provider_config(
+    *,
+    provider: str,
+    api_base_url: str,
+    api_key: str,
+    summary_model: str,
+    router_model: str,
+    answer_model: str,
+) -> LlmProviderConfig:
+    return LlmProviderConfig(
+        provider=provider,
+        label=llm_provider_label(provider),
+        api_base_url=api_base_url,
+        api_key=api_key,
+        summary_model=summary_model,
+        router_model=router_model,
+        answer_model=answer_model,
     )
