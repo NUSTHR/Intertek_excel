@@ -877,21 +877,22 @@ function resizeChatInput(): void {
             class="chat-message assistant"
           >
             <div class="assistant-message-stack">
-              <div class="assistant-title">
-                <span class="assistant-bot-icon">
+              <div class="assistant-title thinking-title">
+                <span class="assistant-bot-icon thinking-agent-icon">
                   <AppIcon name="analytics" />
                 </span>
-                <strong>ExcelAI</strong>
+                <strong>Thinking...</strong>
               </div>
-              <div class="assistant-bubble loading-message">
-                <div class="loading-dots" aria-hidden="true">
+              <div class="assistant-bubble loading-message" aria-live="polite" aria-busy="true">
+                <div class="loading-bars" aria-hidden="true">
+                  <span></span>
                   <span></span>
                   <span></span>
                   <span></span>
                 </div>
                 <div class="thinking-copy">
-                  <strong>{{ effectiveDeepThinkingEnabled ? 'Deep thinking enabled' : 'Working on your answer' }}</strong>
-                  <span>{{ effectiveDeepThinkingEnabled ? 'Querying files, parsing evidence, then organizing the answer.' : 'Querying files, parsing data, and organizing the answer.' }}</span>
+                  <strong>{{ effectiveDeepThinkingEnabled ? 'Deep reasoning' : 'Tracing evidence' }}</strong>
+                  <span>{{ effectiveDeepThinkingEnabled ? 'Routing files. Checking evidence. Composing.' : 'Routing files. Reading rows. Composing.' }}</span>
                 </div>
               </div>
             </div>
