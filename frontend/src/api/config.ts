@@ -7,7 +7,7 @@ const defaultRequestTimeoutMs = readNumberEnv(
 
 const chatRequestTimeoutMs = readNumberEnv(
   import.meta.env.VITE_EXCEL_WORKSPACE_CHAT_TIMEOUT_MS,
-  180000,
+  240000,
 )
 
 const apiBaseUrl = import.meta.env.VITE_EXCEL_WORKSPACE_API_BASE_URL ?? ''

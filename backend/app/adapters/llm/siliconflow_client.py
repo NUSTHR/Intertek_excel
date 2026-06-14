@@ -151,12 +151,7 @@ Rules:
    whenever different evidence supports different parts of the answer.
 9. Each answer_block must include only the evidence_ids that support that block's text.
 10. Do not collect all citations at the end of the answer or in one final answer block.
-11. When the question involves a standard, regulation, or standard revision and the
-   user does not name a specific version, treat the latest/current version present
-   in the provided rows as the default target. If the rows do not identify which
-   version is latest/current, say that the evidence does not establish the latest
-   standard and cite the most relevant rows.
-12. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
+11. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
 """.strip()
 
 
