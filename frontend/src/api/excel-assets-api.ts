@@ -1,5 +1,6 @@
 import type {
   ActiveExcelFileResponse,
+  CreateUploadTaskResponse,
   DeleteExcelFileResponse,
   ExcelFile,
   ExcelFileVersion,
@@ -13,11 +14,12 @@ import type {
   SheetSearchResponse,
   SheetRowsResponse,
   UploadExcelResponse,
+  UploadTaskResponse,
   WorkbookProfile,
   WorkbookSearchResponse,
 } from '../types/excel-assets'
 import { defaultRequestOptions } from './config'
-import { requestJson } from './errors'
+import { requestJson, type RequestOptions } from './errors'
 
 export { ExcelWorkspaceApiError } from './errors'
 
@@ -34,6 +36,31 @@ export async function uploadExcelFile(
       method: 'POST',
       body: formData,
     },
+    defaultRequestOptions,
+  )
+}
+
+export async function createUploadTask(
+  file: File,
+  replaceExisting: boolean,
+): Promise<CreateUploadTaskResponse> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('replace_existing', String(replaceExisting))
+  return requestJson<CreateUploadTaskResponse>(
+    '/api/excel/files/upload-tasks',
+    {
+      method: 'POST',
+      body: formData,
+    },
+    defaultRequestOptions,
+  )
+}
+
+export async function getUploadTask(taskId: string): Promise<UploadTaskResponse> {
+  return requestJson<UploadTaskResponse>(
+    `/api/excel/files/upload-tasks/${encodeURIComponent(taskId)}`,
+    { method: 'GET' },
     defaultRequestOptions,
   )
 }
@@ -149,6 +176,7 @@ export async function previewExcelSheet(
   sheetId: string,
   offset = 0,
   limit = 500,
+  options: RequestOptions = {},
 ): Promise<SheetPreviewResponse> {
   const params = new URLSearchParams({
     offset: String(offset),
@@ -159,7 +187,7 @@ export async function previewExcelSheet(
     {
       method: 'GET',
     },
-    defaultRequestOptions,
+    { ...defaultRequestOptions, ...options },
   )
 }
 
@@ -185,6 +213,7 @@ export async function searchExcelSheetRows(
   sheetId: string,
   query: string,
   limit = 50,
+  options: RequestOptions = {},
 ): Promise<SheetSearchResponse> {
   const params = new URLSearchParams({
     query,
@@ -195,7 +224,7 @@ export async function searchExcelSheetRows(
     {
       method: 'GET',
     },
-    defaultRequestOptions,
+    { ...defaultRequestOptions, ...options },
   )
 }
 
@@ -203,6 +232,7 @@ export async function searchExcelVersionRows(
   versionId: string,
   query: string,
   limit = 50,
+  options: RequestOptions = {},
 ): Promise<WorkbookSearchResponse> {
   const params = new URLSearchParams({
     query,
@@ -213,17 +243,18 @@ export async function searchExcelVersionRows(
     {
       method: 'GET',
     },
-    defaultRequestOptions,
+    { ...defaultRequestOptions, ...options },
   )
 }
 
 export async function lookupExcelRow(
   sheetId: string,
   rowId: string,
+  options: RequestOptions = {},
 ): Promise<RowLookupResponse> {
   return requestJson<RowLookupResponse>(
     `/api/excel/sheets/${sheetId}/rows/${encodeURIComponent(rowId)}`,
     { method: 'GET' },
-    defaultRequestOptions,
+    { ...defaultRequestOptions, ...options },
   )
 }

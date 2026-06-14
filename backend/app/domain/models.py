@@ -27,6 +27,13 @@ class ExcelArtifactType(StrEnum):
     ROW_MAPPING = "row_mapping"
 
 
+class ExcelUploadTaskStatus(StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class ExcelFile:
     file_id: str
@@ -82,6 +89,23 @@ class ExcelRowMapping:
     original_row_number: int
     raw_csv_row_number: int
     created_at: str
+
+
+@dataclass(frozen=True)
+class ExcelUploadTask:
+    task_id: str
+    user_id: str
+    original_filename: str
+    staging_path: str
+    replace_existing: bool
+    status: ExcelUploadTaskStatus
+    error_message: str | None
+    result: dict[str, object]
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    worker_id: str | None = None
 
 
 @dataclass(frozen=True)

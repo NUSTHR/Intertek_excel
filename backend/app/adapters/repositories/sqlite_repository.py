@@ -2,11 +2,14 @@ import hashlib
 import json
 import sqlite3
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 
 from app.adapters.repositories.sqlite.maintenance import SQLiteOperationalMaintenance
 from app.adapters.repositories.sqlite.policies import (
     AUTH_SESSION_RETENTION_DAYS,
+    LOGIN_ATTEMPT_RETENTION_DAYS,
     PASSWORD_RESET_TOKEN_RETENTION_DAYS,
     SQLITE_BUSY_TIMEOUT_MS,
     SQLITE_CONNECTION_TIMEOUT_SECONDS,
@@ -33,6 +36,8 @@ from app.domain.models import (
     ExcelFileVisibility,
     ExcelRowMapping,
     ExcelSheet,
+    ExcelUploadTask,
+    ExcelUploadTaskStatus,
     ExcelVersionStatus,
     LlmPreference,
     PasswordResetToken,
@@ -45,6 +50,7 @@ from app.domain.models import (
 __all__ = [
     "AUTH_SESSION_RETENTION_DAYS",
     "PASSWORD_RESET_TOKEN_RETENTION_DAYS",
+    "LOGIN_ATTEMPT_RETENTION_DAYS",
     "SCHEMA_MIGRATIONS",
     "SQLITE_BUSY_TIMEOUT_MS",
     "SQLITE_CONNECTION_TIMEOUT_SECONDS",
@@ -68,6 +74,7 @@ class SQLiteExcelAssetRepository:
     ) -> None:
         self._database_path = database_path
         self._last_maintenance_at = 0.0
+        self._maintenance_lock = Lock()
         self._connection_policy = connection_policy or SQLiteConnectionPolicy(
             maintenance_interval_seconds=maintenance_interval_seconds,
         )
@@ -532,6 +539,190 @@ class SQLiteExcelAssetRepository:
             ).fetchall()
         return [mapping for row in rows if (mapping := self._to_mapping(row)) is not None]
 
+    def list_row_mappings_for_sheet_page(
+        self,
+        sheet_id: str,
+        offset: int,
+        limit: int,
+    ) -> list[ExcelRowMapping]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM excel_row_mappings
+                WHERE sheet_id = ?
+                ORDER BY raw_csv_row_number ASC
+                LIMIT ? OFFSET ?
+                """,
+                (sheet_id, max(1, limit), max(0, offset)),
+            ).fetchall()
+        return [mapping for row in rows if (mapping := self._to_mapping(row)) is not None]
+
+    def create_upload_task(self, task: ExcelUploadTask) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO excel_upload_tasks
+                  (
+                    task_id, user_id, original_filename, staging_path,
+                    replace_existing, status, error_message, result_json,
+                    created_at, updated_at, started_at, finished_at, worker_id
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._upload_task_values(task),
+            )
+
+    def get_upload_task(self, task_id: str) -> ExcelUploadTask | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM excel_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_upload_task(row)
+
+    def claim_next_upload_task(
+        self,
+        *,
+        worker_id: str,
+        started_at: str,
+    ) -> ExcelUploadTask | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_upload_tasks
+                SET status = ?,
+                    worker_id = ?,
+                    started_at = ?,
+                    updated_at = ?,
+                    error_message = NULL
+                WHERE task_id = (
+                  SELECT task_id
+                  FROM excel_upload_tasks
+                  WHERE status = ?
+                  ORDER BY created_at ASC
+                  LIMIT 1
+                )
+                """,
+                (
+                    ExcelUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    started_at,
+                    started_at,
+                    ExcelUploadTaskStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT * FROM excel_upload_tasks
+                WHERE worker_id = ?
+                  AND status = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (worker_id, ExcelUploadTaskStatus.PROCESSING.value),
+            ).fetchone()
+        return self._to_upload_task(row)
+
+    def complete_upload_task(
+        self,
+        *,
+        task_id: str,
+        result: dict[str, object],
+        finished_at: str,
+    ) -> ExcelUploadTask | None:
+        return self._finish_upload_task(
+            task_id=task_id,
+            status=ExcelUploadTaskStatus.READY,
+            error_message=None,
+            result=result,
+            finished_at=finished_at,
+        )
+
+    def fail_upload_task(
+        self,
+        *,
+        task_id: str,
+        error_message: str,
+        finished_at: str,
+    ) -> ExcelUploadTask | None:
+        return self._finish_upload_task(
+            task_id=task_id,
+            status=ExcelUploadTaskStatus.FAILED,
+            error_message=error_message,
+            result={},
+            finished_at=finished_at,
+        )
+
+    def fail_stale_processing_upload_tasks(
+        self,
+        *,
+        cutoff_started_at: str,
+        failed_at: str,
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_upload_tasks
+                SET status = ?,
+                    error_message = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE status = ?
+                  AND started_at IS NOT NULL
+                  AND started_at < ?
+                """,
+                (
+                    ExcelUploadTaskStatus.FAILED.value,
+                    "Upload processing was interrupted. Please upload the workbook again.",
+                    failed_at,
+                    failed_at,
+                    ExcelUploadTaskStatus.PROCESSING.value,
+                    cutoff_started_at,
+                ),
+            )
+        return max(0, cursor.rowcount)
+
+    def _finish_upload_task(
+        self,
+        *,
+        task_id: str,
+        status: ExcelUploadTaskStatus,
+        error_message: str | None,
+        result: dict[str, object],
+        finished_at: str,
+    ) -> ExcelUploadTask | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_upload_tasks
+                SET status = ?,
+                    error_message = ?,
+                    result_json = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE task_id = ?
+                  AND status = ?
+                """,
+                (
+                    status.value,
+                    error_message,
+                    self._dump_json(result),
+                    finished_at,
+                    finished_at,
+                    task_id,
+                    ExcelUploadTaskStatus.PROCESSING.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM excel_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_upload_task(row)
+
     def save_summary(self, summary: DocumentSummary) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -858,6 +1049,39 @@ class SQLiteExcelAssetRepository:
                 (session_id, turn_id),
             )
 
+    def record_chat_cancellation(
+        self,
+        *,
+        request_id: str,
+        cancelled_at: str,
+        expires_at: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_request_cancellations
+                  (request_id, cancelled_at, expires_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(request_id) DO UPDATE SET
+                  cancelled_at = excluded.cancelled_at,
+                  expires_at = excluded.expires_at
+                """,
+                (request_id, cancelled_at, expires_at),
+            )
+
+    def is_chat_request_cancelled(self, request_id: str, *, now_iso: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM chat_request_cancellations
+                WHERE request_id = ?
+                  AND expires_at >= ?
+                """,
+                (request_id, now_iso),
+            ).fetchone()
+        return row is not None
+
     def list_turns(self, session_id: str) -> list[ChatTurn]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -1121,6 +1345,82 @@ class SQLiteExcelAssetRepository:
                 (used_at, reset_token_id),
             )
 
+    def get_login_rate_limit_retry_after(
+        self,
+        email: str,
+        now: str,
+    ) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT blocked_until
+                FROM auth_login_attempts
+                WHERE email = ?
+                """,
+                (email,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _retry_after_seconds(row["blocked_until"], now)
+
+    def record_login_rate_limit_failure(
+        self,
+        email: str,
+        *,
+        now: str,
+        max_failed_attempts: int,
+        window_seconds: int,
+    ) -> int | None:
+        bounded_max_attempts = max(1, max_failed_attempts)
+        bounded_window_seconds = max(1, window_seconds)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT failures, first_failure_at, blocked_until
+                FROM auth_login_attempts
+                WHERE email = ?
+                """,
+                (email,),
+            ).fetchone()
+
+            if row is None or _iso_seconds_between(row["first_failure_at"], now) > (
+                bounded_window_seconds
+            ):
+                failures = 1
+                first_failure_at = now
+                blocked_until = now
+            else:
+                failures = int(row["failures"]) + 1
+                first_failure_at = str(row["first_failure_at"])
+                blocked_until = str(row["blocked_until"])
+
+            if failures >= bounded_max_attempts:
+                blocked_until = _add_seconds(first_failure_at, bounded_window_seconds)
+
+            connection.execute(
+                """
+                INSERT INTO auth_login_attempts
+                  (email, failures, first_failure_at, blocked_until)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                  failures = excluded.failures,
+                  first_failure_at = excluded.first_failure_at,
+                  blocked_until = excluded.blocked_until
+                """,
+                (email, failures, first_failure_at, blocked_until),
+            )
+        return _retry_after_seconds(blocked_until, now)
+
+    def clear_login_rate_limit(self, email: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM auth_login_attempts
+                WHERE email = ?
+                """,
+                (email,),
+            )
+
     def run_operational_maintenance(self, now_iso: str | None = None) -> dict[str, int]:
         with self._connect(run_maintenance=False) as connection:
             result = self._run_connection_maintenance(connection, now_iso=now_iso)
@@ -1131,6 +1431,7 @@ class SQLiteExcelAssetRepository:
         connection = sqlite3.connect(
             self._database_path,
             timeout=self._connection_policy.timeout_seconds,
+            isolation_level="IMMEDIATE",
         )
         connection.row_factory = sqlite3.Row
         self._configure_connection(connection)
@@ -1155,8 +1456,20 @@ class SQLiteExcelAssetRepository:
             < self._connection_policy.maintenance_interval_seconds
         ):
             return
-        self._run_connection_maintenance(connection)
-        self._last_maintenance_at = now
+        if not self._maintenance_lock.acquire(blocking=False):
+            return
+        try:
+            now = time.monotonic()
+            if (
+                self._connection_policy.maintenance_interval_seconds > 0
+                and now - self._last_maintenance_at
+                < self._connection_policy.maintenance_interval_seconds
+            ):
+                return
+            self._run_connection_maintenance(connection)
+            self._last_maintenance_at = now
+        finally:
+            self._maintenance_lock.release()
 
     def _run_connection_maintenance(
         self,
@@ -1251,6 +1564,42 @@ class SQLiteExcelAssetRepository:
             original_row_number=int(row["original_row_number"]),
             raw_csv_row_number=int(row["raw_csv_row_number"]),
             created_at=str(row["created_at"]),
+        )
+
+    def _upload_task_values(self, task: ExcelUploadTask) -> tuple[object, ...]:
+        return (
+            task.task_id,
+            task.user_id,
+            task.original_filename,
+            task.staging_path,
+            1 if task.replace_existing else 0,
+            task.status.value,
+            task.error_message,
+            self._dump_json(task.result),
+            task.created_at,
+            task.updated_at,
+            task.started_at,
+            task.finished_at,
+            task.worker_id,
+        )
+
+    def _to_upload_task(self, row: sqlite3.Row | None) -> ExcelUploadTask | None:
+        if row is None:
+            return None
+        return ExcelUploadTask(
+            task_id=str(row["task_id"]),
+            user_id=str(row["user_id"]),
+            original_filename=str(row["original_filename"]),
+            staging_path=str(row["staging_path"]),
+            replace_existing=bool(int(row["replace_existing"])),
+            status=ExcelUploadTaskStatus(str(row["status"])),
+            error_message=row["error_message"],
+            result=self._load_json_object(self._row_value(row, "result_json", "{}")),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            worker_id=row["worker_id"],
         )
 
     def _to_summary(
@@ -1634,6 +1983,15 @@ class SQLiteExcelAssetRepository:
             return []
         return [item for item in parsed if isinstance(item, dict)]
 
+    def _load_json_object(self, value: object) -> dict[str, object]:
+        try:
+            parsed = json.loads(str(value))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return parsed
+
     def _row_value(
         self,
         row: sqlite3.Row,
@@ -1659,3 +2017,27 @@ class SQLiteExcelAssetRepository:
 
     def _deleted_file_display_name(self, *, file_id: str, display_name: str) -> str:
         return f"deleted:{file_id}:{display_name}"
+
+
+def _retry_after_seconds(blocked_until: str, now: str) -> int | None:
+    remaining_seconds = _iso_seconds_between(now, blocked_until)
+    if remaining_seconds <= 0:
+        return None
+    return max(1, int(remaining_seconds))
+
+
+def _iso_seconds_between(start: str, end: str) -> float:
+    return (_parse_iso_datetime(end) - _parse_iso_datetime(start)).total_seconds()
+
+
+def _add_seconds(value: str, seconds: int) -> str:
+    return (_parse_iso_datetime(value) + timedelta(seconds=seconds)).isoformat(
+        timespec="seconds"
+    )
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

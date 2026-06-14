@@ -16,6 +16,8 @@ class SQLiteOperationalMaintenance:
     ) -> dict[str, int]:
         deleted_auth_sessions = 0
         deleted_password_reset_tokens = 0
+        deleted_chat_cancellations = 0
+        deleted_login_attempts = 0
         if self._table_exists(connection, "auth_sessions"):
             cutoff = self._retention_cutoff_iso(
                 now_iso,
@@ -44,9 +46,34 @@ class SQLiteOperationalMaintenance:
                 (cutoff, cutoff),
             )
             deleted_password_reset_tokens = max(0, cursor.rowcount)
+        if self._table_exists(connection, "chat_request_cancellations"):
+            cursor = connection.execute(
+                """
+                DELETE FROM chat_request_cancellations
+                WHERE expires_at < ?
+                """,
+                (now_iso,),
+            )
+            deleted_chat_cancellations = max(0, cursor.rowcount)
+        if self._table_exists(connection, "auth_login_attempts"):
+            cutoff = self._retention_cutoff_iso(
+                now_iso,
+                self._policy.login_attempt_retention_days,
+            )
+            cursor = connection.execute(
+                """
+                DELETE FROM auth_login_attempts
+                WHERE blocked_until < ?
+                  AND first_failure_at < ?
+                """,
+                (now_iso, cutoff),
+            )
+            deleted_login_attempts = max(0, cursor.rowcount)
         return {
             "auth_sessions": deleted_auth_sessions,
             "password_reset_tokens": deleted_password_reset_tokens,
+            "chat_request_cancellations": deleted_chat_cancellations,
+            "auth_login_attempts": deleted_login_attempts,
         }
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:

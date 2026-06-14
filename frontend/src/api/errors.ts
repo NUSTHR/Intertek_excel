@@ -1,23 +1,27 @@
-import { getAuthToken } from './auth-token'
+import { getAuthToken, getCsrfToken } from './auth-token'
 
 export interface ApiErrorPayload {
   detail?: string
   requires_confirmation?: boolean
+  retry_after_seconds?: number
 }
 
 export class ExcelWorkspaceApiError extends Error {
   readonly statusCode: number | null
   readonly requiresConfirmation: boolean
+  readonly retryAfterSeconds: number | null
 
   constructor(
     message: string,
     statusCode: number | null = null,
     requiresConfirmation = false,
+    retryAfterSeconds: number | null = null,
   ) {
     super(message)
     this.name = 'ExcelWorkspaceApiError'
     this.statusCode = statusCode
     this.requiresConfirmation = requiresConfirmation
+    this.retryAfterSeconds = retryAfterSeconds
   }
 }
 
@@ -73,6 +77,7 @@ async function request(
     const response = await fetch(`${options.apiBaseUrl ?? ''}${path}`, {
       ...init,
       headers: buildHeaders(init.headers),
+      credentials: init.credentials ?? 'include',
       signal: controller.signal,
     })
     if (!response.ok) {
@@ -81,6 +86,7 @@ async function request(
         payload.detail || `Request failed with status ${response.status}.`,
         response.status,
         payload.requires_confirmation === true,
+        typeof payload.retry_after_seconds === 'number' ? payload.retry_after_seconds : null,
       )
     }
     return response
@@ -115,6 +121,10 @@ function buildHeaders(headers: HeadersInit | undefined): HeadersInit {
   const token = getAuthToken()
   if (token && !nextHeaders.has('Authorization')) {
     nextHeaders.set('Authorization', `Bearer ${token}`)
+  }
+  const csrfToken = getCsrfToken()
+  if (csrfToken && !nextHeaders.has('X-CSRF-Token')) {
+    nextHeaders.set('X-CSRF-Token', csrfToken)
   }
   return nextHeaders
 }

@@ -70,6 +70,12 @@ class AuthenticationError(ExcelWorkspaceError):
     pass
 
 
+class RateLimitError(ExcelWorkspaceError):
+    def __init__(self, detail: str, *, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(detail)
+
+
 class AuthorizationError(ExcelWorkspaceError):
     pass
 

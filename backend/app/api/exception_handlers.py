@@ -18,6 +18,7 @@ from app.core.errors import (
     InvalidLlmModelError,
     LlmRequestError,
     PasswordResetTokenError,
+    RateLimitError,
     UploadValidationError,
     UserAlreadyExistsError,
     VersionActivationError,
@@ -40,6 +41,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AuthorizationError, handle_authorization_error)
     app.add_exception_handler(UserAlreadyExistsError, handle_user_already_exists)
     app.add_exception_handler(PasswordResetTokenError, handle_password_reset_token_error)
+    app.add_exception_handler(RateLimitError, handle_rate_limit_error)
     app.add_exception_handler(AssetNotFoundError, handle_asset_not_found)
     app.add_exception_handler(InvalidExcelFileError, handle_invalid_excel_file)
     app.add_exception_handler(VersionActivationError, handle_version_activation_error)
@@ -165,6 +167,19 @@ async def handle_password_reset_token_error(
     exc: PasswordResetTokenError,
 ) -> JSONResponse:
     return _error_response(HTTPStatus.BAD_REQUEST, str(exc))
+
+
+async def handle_rate_limit_error(
+    _request: Request,
+    exc: RateLimitError,
+) -> JSONResponse:
+    return _json_response(
+        HTTPStatus.TOO_MANY_REQUESTS,
+        {
+            "detail": str(exc),
+            "retry_after_seconds": exc.retry_after_seconds,
+        },
+    )
 
 
 async def handle_asset_not_found(

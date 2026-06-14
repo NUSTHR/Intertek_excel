@@ -1,5 +1,3 @@
-import { allowedUploadExtensions } from './workspace-constants'
-
 import type { ExcelFile } from '../types/excel-assets'
 
 export function clamp(value: number, min: number, max: number): number {
@@ -10,9 +8,30 @@ export function rowDomId(rowId: string): string {
   return `excel-row-${rowId.replace(/[^a-zA-Z0-9_-]/g, '-')}`
 }
 
-export function isAllowedUploadFile(file: File): boolean {
+export function isAllowedUploadFile(file: File, allowedExtensions: string[]): boolean {
   const name = file.name.toLowerCase()
-  return allowedUploadExtensions.some((extension) => name.endsWith(extension))
+  return allowedExtensions.some((extension) => name.endsWith(extension.toLowerCase()))
+}
+
+export function buildUploadAcceptValue(allowedExtensions: string[]): string {
+  return allowedExtensions.map((extension) => extension.toLowerCase()).join(',')
+}
+
+export function formatSupportedExtensions(allowedExtensions: string[]): string {
+  return allowedExtensions.map((extension) => extension.toLowerCase()).join(', ')
+}
+
+export function formatBytes(value: number): string {
+  if (value <= 0) {
+    return '0B'
+  }
+  const units = ['B', 'KB', 'MB', 'GB']
+  const unitIndex = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+  const scaledValue = value / 1024 ** unitIndex
+  const displayValue = scaledValue >= 10 || Number.isInteger(scaledValue)
+    ? Math.round(scaledValue).toString()
+    : scaledValue.toFixed(1)
+  return `${displayValue}${units[unitIndex]}`
 }
 
 export function fileTypeLabel(file: ExcelFile): string {

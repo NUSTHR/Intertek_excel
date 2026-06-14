@@ -1,16 +1,19 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import (
     get_current_user,
     get_excel_asset_service,
+    get_upload_task_service,
     require_admin_user,
 )
 from app.api.schemas import (
     ActiveExcelFileResponse,
     CheckFileNameRequest,
     CheckFileNameResponse,
+    CreateUploadTaskResponse,
     DeleteExcelFileResponse,
     ExcelArtifactResponse,
     ExcelFileResponse,
@@ -31,6 +34,7 @@ from app.api.schemas import (
     SheetSearchMatchResponse,
     SheetSearchResponse,
     UploadExcelResponse,
+    UploadTaskResponse,
     WorkbookProfileResponse,
     WorkbookSearchResponse,
 )
@@ -38,7 +42,9 @@ from app.application.excel_assets.access import FileAccessContext
 from app.application.excel_assets.models import SheetSearchMatch
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.excel_assets.upload_policy import ExcelUploadPolicy
+from app.application.excel_assets.upload_tasks import UploadTaskService
 from app.core.config import get_settings
+from app.core.errors import AssetNotFoundError, FileNameConflictError
 from app.domain.models import (
     AuthenticatedUser,
     ExcelArtifact,
@@ -47,6 +53,7 @@ from app.domain.models import (
     ExcelFileVisibility,
     ExcelRowMapping,
     ExcelSheet,
+    ExcelUploadTask,
     SheetProfile,
     WorkbookProfile,
 )
@@ -55,6 +62,10 @@ router = APIRouter(prefix="/api/excel", tags=["excel-assets"])
 ExcelAssetServiceDependency = Annotated[
     ExcelAssetService,
     Depends(get_excel_asset_service),
+]
+UploadTaskServiceDependency = Annotated[
+    UploadTaskService,
+    Depends(get_upload_task_service),
 ]
 AuthenticatedDependency = Annotated[AuthenticatedUser, Depends(get_current_user)]
 AdminDependency = Annotated[AuthenticatedUser, Depends(require_admin_user)]
@@ -82,9 +93,10 @@ async def upload_excel_file(
     _admin: AdminDependency,
     replace_existing: Annotated[bool, Form()] = False,
 ) -> UploadExcelResponse:
-    content = await file.read()
+    content = await _read_upload_content(file)
     _validate_upload(file.filename or "", content)
-    result = service.upload_workbook(
+    result = await run_in_threadpool(
+        service.upload_workbook,
         original_filename=file.filename or "uploaded.xlsx",
         content=content,
         replace_existing=replace_existing,
@@ -95,6 +107,52 @@ async def upload_excel_file(
         sheets=[_to_sheet_response(sheet) for sheet in result.sheets],
         profile=_to_profile_response(result.profile),
     )
+
+
+@router.post(
+    "/files/upload-tasks",
+    response_model=CreateUploadTaskResponse,
+    status_code=202,
+)
+async def create_upload_task(
+    file: Annotated[UploadFile, File(...)],
+    upload_tasks: UploadTaskServiceDependency,
+    service: ExcelAssetServiceDependency,
+    user: AdminDependency,
+    replace_existing: Annotated[bool, Form()] = False,
+) -> CreateUploadTaskResponse:
+    content = await _read_upload_content(file)
+    original_filename = file.filename or "uploaded.xlsx"
+    _validate_upload(original_filename, content)
+    name_check = service.check_display_name(original_filename)
+    if name_check.exists and not replace_existing:
+        raise FileNameConflictError(
+            display_name=name_check.display_name,
+            file_id=name_check.file_id or "",
+        )
+    task = upload_tasks.create_task(
+        user_id=user.user_id,
+        original_filename=original_filename,
+        content=content,
+        replace_existing=replace_existing,
+    )
+    return CreateUploadTaskResponse(
+        task_id=task.task_id,
+        status=task.status.value,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+    )
+
+
+@router.get("/files/upload-tasks/{task_id}", response_model=UploadTaskResponse)
+def get_upload_task(
+    task_id: str,
+    upload_tasks: UploadTaskServiceDependency,
+    user: AdminDependency,
+    service: ExcelAssetServiceDependency,
+) -> UploadTaskResponse:
+    task = upload_tasks.get_task(task_id, user_id=user.user_id)
+    return _to_upload_task_response(task, service)
 
 
 @router.get("/files", response_model=ListExcelFilesResponse)
@@ -370,6 +428,46 @@ def _to_file_response(file: ExcelFile) -> ExcelFileResponse:
     )
 
 
+def _to_upload_task_response(
+    task: ExcelUploadTask,
+    service: ExcelAssetService,
+) -> UploadTaskResponse:
+    return UploadTaskResponse(
+        task_id=task.task_id,
+        status=task.status.value,
+        original_filename=task.original_filename,
+        replace_existing=task.replace_existing,
+        error_message=task.error_message,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        started_at=task.started_at,
+        finished_at=task.finished_at,
+        result=_upload_task_result(task, service),
+    )
+
+
+def _upload_task_result(
+    task: ExcelUploadTask,
+    service: ExcelAssetService,
+) -> UploadExcelResponse | None:
+    version_id = str(task.result.get("version_id", "") or "")
+    if task.status.value != "ready" or not version_id:
+        return None
+    try:
+        version = service.get_version(version_id)
+        file = service.get_file(version.file_id)
+        sheets = service.list_sheets(version.version_id)
+        profile = service.get_profile(version.version_id)
+    except AssetNotFoundError:
+        return None
+    return UploadExcelResponse(
+        file=_to_file_response(file),
+        version=_to_version_response(version),
+        sheets=[_to_sheet_response(sheet) for sheet in sheets],
+        profile=_to_profile_response(profile),
+    )
+
+
 def _file_access(user: AuthenticatedUser) -> FileAccessContext:
     return FileAccessContext(user_id=user.user_id, role=user.role)
 
@@ -457,3 +555,13 @@ def _validate_upload(filename: str, content: bytes) -> None:
         supported_extensions=settings.supported_excel_extensions,
         max_bytes=settings.excel_max_upload_bytes,
     ).validate(filename, content)
+
+
+async def _read_upload_content(file: UploadFile) -> bytes:
+    settings = get_settings()
+    try:
+        return await file.read(settings.excel_max_upload_bytes + 1)
+    finally:
+        close = getattr(file, "close", None)
+        if close is not None:
+            await close()

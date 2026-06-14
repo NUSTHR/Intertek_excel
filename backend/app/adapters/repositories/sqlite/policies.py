@@ -6,6 +6,7 @@ SQLITE_WAL_AUTOCHECKPOINT_PAGES = 1000
 SQLITE_MAINTENANCE_INTERVAL_SECONDS = 300.0
 AUTH_SESSION_RETENTION_DAYS = 30
 PASSWORD_RESET_TOKEN_RETENTION_DAYS = 7
+LOGIN_ATTEMPT_RETENTION_DAYS = 1
 
 
 @dataclass(frozen=True)
@@ -20,3 +21,4 @@ class SQLiteConnectionPolicy:
 class SQLiteMaintenancePolicy:
     auth_session_retention_days: int = AUTH_SESSION_RETENTION_DAYS
     password_reset_token_retention_days: int = PASSWORD_RESET_TOKEN_RETENTION_DAYS
+    login_attempt_retention_days: int = LOGIN_ATTEMPT_RETENTION_DAYS

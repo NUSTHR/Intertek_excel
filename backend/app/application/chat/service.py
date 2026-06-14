@@ -1,4 +1,8 @@
 import hashlib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from threading import Lock, RLock
 
 from app.application.chat.cancellation import (
     ChatCancellationToken,
@@ -32,6 +36,13 @@ from app.ports.llm_client import LlmClient
 from app.ports.repository import ChatSessionRepository
 
 
+@dataclass
+class _SessionOperationLock:
+    lock: RLock = field(default_factory=RLock)
+    users: int = 0
+    discard_when_idle: bool = False
+
+
 class ChatService:
     def __init__(
         self,
@@ -57,6 +68,8 @@ class ChatService:
         self._sessions = sessions
         self._llm_preferences = llm_preferences
         self._workflow = workflow
+        self._session_locks: dict[str, _SessionOperationLock] = {}
+        self._session_locks_guard = Lock()
 
     def create_session(self) -> ChatSession:
         return self.create_session_for_user("legacy")
@@ -90,14 +103,15 @@ class ChatService:
         title: str,
         user_id: str | None = None,
     ) -> ChatSession | None:
-        if self.get_session(session_id, user_id=user_id) is None:
-            return None
-        normalized_title = self._normalize_session_title(title)
-        return self._sessions.rename_session(
-            session_id=session_id,
-            title=normalized_title,
-            updated_at=utc_now_iso(),
-        )
+        with self._session_operation_lock(session_id):
+            if self.get_session(session_id, user_id=user_id) is None:
+                return None
+            normalized_title = self._normalize_session_title(title)
+            return self._sessions.rename_session(
+                session_id=session_id,
+                title=normalized_title,
+                updated_at=utc_now_iso(),
+            )
 
     def set_session_pinned(
         self,
@@ -105,19 +119,24 @@ class ChatService:
         pinned: bool,
         user_id: str | None = None,
     ) -> ChatSession | None:
-        if self.get_session(session_id, user_id=user_id) is None:
-            return None
-        now = utc_now_iso()
-        return self._sessions.set_session_pinned(
-            session_id=session_id,
-            pinned_at=now if pinned else None,
-            updated_at=now,
-        )
+        with self._session_operation_lock(session_id):
+            if self.get_session(session_id, user_id=user_id) is None:
+                return None
+            now = utc_now_iso()
+            return self._sessions.set_session_pinned(
+                session_id=session_id,
+                pinned_at=now if pinned else None,
+                updated_at=now,
+            )
 
     def delete_session(self, session_id: str, user_id: str | None = None) -> bool:
-        if self.get_session(session_id, user_id=user_id) is None:
-            return False
-        return self._sessions.delete_session(session_id)
+        with self._session_operation_lock(session_id):
+            if self.get_session(session_id, user_id=user_id) is None:
+                return False
+            deleted = self._sessions.delete_session(session_id)
+        if deleted:
+            self._discard_session_operation_lock(session_id)
+        return deleted
 
     def list_turns(
         self,
@@ -129,6 +148,35 @@ class ChatService:
         return self._sessions.list_turns(session_id)
 
     def answer_question(
+        self,
+        question: str,
+        session_id: str | None = None,
+        user_id: str = "legacy",
+        *,
+        enable_deep_thinking: bool = False,
+        cancellation_token: ChatCancellationToken | None = None,
+        user_role: UserRole = UserRole.MEMBER,
+    ) -> ChatAnswer:
+        if session_id is not None:
+            with self._session_operation_lock(session_id):
+                return self._answer_question_locked(
+                    question,
+                    session_id=session_id,
+                    user_id=user_id,
+                    enable_deep_thinking=enable_deep_thinking,
+                    cancellation_token=cancellation_token,
+                    user_role=user_role,
+                )
+        return self._answer_question_locked(
+            question,
+            session_id=session_id,
+            user_id=user_id,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_token=cancellation_token,
+            user_role=user_role,
+        )
+
+    def _answer_question_locked(
         self,
         question: str,
         session_id: str | None = None,
@@ -174,6 +222,35 @@ class ChatService:
         )
 
     def route_question(
+        self,
+        question: str,
+        session_id: str | None = None,
+        user_id: str = "legacy",
+        *,
+        llm_preference: LlmPreference | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
+        file_access: FileAccessContext | None = None,
+    ) -> ChatRouteResult:
+        if session_id is not None:
+            with self._session_operation_lock(session_id):
+                return self._route_question_locked(
+                    question,
+                    session_id=session_id,
+                    user_id=user_id,
+                    llm_preference=llm_preference,
+                    cancellation_token=cancellation_token,
+                    file_access=file_access,
+                )
+        return self._route_question_locked(
+            question,
+            session_id=session_id,
+            user_id=user_id,
+            llm_preference=llm_preference,
+            cancellation_token=cancellation_token,
+            file_access=file_access,
+        )
+
+    def _route_question_locked(
         self,
         question: str,
         session_id: str | None = None,
@@ -240,6 +317,32 @@ class ChatService:
         )
 
     def answer_routed_question(
+        self,
+        question: str,
+        session_id: str,
+        user_id: str = "legacy",
+        route_result: ChatRouteResult | None = None,
+        *,
+        selected_version_ids: list[str] | None = None,
+        enable_deep_thinking: bool = False,
+        llm_preference: LlmPreference | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
+        file_access: FileAccessContext | None = None,
+    ) -> ChatAnswer:
+        with self._session_operation_lock(session_id):
+            return self._answer_routed_question_locked(
+                question,
+                session_id=session_id,
+                user_id=user_id,
+                route_result=route_result,
+                selected_version_ids=selected_version_ids,
+                enable_deep_thinking=enable_deep_thinking,
+                llm_preference=llm_preference,
+                cancellation_token=cancellation_token,
+                file_access=file_access,
+            )
+
+    def _answer_routed_question_locked(
         self,
         question: str,
         session_id: str,
@@ -403,6 +506,30 @@ class ChatService:
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
 
+    @contextmanager
+    def _session_operation_lock(self, session_id: str) -> Iterator[None]:
+        with self._session_locks_guard:
+            entry = self._session_locks.setdefault(session_id, _SessionOperationLock())
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._session_locks_guard:
+                entry.users -= 1
+                if entry.users <= 0 and entry.discard_when_idle:
+                    self._session_locks.pop(session_id, None)
+
+    def _discard_session_operation_lock(self, session_id: str) -> None:
+        with self._session_locks_guard:
+            entry = self._session_locks.get(session_id)
+            if entry is None:
+                return
+            if entry.users <= 0:
+                self._session_locks.pop(session_id, None)
+            else:
+                entry.discard_when_idle = True
+
     def _rollback_new_attachments(
         self,
         session_id: str,
@@ -541,6 +668,7 @@ class ChatService:
         documents, rows, citation_index, rows_truncated = self._current_answer_inputs(
             initial_documents,
             access=access,
+            cancellation_token=cancellation_token,
         )
         self._raise_if_cancelled(cancellation_token)
         if not documents:
@@ -574,6 +702,7 @@ class ChatService:
         documents, rows, citation_index, rows_truncated = self._current_answer_inputs(
             refreshed_documents,
             access=access,
+            cancellation_token=cancellation_token,
         )
         if not documents:
             return (
@@ -615,6 +744,7 @@ class ChatService:
         documents: list[SelectedDocument],
         *,
         access: FileAccessContext | None,
+        cancellation_token: ChatCancellationToken | None = None,
     ) -> tuple[list[SelectedDocument], list[dict], dict[str, ExcelCitation], bool]:
         current_documents = self._filter_accessible_selected_documents(
             documents,
@@ -623,6 +753,7 @@ class ChatService:
         rows, citation_index, rows_truncated = self._load_rows_for_documents(
             current_documents,
             access=access,
+            cancellation_token=cancellation_token,
         )
         current_documents = self._filter_accessible_selected_documents(
             current_documents,
@@ -765,11 +896,13 @@ class ChatService:
         documents: list[SelectedDocument],
         *,
         access: FileAccessContext | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
     ) -> tuple[list[dict], dict[str, ExcelCitation], bool]:
         rows: list[dict] = []
         citation_index: dict[str, ExcelCitation] = {}
         rows_truncated = False
         for document in documents:
+            self._raise_if_cancelled(cancellation_token)
             try:
                 sheets = self._excel_assets.list_sheets(
                     document.version_id,
@@ -783,8 +916,10 @@ class ChatService:
                 except AssetNotFoundError:
                     continue
             for sheet in sheets:
+                self._raise_if_cancelled(cancellation_token)
                 offset = 0
                 while True:
+                    self._raise_if_cancelled(cancellation_token)
                     try:
                         result = self._excel_assets.list_sheet_rows(
                             sheet_id=sheet.sheet_id,
@@ -805,6 +940,7 @@ class ChatService:
                         except AssetNotFoundError:
                             break
                     for row_response in result.rows:
+                        self._raise_if_cancelled(cancellation_token)
                         if (
                             self._policy.effective_max_answer_rows is not None
                             and len(rows) >= self._policy.effective_max_answer_rows

@@ -62,6 +62,28 @@ export interface UploadExcelResponse {
   profile: WorkbookProfile
 }
 
+export type UploadTaskStatus = 'queued' | 'processing' | 'ready' | 'failed'
+
+export interface CreateUploadTaskResponse {
+  task_id: string
+  status: UploadTaskStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface UploadTaskResponse {
+  task_id: string
+  status: UploadTaskStatus
+  original_filename: string
+  replace_existing: boolean
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  finished_at: string | null
+  result: UploadExcelResponse | null
+}
+
 export interface ListExcelFilesResponse {
   files: ExcelFile[]
 }

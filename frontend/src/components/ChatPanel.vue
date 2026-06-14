@@ -564,7 +564,7 @@ async function copyText(value: string, key: string): Promise<void> {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(value)
     } else {
-      legacyCopyText(value)
+      copyTextWithTextareaFallback(value)
     }
     showCopied(key)
   } catch (error: unknown) {
@@ -572,7 +572,7 @@ async function copyText(value: string, key: string): Promise<void> {
   }
 }
 
-function legacyCopyText(value: string): void {
+function copyTextWithTextareaFallback(value: string): void {
   const textArea = document.createElement('textarea')
   textArea.value = value
   textArea.setAttribute('readonly', 'true')
@@ -755,6 +755,14 @@ function resizeChatInput(): void {
       </section>
 
       <div class="chat-history">
+        <div v-if="history.length === 0 && !isAsking && !isHistoryLoading" class="chat-empty-state">
+          <span class="chat-empty-icon" aria-hidden="true">
+            <AppIcon name="chat_bubble" />
+          </span>
+          <strong>Ready for analysis</strong>
+          <span>Ask a question about the selected workbook or any available data source.</span>
+        </div>
+
         <template v-for="(entry, entryIndex) in history" :key="entry.id">
           <div class="chat-message user">
             <div class="user-message-stack">

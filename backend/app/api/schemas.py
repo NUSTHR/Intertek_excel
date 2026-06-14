@@ -48,6 +48,20 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class ReadinessResponse(BaseModel):
+    status: str
+    checks: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkspaceUploadConfigResponse(BaseModel):
+    max_bytes: int
+    supported_extensions: list[str] = Field(default_factory=list)
+
+
+class WorkspaceConfigResponse(BaseModel):
+    upload: WorkspaceUploadConfigResponse
+
+
 class CheckFileNameRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=255)
 
@@ -183,6 +197,26 @@ class UploadExcelResponse(BaseModel):
     version: ExcelFileVersionResponse
     sheets: list[ExcelSheetResponse] = Field(default_factory=list)
     profile: WorkbookProfileResponse
+
+
+class CreateUploadTaskResponse(BaseModel):
+    task_id: str
+    status: str
+    created_at: str
+    updated_at: str
+
+
+class UploadTaskResponse(BaseModel):
+    task_id: str
+    status: str
+    original_filename: str
+    replace_existing: bool
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    result: UploadExcelResponse | None = None
 
 
 class ListExcelFilesResponse(BaseModel):

@@ -77,6 +77,51 @@
   padding: 0 6px 96px 0;
 }
 
+.excelai-app:not(.chat-mode) .file-card-list > .file-empty-panel {
+  grid-template-columns: 30px minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 3px;
+  min-height: 96px;
+  align-content: center;
+  align-items: center;
+  justify-items: stretch;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px 14px;
+  color: #64748b;
+  background: #ffffff;
+  text-align: left;
+}
+
+.excelai-app:not(.chat-mode) .file-card-list > .file-empty-panel .empty-state-mark {
+  grid-row: 1 / span 2;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  color: #475569;
+  background: #f8fafc;
+}
+
+.excelai-app:not(.chat-mode) .file-card-list > .file-empty-panel .empty-state-mark .app-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.excelai-app:not(.chat-mode) .file-card-list > .file-empty-panel strong {
+  max-width: 100%;
+  color: #334155;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.excelai-app:not(.chat-mode) .file-card-list > .file-empty-panel > span:last-child {
+  max-width: 100%;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
+}
+
 .excelai-app:not(.chat-mode) .primary-nav {
   gap: 4px;
 }
@@ -143,42 +188,6 @@
   font-size: 13px;
   line-height: 18px;
   white-space: nowrap;
-}
-
-.excelai-app:not(.chat-mode) .file-upload-zone {
-  gap: 6px;
-  min-height: 132px;
-  border: 1px dashed #cbd5e1;
-  border-radius: 12px;
-  padding: 20px 18px;
-  color: #0f172a;
-  background: #f8fafc;
-}
-
-.excelai-app:not(.chat-mode) .file-upload-zone:hover:not(:disabled),
-.excelai-app:not(.chat-mode) .file-upload-zone.dragging {
-  border-color: #0f172a;
-  background: #ffffff;
-}
-
-.excelai-app:not(.chat-mode) .file-upload-icon {
-  width: 42px;
-  height: 42px;
-  margin-bottom: 4px;
-  color: #475569;
-  background: #e2e8f0;
-}
-
-.excelai-app:not(.chat-mode) .file-upload-zone strong {
-  color: #0f172a;
-  font-size: 14px;
-  line-height: 20px;
-}
-
-.excelai-app:not(.chat-mode) .file-upload-zone > span:last-child {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 17px;
 }
 
 .excelai-app:not(.chat-mode) .file-library-card {

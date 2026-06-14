@@ -382,4 +382,70 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=10,
+        name="add_row_mapping_raw_order_index",
+        statements=(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mappings_sheet_raw_csv_row
+              ON excel_row_mappings(sheet_id, raw_csv_row_number)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=11,
+        name="add_upload_tasks_and_shared_chat_cancellations",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS excel_upload_tasks (
+              task_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              original_filename TEXT NOT NULL,
+              staging_path TEXT NOT NULL,
+              replace_existing INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              error_message TEXT,
+              result_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT,
+              worker_id TEXT
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_upload_tasks_status_created
+              ON excel_upload_tasks(status, created_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chat_request_cancellations (
+              request_id TEXT PRIMARY KEY,
+              cancelled_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_request_cancellations_expires_at
+              ON chat_request_cancellations(expires_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=12,
+        name="add_shared_auth_login_attempts",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS auth_login_attempts (
+              email TEXT PRIMARY KEY,
+              failures INTEGER NOT NULL,
+              first_failure_at TEXT NOT NULL,
+              blocked_until TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_blocked_until
+              ON auth_login_attempts(blocked_until)
+            """,
+        ),
+    ),
 )

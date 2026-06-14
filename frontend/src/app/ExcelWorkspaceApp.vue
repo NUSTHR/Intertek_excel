@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import {
+  createUploadTask,
   deleteExcelFile,
   ExcelWorkspaceApiError,
   listExcelFiles,
@@ -12,7 +13,6 @@ import {
   renameExcelFile,
   searchExcelVersionRows,
   setExcelFileVisibility,
-  uploadExcelFile,
 } from '../api/excel-assets-api'
 import {
   createChatSession,
@@ -22,27 +22,39 @@ import {
   setChatSessionPinned,
 } from '../api/chat-api'
 import { getCurrentUser, logout as logoutSession } from '../api/auth-api'
-import { clearAuthToken, getAuthToken, setAuthToken } from '../api/auth-token'
+import { clearAuthToken } from '../api/auth-token'
 import {
   generateDocumentSummary,
   getDocumentSummary,
   updateDocumentSummary,
 } from '../api/document-summaries-api'
 import { getLlmModelOptions, getLlmPreference, saveLlmPreference } from '../api/llm-api'
+import { getWorkspaceConfig } from '../api/workspace-api'
 import AppIcon from '../components/AppIcon.vue'
 import AuthPanel from '../components/AuthPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
-import DocumentSummaryCard from '../components/DocumentSummaryCard.vue'
 import SheetSearchResults from '../components/SheetSearchResults.vue'
+import {
+  FileInsightPane,
+  FilePreviewPanel,
+  FileSchemaPanel,
+  FileSourcePanel,
+  FileSummaryPanel,
+  WorkbookUploadDialog,
+  useUploadTaskPolling,
+  type FileSchemaColumn,
+  type ModelStageDraft,
+} from '../features/file-management'
 import { useTransientFeedback } from './use-transient-feedback'
 import {
   defaultExcelCellWidth,
   defaultExcelRowHeight,
+  fallbackAllowedUploadExtensions,
+  fallbackMaxUploadBytes,
   filePageSize,
   maxChatColumnWidth,
   maxExcelCellWidth,
   maxExcelRowHeight,
-  maxUploadBytes,
   minChatColumnWidth,
   minExcelCellWidth,
   minExcelRowHeight,
@@ -52,15 +64,14 @@ import {
   sheetSearchLimit,
 } from './workspace-constants'
 import {
+  buildUploadAcceptValue,
   clamp,
   columnLabel,
   csvEscape,
-  fileIcon,
-  fileTypeLabel,
-  formatDate,
+  formatBytes,
+  formatSupportedExtensions,
   isAllowedUploadFile,
   rowDomId,
-  shortId,
   toErrorMessage,
 } from './workspace-utils'
 import type { AuthResponse, AuthUser } from '../types/auth'
@@ -74,6 +85,7 @@ import type {
   RowLookupResponse,
   SheetSearchMatch,
   SheetPreviewResponse,
+  UploadTaskResponse,
 } from '../types/excel-assets'
 import type {
   ActiveView,
@@ -130,18 +142,26 @@ const {
   show: showChatSessionFeedback,
   clear: clearChatSessionFeedback,
 } = useTransientFeedback(2800)
+const {
+  uploadTask,
+  isUploadTaskPending,
+  setUploadTask,
+  clearUploadTask,
+  pollUploadTask,
+} = useUploadTaskPolling()
 const fileSearchTerm = ref<string>('')
 const documentSearchTerm = ref<string>('')
 const sheetSearchTerm = ref<string>('')
 const sheetSearchResults = ref<SheetSearchMatch[]>([])
 const sheetSearchTotal = ref<number>(0)
 const sheetSearchError = ref<string>('')
+const uploadMaxBytes = ref<number>(fallbackMaxUploadBytes)
+const uploadAllowedExtensions = ref<string[]>([...fallbackAllowedUploadExtensions])
 const isWorkspaceBusy = ref<boolean>(false)
 const isSummaryLoading = ref<boolean>(false)
 const isSummarySaving = ref<boolean>(false)
 const isLookupLoading = ref<boolean>(false)
 const isSheetSearchLoading = ref<boolean>(false)
-const fileInput = ref<HTMLInputElement | null>(null)
 const availableLlmModels = ref<string[]>([])
 const availableLlmProviders = ref<LlmProviderOption[]>([])
 const summaryProvider = ref<string>('siliconflow')
@@ -165,7 +185,6 @@ const excelColumnWidths = ref<Record<string, number>>({})
 const excelRowHeights = ref<Record<string, number>>({})
 const chatColumnWidth = ref<number>(420)
 const isChatResizing = ref<boolean>(false)
-const isUploadDragging = ref<boolean>(false)
 const isExcelColumnResizing = ref<boolean>(false)
 const isExcelRowResizing = ref<boolean>(false)
 const isChatPanelCollapsed = ref<boolean>(false)
@@ -185,6 +204,9 @@ let summarySaveRequestId = 0
 let chatSessionListRequestId = 0
 let workspaceBusyRequestId = 0
 let sheetSearchRequestId = 0
+let previewAbortController: AbortController | null = null
+let sheetSearchAbortController: AbortController | null = null
+let rowLookupAbortController: AbortController | null = null
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -335,7 +357,37 @@ const sheetSearchSummary = computed(() => {
   return `${sheetSearchTotal.value} match${sheetSearchTotal.value === 1 ? '' : 'es'}`
 })
 
-const schemaColumns = computed(() => {
+const uploadAcceptValue = computed(() => buildUploadAcceptValue(uploadAllowedExtensions.value))
+
+const uploadHelpText = computed(() => {
+  return `Supports ${formatSupportedExtensions(uploadAllowedExtensions.value)} (Max ${formatBytes(uploadMaxBytes.value)})`
+})
+
+const modelStageDrafts = computed<ModelStageDraft[]>(() => [
+  {
+    stage: 'summary',
+    label: 'Summary Model',
+    provider: draftSummaryProvider.value,
+    model: draftSummaryModel.value,
+    modelOptions: modelsForProvider(draftSummaryProvider.value),
+  },
+  {
+    stage: 'router',
+    label: 'Router Model',
+    provider: draftRouterProvider.value,
+    model: draftRouterModel.value,
+    modelOptions: modelsForProvider(draftRouterProvider.value),
+  },
+  {
+    stage: 'answer',
+    label: 'Chat Model',
+    provider: draftAnswerProvider.value,
+    model: draftAnswerModel.value,
+    modelOptions: modelsForProvider(draftAnswerProvider.value),
+  },
+])
+
+const schemaColumns = computed<FileSchemaColumn[]>(() => {
   const headerRow = preview.value?.offset === 0 ? preview.value.rows[0] ?? [] : []
   const sampleRow = preview.value?.rows.find((row, index) => index > 0 && row.some(Boolean)) ?? []
   return previewHeaders.value.map((label, index) => ({
@@ -452,6 +504,7 @@ onBeforeUnmount(() => {
   stopChatResize()
   stopExcelColumnResize()
   stopExcelRowResize()
+  abortWorkspaceReadRequests()
 })
 
 watch(
@@ -469,32 +522,44 @@ async function initializeWorkspace(): Promise<void> {
   if (!isAdmin.value && activeView.value === 'files') {
     setActiveView('chat')
   }
+  await loadWorkspaceConfig()
   await loadLlmModelOptions()
   await loadChatSessions()
   await refreshFiles()
+}
+
+async function loadWorkspaceConfig(): Promise<void> {
+  try {
+    const config = await getWorkspaceConfig()
+    uploadMaxBytes.value = config.upload.max_bytes
+    uploadAllowedExtensions.value = config.upload.supported_extensions.length > 0
+      ? config.upload.supported_extensions
+      : [...fallbackAllowedUploadExtensions]
+  } catch {
+    uploadMaxBytes.value = fallbackMaxUploadBytes
+    uploadAllowedExtensions.value = [...fallbackAllowedUploadExtensions]
+  }
 }
 
 async function restoreAuthentication(): Promise<void> {
   authErrorMessage.value = ''
   isAuthChecking.value = true
   try {
-    if (!getAuthToken()) {
-      currentUser.value = null
-      return
-    }
     currentUser.value = await getCurrentUser()
     await initializeWorkspace()
   } catch (error: unknown) {
     clearAuthToken()
     currentUser.value = null
-    authErrorMessage.value = toErrorMessage(error)
+    authErrorMessage.value = error instanceof ExcelWorkspaceApiError && error.statusCode === 401
+      ? ''
+      : toErrorMessage(error)
   } finally {
     isAuthChecking.value = false
   }
 }
 
 async function handleAuthenticated(response: AuthResponse): Promise<void> {
-  setAuthToken(response.access_token)
+  clearAuthToken()
   currentUser.value = response.user
   authErrorMessage.value = ''
   await resetWorkspaceState()
@@ -505,7 +570,7 @@ async function signOut(): Promise<void> {
   try {
     await logoutSession()
   } catch {
-    // Local token cleanup is still the source of truth for the browser session.
+    // Local state cleanup remains the fallback if the server session is already gone.
   }
   clearAuthToken()
   currentUser.value = null
@@ -526,6 +591,7 @@ async function resetWorkspaceState(): Promise<void> {
   selectedVersionId.value = ''
   selectedSheetId.value = ''
   selectedCell.value = null
+  clearUploadTask()
   clearSheetSearch()
   clearWorkspaceError()
   chatSessionError.value = ''
@@ -986,6 +1052,7 @@ async function selectFile(
   selectedFileId.value = file.file_id
   selectedVersionId.value = ''
   selectedSheetId.value = ''
+  abortWorkspaceReadRequests()
   preview.value = null
   rowLookup.value = null
   documentSummary.value = null
@@ -1022,6 +1089,7 @@ async function selectVersion(
   }
   selectedVersionId.value = versionId
   selectedSheetId.value = ''
+  abortWorkspaceReadRequests()
   preview.value = null
   rowLookup.value = null
   documentSummary.value = null
@@ -1050,6 +1118,11 @@ async function selectCurrentVersion(): Promise<void> {
   }
 }
 
+async function handlePreviewVersionChange(versionId: string): Promise<void> {
+  selectedVersionId.value = versionId
+  await selectCurrentVersion()
+}
+
 async function selectCurrentSheet(): Promise<void> {
   if (!ensureWorkspaceMutationAllowed()) {
     return
@@ -1058,6 +1131,19 @@ async function selectCurrentSheet(): Promise<void> {
   if (sheet) {
     await runWorkspaceAction((requestId) => selectSheet(sheet, requestId))
   }
+}
+
+async function handlePreviewSheetChange(sheetId: string): Promise<void> {
+  selectedSheetId.value = sheetId
+  await selectCurrentSheet()
+}
+
+function setSheetSearchTerm(term: string): void {
+  sheetSearchTerm.value = term
+}
+
+function selectInsightSheet(sheet: ExcelSheet): void {
+  void runWorkspaceAction((requestId) => selectSheet(sheet, requestId))
 }
 
 async function selectSheet(
@@ -1074,7 +1160,14 @@ async function selectSheet(
   if (!options.preserveSheetSearch) {
     clearSheetSearch()
   }
-  const nextPreview = await previewExcelSheet(sheet.sheet_id, 0, previewLimit)
+  previewAbortController = nextAbortController(previewAbortController)
+  const previewSignal = previewAbortController.signal
+  const nextPreview = await previewExcelSheet(
+    sheet.sheet_id,
+    0,
+    previewLimit,
+    { signal: previewSignal },
+  )
   if (!isCurrentWorkspaceSelection(requestId) || selectedSheetId.value !== sheet.sheet_id) {
     return
   }
@@ -1095,12 +1188,22 @@ async function loadPreviewPage(offset: number): Promise<void> {
     const safeOffset = Math.max(0, offset)
     rowLookup.value = null
     selectedCell.value = null
-    const nextPreview = await previewExcelSheet(sheetId, safeOffset, previewLimit)
+    previewAbortController = nextAbortController(previewAbortController)
+    const previewSignal = previewAbortController.signal
+    const nextPreview = await previewExcelSheet(
+      sheetId,
+      safeOffset,
+      previewLimit,
+      { signal: previewSignal },
+    )
     if (!isCurrentWorkspaceSelection(requestId) || selectedSheetId.value !== sheetId) {
       return
     }
     preview.value = nextPreview
   } catch (error: unknown) {
+    if (isAbortError(error)) {
+      return
+    }
     if (isCurrentWorkspaceSelection(requestId)) {
       showWorkspaceError(error)
     }
@@ -1126,8 +1229,15 @@ async function submitSheetSearch(): Promise<void> {
   const versionId = selectedVersionId.value
   sheetSearchError.value = ''
   isSheetSearchLoading.value = true
+  sheetSearchAbortController = nextAbortController(sheetSearchAbortController)
+  const searchSignal = sheetSearchAbortController.signal
   try {
-    const result = await searchExcelVersionRows(versionId, query, sheetSearchLimit)
+    const result = await searchExcelVersionRows(
+      versionId,
+      query,
+      sheetSearchLimit,
+      { signal: searchSignal },
+    )
     if (!isCurrentSheetSearch(requestId, selectionRequestId, versionId)) {
       return
     }
@@ -1139,6 +1249,9 @@ async function submitSheetSearch(): Promise<void> {
       await focusSheetSearchMatch(firstMatch)
     }
   } catch (error: unknown) {
+    if (isAbortError(error)) {
+      return
+    }
     if (isCurrentSheetSearch(requestId, selectionRequestId, versionId)) {
       sheetSearchError.value = toErrorMessage(error)
       sheetSearchResults.value = []
@@ -1172,6 +1285,8 @@ async function focusSheetSearchMatch(match: SheetSearchMatch): Promise<void> {
 
 function clearSheetSearch(): void {
   sheetSearchRequestId += 1
+  sheetSearchAbortController?.abort()
+  sheetSearchAbortController = null
   sheetSearchTerm.value = ''
   clearSheetSearchResults()
 }
@@ -1193,6 +1308,26 @@ function isCurrentSheetSearch(
     isCurrentWorkspaceSelection(selectionRequestId) &&
     selectedVersionId.value === versionId
   )
+}
+
+function nextAbortController(
+  currentController: AbortController | null,
+): AbortController {
+  currentController?.abort()
+  return new AbortController()
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof ExcelWorkspaceApiError && error.message === 'Request cancelled.'
+}
+
+function abortWorkspaceReadRequests(): void {
+  previewAbortController?.abort()
+  sheetSearchAbortController?.abort()
+  rowLookupAbortController?.abort()
+  previewAbortController = null
+  sheetSearchAbortController = null
+  rowLookupAbortController = null
 }
 
 async function generateSummaryForSelectedVersion(): Promise<void> {
@@ -1273,44 +1408,11 @@ async function saveDocumentSummary(
   }
 }
 
-function openUploadDialog(): void {
+function handleUploadFileSelected(file: File | null): void {
   if (!ensureWorkspaceMutationAllowed()) {
     return
   }
-  fileInput.value?.click()
-}
-
-function handleUploadFileChange(event: Event): void {
-  const input = event.target
-  if (!(input instanceof HTMLInputElement)) {
-    return
-  }
-  setUploadFile(input.files?.[0] ?? null)
-}
-
-function handleUploadDragEnter(): void {
-  if (!isWorkspaceBusy.value && !blocksWorkspaceMutation.value) {
-    isUploadDragging.value = true
-  }
-}
-
-function handleUploadDragLeave(event: DragEvent): void {
-  if (!(event.currentTarget instanceof HTMLElement)) {
-    isUploadDragging.value = false
-    return
-  }
-  const relatedTarget = event.relatedTarget
-  if (!(relatedTarget instanceof Node) || !event.currentTarget.contains(relatedTarget)) {
-    isUploadDragging.value = false
-  }
-}
-
-function handleUploadDrop(event: DragEvent): void {
-  isUploadDragging.value = false
-  if (isWorkspaceBusy.value || !ensureWorkspaceMutationAllowed()) {
-    return
-  }
-  setUploadFile(event.dataTransfer?.files?.[0] ?? null)
+  setUploadFile(file)
 }
 
 function setUploadFile(file: File | null): void {
@@ -1320,16 +1422,16 @@ function setUploadFile(file: File | null): void {
     selectedUploadFile.value = null
     return
   }
-  if (!isAllowedUploadFile(file)) {
+  if (!isAllowedUploadFile(file, uploadAllowedExtensions.value)) {
     selectedUploadFile.value = null
     showWorkspaceErrorMessage(
-      'Only Excel files are supported: .xls, .xlsx, .xlsm, .xltx, .xltm.',
+      `Only these Excel file types are supported: ${formatSupportedExtensions(uploadAllowedExtensions.value)}.`,
     )
     return
   }
-  if (file.size > maxUploadBytes) {
+  if (file.size > uploadMaxBytes.value) {
     selectedUploadFile.value = null
-    showWorkspaceErrorMessage('File is larger than 50MB.')
+    showWorkspaceErrorMessage(`File is larger than ${formatBytes(uploadMaxBytes.value)}.`)
     return
   }
   clearWorkspaceError()
@@ -1381,23 +1483,19 @@ function cancelDialog(): void {
   renameDialog.value = null
   confirmDialog.value = null
   uploadDialog.value = null
+  clearUploadTask()
   dialogError.value = ''
   renameDraft.value = ''
   selectedUploadFile.value = null
   pendingReplaceFile.value = null
-  if (fileInput.value) {
-    fileInput.value.value = ''
-  }
 }
 
 function cancelUploadDialog(): void {
   uploadDialog.value = null
+  clearUploadTask()
   dialogError.value = ''
   selectedUploadFile.value = null
   pendingReplaceFile.value = null
-  if (fileInput.value) {
-    fileInput.value.value = ''
-  }
 }
 
 async function confirmUploadDialog(): Promise<void> {
@@ -1511,30 +1609,38 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
   clearWorkspaceError()
   const requestId = nextWorkspaceSelectionRequestId()
   const busyRequestId = beginWorkspaceBusy()
+  let taskStarted = false
   try {
-    const result = await uploadExcelFile(file, replaceExisting)
-    pendingReplaceFile.value = null
-    selectedUploadFile.value = null
-    uploadDialog.value = null
+    const task = await createUploadTask(file, replaceExisting)
+    taskStarted = true
+    setUploadTask({
+      ...task,
+      original_filename: file.name,
+      replace_existing: replaceExisting,
+      error_message: null,
+      started_at: null,
+      finished_at: null,
+      result: null,
+    })
     dialogError.value = ''
-    if (fileInput.value) {
-      fileInput.value.value = ''
-    }
-    showOperationFeedback('success', `${result.file.display_name} uploaded and parsed.`)
-    const nextFiles = await listExcelFiles()
-    if (!isCurrentWorkspaceSelection(requestId)) {
-      return
-    }
-    files.value = nextFiles
-    const uploadedFile = files.value.find((item) => item.file_id === result.file.file_id)
-    if (uploadedFile) {
-      await selectFile(uploadedFile, requestId)
-    }
+    showOperationFeedback('info', `${file.name} upload queued for parsing.`)
+    finishWorkspaceBusy(busyRequestId)
+    void pollUploadTask(task.task_id, {
+      isCurrent: () => isCurrentWorkspaceSelection(requestId),
+      onReady: (readyTask) => finishUploadTask(readyTask, requestId),
+      onFailure: (message) => {
+        dialogError.value = message
+      },
+      onError: (error) => {
+        dialogError.value = toErrorMessage(error)
+      },
+    })
   } catch (error: unknown) {
     if (error instanceof ExcelWorkspaceApiError && error.requiresConfirmation) {
       pendingReplaceFile.value = file
       selectedUploadFile.value = null
       uploadDialog.value = { kind: 'replace', file }
+      clearUploadTask()
       dialogError.value = ''
       return
     }
@@ -1546,7 +1652,31 @@ async function uploadSelectedFile(replaceExisting = false): Promise<void> {
       }
     }
   } finally {
-    finishWorkspaceBusy(busyRequestId)
+    if (!taskStarted) {
+      finishWorkspaceBusy(busyRequestId)
+    }
+  }
+}
+
+async function finishUploadTask(task: UploadTaskResponse, requestId: number): Promise<void> {
+  const result = task.result
+  if (!result) {
+    return
+  }
+  pendingReplaceFile.value = null
+  selectedUploadFile.value = null
+  uploadDialog.value = null
+  clearUploadTask()
+  dialogError.value = ''
+  showOperationFeedback('success', `${result.file.display_name} uploaded and parsed.`)
+  const nextFiles = await listExcelFiles()
+  if (!isCurrentWorkspaceSelection(requestId)) {
+    return
+  }
+  files.value = nextFiles
+  const uploadedFile = files.value.find((item) => item.file_id === result.file.file_id)
+  if (uploadedFile) {
+    await selectFile(uploadedFile, requestId)
   }
 }
 
@@ -1563,12 +1693,14 @@ async function lookupRowInSheet(sheetId: string, rowId: string): Promise<void> {
   const selectionRequestId = workspaceSelectionRequestId
   clearWorkspaceError()
   isLookupLoading.value = true
+  rowLookupAbortController = nextAbortController(rowLookupAbortController)
+  const lookupSignal = rowLookupAbortController.signal
   try {
-    const result = await lookupExcelRow(sheetId, rowId)
+    const result = await lookupExcelRow(sheetId, rowId, { signal: lookupSignal })
     if (!isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
       return
     }
-    const nextPreview = await previewForLookupRow(result)
+    const nextPreview = await previewForLookupRow(result, lookupSignal)
     if (!isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
       return
     }
@@ -1585,6 +1717,9 @@ async function lookupRowInSheet(sheetId: string, rowId: string): Promise<void> {
       })
     }
   } catch (error: unknown) {
+    if (isAbortError(error)) {
+      return
+    }
     if (isCurrentRowLookup(requestId, selectionRequestId, sheetId)) {
       showWorkspaceError(error)
     }
@@ -1609,6 +1744,7 @@ function isCurrentRowLookup(
 
 async function previewForLookupRow(
   result: RowLookupResponse,
+  signal?: AbortSignal,
 ): Promise<SheetPreviewResponse | null> {
   const rowZeroIndex = Math.max(0, result.mapping.raw_csv_row_number - 1)
   const currentOffset = preview.value?.offset ?? 0
@@ -1616,7 +1752,12 @@ async function previewForLookupRow(
   const isCurrentSheetPreview = preview.value?.sheet.sheet_id === result.sheet.sheet_id
   if (!isCurrentSheetPreview || rowZeroIndex < currentOffset || rowZeroIndex >= currentEnd) {
     const centeredOffset = Math.max(0, rowZeroIndex - 24)
-    return previewExcelSheet(result.sheet.sheet_id, centeredOffset, previewLimit)
+    return previewExcelSheet(
+      result.sheet.sheet_id,
+      centeredOffset,
+      previewLimit,
+      { signal },
+    )
   }
   return null
 }
@@ -1963,6 +2104,28 @@ function handleModelDraftChange(): void {
   modelPreferenceFeedback.value = ''
 }
 
+function updateModelStageProvider(stage: ModelStage, provider: string): void {
+  if (stage === 'summary') {
+    draftSummaryProvider.value = provider
+  } else if (stage === 'router') {
+    draftRouterProvider.value = provider
+  } else {
+    draftAnswerProvider.value = provider
+  }
+  handleModelProviderChange(stage)
+}
+
+function updateModelStageModel(stage: ModelStage, model: string): void {
+  if (stage === 'summary') {
+    draftSummaryModel.value = model
+  } else if (stage === 'router') {
+    draftRouterModel.value = model
+  } else {
+    draftAnswerModel.value = model
+  }
+  handleModelDraftChange()
+}
+
 function resetModelPreferenceDraft(): void {
   draftSummaryProvider.value = summaryProvider.value
   draftSummaryModel.value = summaryModel.value
@@ -2134,582 +2297,123 @@ function isCompleteModelPreference(): boolean {
       >
         {{ operationFeedback.message }}
       </div>
+      <div
+        v-if="activeView === 'chat' && chatSessionFeedback"
+        class="floating-toast chat-session-toast"
+        :class="`tone-${chatSessionFeedback.tone}`"
+        role="status"
+      >
+        {{ chatSessionFeedback.message }}
+      </div>
 
       <section v-if="activeView === 'files'" class="file-page">
-        <input
-          ref="fileInput"
-          class="visually-hidden"
-          type="file"
-          accept=".xls,.xlsx,.xlsm,.xltx,.xltm"
-          @change="handleUploadFileChange"
-        />
-
         <div class="file-management-shell">
           <section class="file-sources-pane">
-        <section class="file-list-panel">
-          <div class="panel-heading">
-            <div>
-              <h3>File Sources</h3>
-            </div>
-            <span class="files-found-label">{{ filteredFiles.length }} Files Found</span>
-          </div>
+            <FileSourcePanel
+              :current-page="normalizedFilePage"
+              :disabled="isWorkspaceBusy || blocksWorkspaceMutation"
+              :files="paginatedFiles"
+              :open-menu-file-id="openFileActionMenuId"
+              :page-count="filePageCount"
+              :pagination-label="filePaginationLabel"
+              :pinned-file-ids="pinnedFileIds"
+              :search-term="fileSearchTerm"
+              :selected-file-id="selectedFileId"
+              :total-file-count="filteredFiles.length"
+              :upload-accept="uploadAcceptValue"
+              :upload-help-text="uploadHelpText"
+              :visible-pages="visibleFilePages"
+              @delete-file="requestDeleteFile"
+              @rename-file="renameFilePrompt"
+              @select-file="chooseFile"
+              @set-page="setFilePage"
+              @step-page="stepFilePage"
+              @toggle-menu="toggleFileActionMenu"
+              @toggle-pin="toggleFilePin"
+              @toggle-visibility="toggleFileVisibility"
+              @upload-selected="handleUploadFileSelected"
+            />
+          </section>
 
-          <button
-            type="button"
-            class="file-upload-zone"
-            :class="{ dragging: isUploadDragging }"
-            :disabled="isWorkspaceBusy || blocksWorkspaceMutation"
-            @click="openUploadDialog"
-            @dragenter.prevent="handleUploadDragEnter"
-            @dragover.prevent="handleUploadDragEnter"
-            @dragleave.prevent="handleUploadDragLeave"
-            @drop.prevent="handleUploadDrop"
+          <FileInsightPane
+            :active-tab="activeFileInsightTab"
+            :fullscreen="isFileInsightFullscreen"
+            :can-download-preview="Boolean(preview)"
+            @change-tab="setFileInsightTab"
+            @download-preview="exportPreviewCsv"
+            @toggle-fullscreen="toggleFileInsightFullscreen"
           >
-            <span class="file-upload-icon">
-              <AppIcon name="upload_file" />
-            </span>
-            <strong>Click or drag files to upload</strong>
-            <span>Supports Excel workbooks (Max 50MB)</span>
-          </button>
+            <template #summary>
+              <FileSummaryPanel
+                :model-stages="modelStageDrafts"
+                :providers="availableLlmProviders"
+                :model-preference-feedback="modelPreferenceFeedback"
+                :model-preference-feedback-kind="modelPreferenceFeedbackKind"
+                :can-save-model-preference="canSaveModelPreference"
+                :is-model-preference-saving="isModelPreferenceSaving"
+                :summary="documentSummary"
+                :is-summary-generating="isSummaryLoading"
+                :is-summary-saving="isSummarySaving"
+                :can-generate-summary="Boolean(selectedVersionId)"
+                @provider-change="updateModelStageProvider"
+                @model-change="updateModelStageModel"
+                @save-model-preference="saveModelPreferenceDefaults"
+                @generate-summary="generateSummaryForSelectedVersion"
+                @save-summary="saveDocumentSummary"
+              />
+            </template>
 
-          <div class="file-card-list">
-            <article
-              v-for="file in paginatedFiles"
-              :key="file.file_id"
-              role="button"
-              tabindex="0"
-              class="file-library-card"
-              :class="{
-                selected: file.file_id === selectedFileId,
-                pinned: isFilePinned(file.file_id),
-                'menu-open': openFileActionMenuId === file.file_id,
-              }"
-              :aria-disabled="blocksWorkspaceMutation ? 'true' : undefined"
-              @click="chooseFile(file)"
-              @keydown.enter.prevent="chooseFile(file)"
-              @keydown.space.prevent="chooseFile(file)"
-            >
-              <span class="file-badge large"><AppIcon :name="fileIcon(file)" /></span>
-              <span class="file-card-main">
-                <strong>{{ file.display_name }}</strong>
-                <span class="file-meta-line">
-                  {{ fileTypeLabel(file) }} - Modified {{ formatDate(file.updated_at) }}
-                </span>
-                <span
-                  v-if="!file.visible_to_members"
-                  class="file-visibility-chip"
-                  title="Hidden from workspace users"
-                >
-                  <AppIcon name="visibility_off" />
-                  Admin only
-                </span>
-              </span>
-              <span class="file-card-actions" @click.stop>
-                <button
-                  type="button"
-                  class="menu-trigger"
-                  :disabled="blocksWorkspaceMutation"
-                  :aria-expanded="openFileActionMenuId === file.file_id"
-                  aria-label="File actions"
-                  @click="toggleFileActionMenu(file.file_id)"
-              >
-                <AppIcon name="more_vert" />
-                </button>
-              </span>
-              <span
-                v-if="openFileActionMenuId === file.file_id"
-                class="item-action-menu file-card-menu"
-                @click.stop
-              >
-                <button type="button" @click="toggleFilePin(file)">
-                  <AppIcon name="push_pin" />
-                  {{ isFilePinned(file.file_id) ? 'Unpin' : 'Pin' }}
-                </button>
-                <button
-                  type="button"
-                  :disabled="blocksWorkspaceMutation"
-                  @click="renameFilePrompt(file)"
-                >
-                  <AppIcon name="edit" />
-                  Rename
-                </button>
-                <button
-                  type="button"
-                  :disabled="blocksWorkspaceMutation"
-                  @click="toggleFileVisibility(file)"
-                >
-                  <AppIcon :name="file.visible_to_members ? 'visibility_off' : 'visibility'" />
-                  {{ file.visible_to_members ? 'Hide from members' : 'Show to members' }}
-                </button>
-                <button
-                  type="button"
-                  class="danger-text"
-                  :disabled="blocksWorkspaceMutation"
-                  @click="requestDeleteFile(file)"
-                >
-                  <AppIcon name="close" />
-                  Delete
-                </button>
-              </span>
-            </article>
+            <template #preview>
+              <FilePreviewPanel
+                :versions="versions"
+                :selected-version-id="selectedVersionId"
+                :sheets="sheets"
+                :selected-sheet-id="selectedSheetId"
+                :selected-sheet="selectedSheet"
+                :disabled="blocksWorkspaceMutation"
+                :sheet-search-term="sheetSearchTerm"
+                :is-sheet-search-loading="isSheetSearchLoading"
+                :workbook-row-count="workbookRowCount"
+                :preview-range-label="previewRangeLabel"
+                :row-lookup="rowLookup"
+                :sheet-search-summary="sheetSearchSummary"
+                :sheet-search-results="sheetSearchResults"
+                :sheet-search-total="sheetSearchTotal"
+                :sheet-search-error="sheetSearchError"
+                :is-lookup-loading="isLookupLoading"
+                :preview="preview"
+                :preview-headers="previewHeaders"
+                :preview-limit="previewLimit"
+                :can-preview-previous="canPreviewPrevious"
+                :can-preview-next="canPreviewNext"
+                :row-is-highlighted="rowIsHighlighted"
+                :is-sheet-search-matched-cell="isSheetSearchMatchedCell"
+                @version-change="handlePreviewVersionChange"
+                @sheet-change="handlePreviewSheetChange"
+                @sheet-search-term-change="setSheetSearchTerm"
+                @submit-sheet-search="submitSheetSearch"
+                @select-search-match="focusSheetSearchMatch"
+                @lookup-row="lookupVisibleRow"
+                @load-preview-offset="loadPreviewPage"
+                @select-sheet="selectInsightSheet"
+              />
+            </template>
 
-            <div v-if="filteredFiles.length === 0" class="file-empty-panel">
-              {{
-                fileSearchTerm.trim()
-                  ? 'No matching workbooks.'
-                  : 'Upload a workbook to get started.'
-              }}
-            </div>
-          </div>
-
-          <div class="file-pagination">
-            <button
-              type="button"
-              class="pagination-link"
-              :disabled="normalizedFilePage <= 1"
-              @click="stepFilePage(-1)"
-            >
-              <AppIcon name="chevron_left" />
-              Previous
-            </button>
-            <div class="pagination-pages">
-              <button
-                v-for="pageNumber in visibleFilePages"
-                :key="pageNumber"
-                type="button"
-                :class="{ active: pageNumber === normalizedFilePage }"
-                :aria-current="pageNumber === normalizedFilePage ? 'page' : undefined"
-                @click="setFilePage(pageNumber)"
-              >
-                {{ pageNumber }}
-              </button>
-            </div>
-            <span class="pagination-range">{{ filePaginationLabel }}</span>
-            <button
-              type="button"
-              class="pagination-link"
-              :disabled="normalizedFilePage >= filePageCount"
-              @click="stepFilePage(1)"
-            >
-              Next
-              <AppIcon name="chevron_right" />
-            </button>
-          </div>
-        </section>
-
-          </section>
-
-          <section class="file-insight-pane" :class="{ fullscreen: isFileInsightFullscreen }">
-            <div class="file-insight-tabs">
-              <button
-                type="button"
-                :class="{ active: activeFileInsightTab === 'summary' }"
-                @click="setFileInsightTab('summary')"
-              >
-                Summary
-              </button>
-              <button
-                type="button"
-                :class="{ active: activeFileInsightTab === 'preview' }"
-                @click="setFileInsightTab('preview')"
-              >
-                Data Preview
-              </button>
-              <button
-                type="button"
-                :class="{ active: activeFileInsightTab === 'schema' }"
-                @click="setFileInsightTab('schema')"
-              >
-                Schema
-              </button>
-              <div class="file-insight-tools">
-                <button
-                  type="button"
-                  class="icon-only-button"
-                  aria-label="Download preview"
-                  :disabled="!preview"
-                  @click="exportPreviewCsv"
-                >
-                  <AppIcon name="download" />
-                </button>
-                <button
-                  type="button"
-                  class="icon-only-button"
-                  aria-label="Fullscreen"
-                  @click="toggleFileInsightFullscreen"
-                >
-                  <AppIcon :name="isFileInsightFullscreen ? 'fullscreen_exit' : 'fullscreen'" />
-                </button>
-              </div>
-            </div>
-            <div class="file-insight-scroll">
-              <section v-if="activeFileInsightTab === 'summary'" class="file-summary-stack">
-                <article v-if="availableLlmProviders.length > 0" class="model-config-card">
-                  <div class="config-heading">
-                    <div>
-                      <span class="config-icon"><AppIcon name="tune" /></span>
-                      <h3>Model Settings</h3>
-                    </div>
-                  </div>
-                  <div class="model-config-grid">
-                    <div class="model-setting-row">
-                      <span>Summary Model</span>
-                      <select
-                        v-model="draftSummaryProvider"
-                        @change="handleModelProviderChange('summary')"
-                      >
-                        <option
-                          v-for="provider in availableLlmProviders"
-                          :key="`summary-provider-${provider.provider}`"
-                          :value="provider.provider"
-                        >
-                          {{ provider.label }}
-                        </option>
-                      </select>
-                      <select v-model="draftSummaryModel" @change="handleModelDraftChange">
-                        <option
-                          v-for="model in modelsForProvider(draftSummaryProvider)"
-                          :key="`summary-model-${model}`"
-                          :value="model"
-                        >
-                          {{ model }}
-                        </option>
-                      </select>
-                    </div>
-                    <div class="model-setting-row">
-                      <span>Router Model</span>
-                      <select
-                        v-model="draftRouterProvider"
-                        @change="handleModelProviderChange('router')"
-                      >
-                        <option
-                          v-for="provider in availableLlmProviders"
-                          :key="`router-provider-${provider.provider}`"
-                          :value="provider.provider"
-                        >
-                          {{ provider.label }}
-                        </option>
-                      </select>
-                      <select v-model="draftRouterModel" @change="handleModelDraftChange">
-                        <option
-                          v-for="model in modelsForProvider(draftRouterProvider)"
-                          :key="`router-model-${model}`"
-                          :value="model"
-                        >
-                          {{ model }}
-                        </option>
-                      </select>
-                    </div>
-                    <div class="model-setting-row">
-                      <span>Chat Model</span>
-                      <select
-                        v-model="draftAnswerProvider"
-                        @change="handleModelProviderChange('answer')"
-                      >
-                        <option
-                          v-for="provider in availableLlmProviders"
-                          :key="`answer-provider-${provider.provider}`"
-                          :value="provider.provider"
-                        >
-                          {{ provider.label }}
-                        </option>
-                      </select>
-                      <select v-model="draftAnswerModel" @change="handleModelDraftChange">
-                        <option
-                          v-for="model in modelsForProvider(draftAnswerProvider)"
-                          :key="`answer-model-${model}`"
-                          :value="model"
-                        >
-                          {{ model }}
-                        </option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="model-config-actions">
-                    <p
-                      v-if="modelPreferenceFeedback"
-                      class="model-config-feedback"
-                      :class="modelPreferenceFeedbackKind"
-                    >
-                      {{ modelPreferenceFeedback }}
-                    </p>
-                    <button
-                      type="button"
-                      class="model-save-button"
-                      :disabled="!canSaveModelPreference || isModelPreferenceSaving"
-                      @click="saveModelPreferenceDefaults"
-                    >
-                      <AppIcon name="check" />
-                      <span>{{ isModelPreferenceSaving ? 'Saving' : 'Set Default' }}</span>
-                    </button>
-                  </div>
-                </article>
-
-                <DocumentSummaryCard
-                  :summary="documentSummary"
-                  :is-generating="isSummaryLoading"
-                  :is-saving="isSummarySaving"
-                  :can-generate="Boolean(selectedVersionId)"
-                  @generate="generateSummaryForSelectedVersion"
-                  @save="saveDocumentSummary"
-                />
-              </section>
-
-              <section v-else-if="activeFileInsightTab === 'preview'" class="file-preview-panel">
-                <div class="file-preview-controls">
-                  <label>
-                    <span>Version</span>
-                    <select
-                      v-model="selectedVersionId"
-                      :disabled="versions.length === 0 || blocksWorkspaceMutation"
-                      @change="selectCurrentVersion"
-                    >
-                      <option value="">Version</option>
-                      <option
-                        v-for="version in versions"
-                        :key="version.version_id"
-                        :value="version.version_id"
-                      >
-                        {{ version.status }} - {{ shortId(version.version_id) }}
-                      </option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Sheet</span>
-                    <select
-                      v-model="selectedSheetId"
-                      :disabled="sheets.length === 0 || blocksWorkspaceMutation"
-                      @change="selectCurrentSheet"
-                    >
-                      <option value="">Sheet</option>
-                      <option
-                        v-for="sheet in sheets"
-                        :key="sheet.sheet_id"
-                        :value="sheet.sheet_id"
-                      >
-                        {{ sheet.sheet_code }} {{ sheet.sheet_name }}
-                      </option>
-                    </select>
-                  </label>
-                  <form class="preview-search-control" @submit.prevent="submitSheetSearch">
-                    <span>Search data</span>
-                    <div class="inline-control">
-                      <input
-                        v-model="sheetSearchTerm"
-                        placeholder="Keyword"
-                        type="search"
-                        :disabled="!selectedVersionId || blocksWorkspaceMutation"
-                      />
-                      <button
-                        type="submit"
-                        aria-label="Search data"
-                        :disabled="
-                          isSheetSearchLoading || !selectedVersionId || blocksWorkspaceMutation
-                        "
-                      >
-                        <AppIcon name="search" />
-                      </button>
-                    </div>
-                  </form>
-                </div>
-
-                <div class="preview-metrics">
-                  <div>
-                    <span>Sheets</span>
-                    <strong>{{ sheets.length }}</strong>
-                  </div>
-                  <div>
-                    <span>Rows</span>
-                    <strong>{{ workbookRowCount }}</strong>
-                  </div>
-                  <div>
-                    <span>Visible</span>
-                    <strong>{{ previewRangeLabel }}</strong>
-                  </div>
-                  <div>
-                    <span>Highlighted</span>
-                    <strong>{{ rowLookup?.mapping.row_id ?? '-' }}</strong>
-                  </div>
-                </div>
-
-                <div
-                  v-if="rowLookup || sheetSearchSummary || sheetSearchResults.length > 0"
-                  class="preview-feedback-stack"
-                >
-                  <section v-if="rowLookup" class="evidence-strip compact">
-                    <div>
-                      <p class="eyebrow">Highlighted Evidence</p>
-                      <h3>{{ rowLookup.mapping.row_id }}</h3>
-                    </div>
-                    <p>
-                      {{ rowLookup.sheet.sheet_name }} / original row
-                      {{ rowLookup.mapping.original_row_number }}
-                    </p>
-                  </section>
-
-                  <SheetSearchResults
-                    v-if="sheetSearchSummary || sheetSearchResults.length > 0"
-                    variant="file-preview"
-                    :summary="sheetSearchSummary"
-                    :matches="sheetSearchResults"
-                    :total-matches="sheetSearchTotal"
-                    :active-row-id="rowLookup?.mapping.row_id ?? ''"
-                    :has-error="Boolean(sheetSearchError)"
-                    :disabled="isLookupLoading || blocksWorkspaceMutation"
-                    @select="focusSheetSearchMatch"
-                  />
-                </div>
-
-                <section class="spreadsheet-card preview-card">
-                  <div class="spreadsheet-header">
-                    <div>
-                      <strong>{{ selectedSheet?.sheet_name ?? 'Sheet preview' }}</strong>
-                      <span>{{ previewRangeLabel }}</span>
-                    </div>
-                    <div class="pagination-actions">
-                      <button
-                        type="button"
-                        class="secondary-button"
-                        :disabled="!canPreviewPrevious || blocksWorkspaceMutation"
-                        @click="loadPreviewPage((preview?.offset ?? 0) - previewLimit)"
-                      >
-                        Previous
-                      </button>
-                      <button
-                        type="button"
-                        class="secondary-button"
-                        :disabled="!canPreviewNext || blocksWorkspaceMutation"
-                        @click="loadPreviewPage((preview?.offset ?? 0) + previewLimit)"
-                      >
-                        Next
-                      </button>
-                    </div>
-                  </div>
-
-                  <div v-if="preview" class="excel-scroll">
-                    <table class="excel-table">
-                      <thead>
-                        <tr>
-                          <th v-for="header in previewHeaders" :key="header">{{ header }}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr
-                          v-for="(row, rowIndex) in preview.rows"
-                          :id="rowDomId(row[0])"
-                          :key="`${row[0]}-${preview.offset}-${rowIndex}`"
-                          :class="{
-                            highlighted: rowIsHighlighted(row),
-                            'header-like': preview.offset === 0 && rowIndex === 0,
-                          }"
-                          @click="lookupVisibleRow(row)"
-                        >
-                          <td
-                            v-for="(cell, cellIndex) in row"
-                            :key="`${row[0]}-${cellIndex}`"
-                            :class="{ 'search-match': isSheetSearchMatchedCell(row, cellIndex) }"
-                          >
-                            {{ cell || '-' }}
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                  <div v-else class="empty-state">
-                    Upload or select a workbook to preview its rows.
-                  </div>
-                </section>
-
-                <div class="sheet-tabs compact" aria-label="Workbook sheets">
-                  <button
-                    v-for="sheet in sheets"
-                    :key="sheet.sheet_id"
-                    type="button"
-                    :class="{ active: sheet.sheet_id === selectedSheetId }"
-                    :disabled="blocksWorkspaceMutation"
-                    @click="runWorkspaceAction((requestId) => selectSheet(sheet, requestId))"
-                  >
-                    {{ sheet.sheet_name }}
-                  </button>
-                </div>
-              </section>
-
-              <section v-else class="file-schema-panel">
-                <article class="schema-overview-card">
-                  <div class="schema-card-head">
-                    <div>
-                      <AppIcon name="schema" />
-                      <h3>{{ selectedFile?.display_name ?? 'No workbook selected' }}</h3>
-                    </div>
-                    <span>{{ selectedVersion?.status ?? 'No version' }}</span>
-                  </div>
-                  <div class="schema-metrics">
-                    <div>
-                      <span>Version</span>
-                      <strong>{{ shortId(selectedVersionId) }}</strong>
-                    </div>
-                    <div>
-                      <span>Sheets</span>
-                      <strong>{{ sheets.length }}</strong>
-                    </div>
-                    <div>
-                      <span>Rows</span>
-                      <strong>{{ workbookRowCount }}</strong>
-                    </div>
-                    <div>
-                      <span>Columns</span>
-                      <strong>{{ selectedSheet?.column_count ?? 0 }}</strong>
-                    </div>
-                  </div>
-                </article>
-
-                <article class="schema-sheet-card">
-                  <div class="schema-card-head">
-                    <div>
-                      <AppIcon name="view_week" />
-                      <h3>Workbook Sheets</h3>
-                    </div>
-                  </div>
-                  <div class="schema-sheet-list">
-                    <button
-                      v-for="sheet in sheets"
-                      :key="sheet.sheet_id"
-                      type="button"
-                      :class="{ active: sheet.sheet_id === selectedSheetId }"
-                      :disabled="blocksWorkspaceMutation"
-                      @click="runWorkspaceAction((requestId) => selectSheet(sheet, requestId))"
-                    >
-                      <strong>{{ sheet.sheet_code }} {{ sheet.sheet_name }}</strong>
-                      <span>{{ sheet.row_count }} rows / {{ sheet.column_count }} columns</span>
-                    </button>
-                    <div v-if="sheets.length === 0" class="file-empty-panel">
-                      No sheets available.
-                    </div>
-                  </div>
-                </article>
-
-                <article class="schema-column-card">
-                  <div class="schema-card-head">
-                    <div>
-                      <AppIcon name="table_rows" />
-                      <h3>{{ selectedSheet?.sheet_name ?? 'Columns' }}</h3>
-                    </div>
-                  </div>
-                  <div class="schema-column-list">
-                    <div v-for="column in schemaColumns" :key="column.key" class="schema-column-row">
-                      <strong>{{ column.label }}</strong>
-                      <span>{{ column.sourceName }}</span>
-                      <em>{{ column.type }}</em>
-                      <small>{{ column.sample }}</small>
-                    </div>
-                    <div v-if="schemaColumns.length === 0" class="file-empty-panel">
-                      Select a sheet to inspect columns.
-                    </div>
-                  </div>
-                </article>
-              </section>
-            </div>
-          </section>
+            <template #schema>
+              <FileSchemaPanel
+                :selected-file="selectedFile"
+                :selected-version="selectedVersion"
+                :selected-version-id="selectedVersionId"
+                :sheets="sheets"
+                :selected-sheet-id="selectedSheetId"
+                :selected-sheet="selectedSheet"
+                :workbook-row-count="workbookRowCount"
+                :schema-columns="schemaColumns"
+                :disabled="blocksWorkspaceMutation"
+                @select-sheet="selectInsightSheet"
+              />
+            </template>
+          </FileInsightPane>
         </div>
       </section>
 
@@ -2800,17 +2504,14 @@ function isCompleteModelPreference(): boolean {
             </article>
 
             <div v-if="chatSessions.length === 0" class="session-empty-state">
-              No chat sessions yet.
+              <span class="session-empty-icon">
+                <AppIcon name="chat_bubble" />
+              </span>
+              <strong>No chat sessions yet</strong>
+              <span>Start a new chat to keep your analysis history here.</span>
             </div>
           </div>
 
-          <p
-            v-if="chatSessionFeedback"
-            class="status-note session-feedback"
-            :class="`tone-${chatSessionFeedback.tone}`"
-          >
-            {{ chatSessionFeedback.message }}
-          </p>
           <p v-if="chatSessionError" class="error-note session-error tone-error">
             {{ chatSessionError }}
           </p>
@@ -3136,56 +2837,14 @@ function isCompleteModelPreference(): boolean {
       </div>
     </section>
 
-    <section
+    <WorkbookUploadDialog
       v-if="uploadDialog"
-      class="dialog-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="upload-dialog-title"
-      @keydown.esc="cancelUploadDialog"
-    >
-      <div class="app-dialog upload-confirm-dialog">
-        <div class="dialog-heading">
-          <div>
-            <p class="eyebrow">
-              {{ uploadDialog.kind === 'replace' ? 'Replacement' : 'Upload' }}
-            </p>
-            <h3 id="upload-dialog-title">
-              {{ uploadDialog.kind === 'replace' ? 'Confirm replacement' : 'Upload and parse' }}
-            </h3>
-          </div>
-          <button
-            type="button"
-            class="dialog-icon-button"
-            aria-label="Close"
-            @click="cancelUploadDialog"
-          >
-            <AppIcon name="close" />
-          </button>
-        </div>
-        <div class="upload-dialog-file">
-          <span class="file-badge large"><AppIcon name="table_chart" /></span>
-          <div>
-            <strong>{{ uploadDialog.file.name }}</strong>
-            <span>{{ uploadDialog.kind === 'replace' ? 'Create a new active version' : 'Parse workbook into searchable sheets' }}</span>
-          </div>
-        </div>
-        <p v-if="uploadDialog.kind === 'replace'" class="dialog-copy">
-          A file with this name already exists. Confirming will keep the workbook record and create a new active version.
-        </p>
-        <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
-        <div class="dialog-actions">
-          <button type="button" class="dialog-secondary" @click="cancelUploadDialog">Cancel</button>
-          <button
-            type="button"
-            class="dialog-primary"
-            :disabled="isWorkspaceBusy"
-            @click="confirmUploadDialog"
-          >
-            {{ isWorkspaceBusy ? 'Parsing...' : uploadDialog.kind === 'replace' ? 'Replace' : 'Upload' }}
-          </button>
-        </div>
-      </div>
-    </section>
+      :dialog="uploadDialog"
+      :error-message="dialogError"
+      :is-busy="isWorkspaceBusy || isUploadTaskPending"
+      :task="uploadTask"
+      @cancel="cancelUploadDialog"
+      @confirm="confirmUploadDialog"
+    />
   </main>
 </template>

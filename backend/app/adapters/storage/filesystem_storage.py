@@ -1,6 +1,8 @@
 import csv
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -18,7 +20,7 @@ class FilesystemExcelArtifactStorage:
         filename = Path(original_filename).name or "workbook"
         path = self._version_dir(file_id, version_id) / "original" / filename
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        self._write_bytes_atomic(path, content)
         return path
 
     def write_csv(
@@ -41,7 +43,8 @@ class FilesystemExcelArtifactStorage:
     ) -> Path:
         path = self._version_dir(file_id, version_id) / self._safe_relative_path(relative_name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        self._write_text_atomic(
+            path,
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -71,12 +74,73 @@ class FilesystemExcelArtifactStorage:
 
     def _write_csv(self, path: Path, rows: list[list[str]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8-sig", newline="") as csv_file:
+        with self._temporary_file(path, mode="w", encoding="utf-8-sig", newline="") as (
+            csv_file,
+            temporary_path,
+        ):
             writer = csv.writer(csv_file)
             writer.writerows(rows)
+            csv_file.flush()
+            os.fsync(csv_file.fileno())
+        self._replace_temporary_file(temporary_path, path)
+
+    def _write_bytes_atomic(self, path: Path, content: bytes) -> None:
+        with self._temporary_file(path, mode="wb") as (file, temporary_path):
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        self._replace_temporary_file(temporary_path, path)
+
+    def _write_text_atomic(self, path: Path, content: str, *, encoding: str) -> None:
+        with self._temporary_file(path, mode="w", encoding=encoding) as (
+            file,
+            temporary_path,
+        ):
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        self._replace_temporary_file(temporary_path, path)
+
+    def _replace_temporary_file(self, temporary_path: Path, path: Path) -> None:
+        try:
+            temporary_path.replace(path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
+    def _temporary_file(self, path: Path, **kwargs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.NamedTemporaryFile(
+            delete=False,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            **kwargs,
+        )
+        temporary_path = Path(temporary.name)
+        try:
+            return _AtomicFileContext(temporary, temporary_path)
+        except Exception:
+            temporary.close()
+            temporary_path.unlink(missing_ok=True)
+            raise
 
     def _safe_relative_path(self, relative_name: str) -> Path:
         path = Path(relative_name)
         if path.is_absolute() or ".." in path.parts:
             raise ValueError("relative artifact name must stay within the version directory")
         return path
+
+
+class _AtomicFileContext:
+    def __init__(self, file, temporary_path: Path) -> None:
+        self.file = file
+        self.temporary_path = temporary_path
+
+    def __enter__(self):
+        return self.file, self.temporary_path
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.file.close()
+        if exc_type is not None:
+            self.temporary_path.unlink(missing_ok=True)

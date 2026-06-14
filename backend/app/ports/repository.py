@@ -12,6 +12,7 @@ from app.domain.models import (
     ExcelFileVisibility,
     ExcelRowMapping,
     ExcelSheet,
+    ExcelUploadTask,
     ExcelVersionStatus,
     LlmPreference,
     PasswordResetToken,
@@ -103,6 +104,70 @@ class ExcelAssetRepository(Protocol):
         ...
 
     def list_row_mappings_for_sheet(self, sheet_id: str) -> list[ExcelRowMapping]:
+        ...
+
+    def list_row_mappings_for_sheet_page(
+        self,
+        sheet_id: str,
+        offset: int,
+        limit: int,
+    ) -> list[ExcelRowMapping]:
+        ...
+
+
+class ExcelUploadTaskRepository(Protocol):
+    def create_upload_task(self, task: ExcelUploadTask) -> None:
+        ...
+
+    def get_upload_task(self, task_id: str) -> ExcelUploadTask | None:
+        ...
+
+    def claim_next_upload_task(
+        self,
+        *,
+        worker_id: str,
+        started_at: str,
+    ) -> ExcelUploadTask | None:
+        ...
+
+    def complete_upload_task(
+        self,
+        *,
+        task_id: str,
+        result: dict[str, object],
+        finished_at: str,
+    ) -> ExcelUploadTask | None:
+        ...
+
+    def fail_upload_task(
+        self,
+        *,
+        task_id: str,
+        error_message: str,
+        finished_at: str,
+    ) -> ExcelUploadTask | None:
+        ...
+
+    def fail_stale_processing_upload_tasks(
+        self,
+        *,
+        cutoff_started_at: str,
+        failed_at: str,
+    ) -> int:
+        ...
+
+
+class ChatCancellationRepository(Protocol):
+    def record_chat_cancellation(
+        self,
+        *,
+        request_id: str,
+        cancelled_at: str,
+        expires_at: str,
+    ) -> None:
+        ...
+
+    def is_chat_request_cancelled(self, request_id: str, *, now_iso: str) -> bool:
         ...
 
 
@@ -224,6 +289,26 @@ class AuthRepository(Protocol):
         reset_token_id: str,
         used_at: str,
     ) -> None:
+        ...
+
+    def get_login_rate_limit_retry_after(
+        self,
+        email: str,
+        now: str,
+    ) -> int | None:
+        ...
+
+    def record_login_rate_limit_failure(
+        self,
+        email: str,
+        *,
+        now: str,
+        max_failed_attempts: int,
+        window_seconds: int,
+    ) -> int | None:
+        ...
+
+    def clear_login_rate_limit(self, email: str) -> None:
         ...
 
 

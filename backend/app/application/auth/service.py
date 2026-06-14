@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from app.application.auth.rate_limit import AuthenticationRateLimiter
 from app.core.auth import (
     expires_at_iso,
     hash_password,
@@ -12,6 +13,7 @@ from app.core.auth import (
 from app.core.errors import (
     AuthenticationError,
     PasswordResetTokenError,
+    RateLimitError,
     UserAlreadyExistsError,
 )
 from app.core.ids import new_id
@@ -51,6 +53,7 @@ class AuthService:
         password_reset_ttl_minutes: int,
         password_hash_iterations: int,
         expose_reset_token: bool = True,
+        login_rate_limiter: AuthenticationRateLimiter | None = None,
     ) -> None:
         self._repository = repository
         self._admin_email = normalize_email(admin_email)
@@ -59,6 +62,7 @@ class AuthService:
         self._password_reset_ttl_minutes = password_reset_ttl_minutes
         self._password_hash_iterations = password_hash_iterations
         self._expose_reset_token = expose_reset_token
+        self._login_rate_limiter = login_rate_limiter
 
     def initialize(self) -> None:
         self._repository.initialize()
@@ -102,14 +106,18 @@ class AuthService:
 
     def login(self, email: str, password: str) -> AuthResult:
         normalized_email = normalize_email(email)
+        self._raise_if_login_limited(normalized_email)
         user = self._repository.get_user_by_email(normalized_email)
         if user is None or not user.is_active:
+            self._record_login_failure(normalized_email)
             raise AuthenticationError("invalid email or password")
         if not verify_password(password, user.password_hash):
+            self._record_login_failure(normalized_email)
             raise AuthenticationError("invalid email or password")
         now = utc_now_iso()
         self._repository.record_user_login(user.user_id, now)
         refreshed_user = self._repository.get_user(user.user_id) or user
+        self._record_login_success(normalized_email)
         return self._create_auth_result(refreshed_user)
 
     def get_user_for_token(self, token: str) -> AuthenticatedUser:
@@ -202,6 +210,30 @@ class AuthService:
     def _validate_password(self, password: str) -> None:
         if len(password) < 8:
             raise AuthenticationError("password must be at least 8 characters")
+
+    def _raise_if_login_limited(self, email: str) -> None:
+        if self._login_rate_limiter is None:
+            return
+        retry_after = self._login_rate_limiter.retry_after_seconds(email)
+        if retry_after is not None:
+            raise RateLimitError(
+                "too many failed login attempts; try again later",
+                retry_after_seconds=retry_after,
+            )
+
+    def _record_login_failure(self, email: str) -> None:
+        if self._login_rate_limiter is None:
+            return
+        retry_after = self._login_rate_limiter.record_failure(email)
+        if retry_after is not None:
+            raise RateLimitError(
+                "too many failed login attempts; try again later",
+                retry_after_seconds=retry_after,
+            )
+
+    def _record_login_success(self, email: str) -> None:
+        if self._login_rate_limiter is not None:
+            self._login_rate_limiter.record_success(email)
 
     def _to_authenticated_user(self, user: UserAccount) -> AuthenticatedUser:
         return AuthenticatedUser(

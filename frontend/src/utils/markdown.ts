@@ -194,7 +194,7 @@ function renderInline(value: string): string {
   const codeTokens: string[] = []
   html = html.replace(/`([^`]+)`/g, (_match, code: string) => {
     const token = `\u0000CODE${codeTokens.length}\u0000`
-    codeTokens.push(`<code>${code}</code>`)
+    codeTokens.push(`<code>${escapeHtml(code)}</code>`)
     return token
   })
 

@@ -1,6 +1,8 @@
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Barrier, Thread
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +22,7 @@ from app.api.dependencies import (
     require_admin_user,
 )
 from app.application.chat.cancellation import (
+    ChatCancellationRegistry,
     ChatCancellationToken,
     ChatRequestCancelledError,
 )
@@ -55,7 +58,10 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     )
     excel_assets.initialize()
     llm_client = FakeLlmClient()
-    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences = WorkspaceLlmPreferenceService(
+        repository=repository,
+        settings=Settings(_env_file=None),
+    )
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
         llm_client=llm_client,
@@ -123,6 +129,110 @@ def test_summary_generation_and_chat_framework_flow(
     )
     assert answer["citations"][0]["row_id"] == "S001_R1"
     assert answer["citations"][0]["row"][1:] == ["Code", "Date"]
+
+
+def test_complete_user_workflow_with_fake_data_and_concurrent_reads(
+    tmp_path: Path,
+) -> None:
+    with _client_with_llm(tmp_path, FakeLlmClient()) as client:
+        workbook_path = tmp_path / "workflow.xlsx"
+        _write_workflow_xlsx_fixture(workbook_path)
+
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "workflow.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        assert upload_response.status_code == 200
+        upload_payload = upload_response.json()
+        file_id = upload_payload["file"]["file_id"]
+        version_id = upload_payload["version"]["version_id"]
+        first_sheet_id = upload_payload["sheets"][0]["sheet_id"]
+
+        files_response = client.get("/api/excel/files")
+        assert files_response.status_code == 200
+        assert files_response.json()["files"][0]["file_id"] == file_id
+
+        versions_response = client.get(f"/api/excel/files/{file_id}/versions")
+        sheets_response = client.get(f"/api/excel/versions/{version_id}/sheets")
+        preview_response = client.get(f"/api/excel/sheets/{first_sheet_id}/preview?limit=5")
+        search_response = client.get(
+            f"/api/excel/versions/{version_id}/search?query=Apex&limit=10"
+        )
+        assert versions_response.status_code == 200
+        assert sheets_response.status_code == 200
+        assert preview_response.status_code == 200
+        assert preview_response.json()["rows"][1][1:] == ["Apex", "High", "North"]
+        assert search_response.status_code == 200
+        assert search_response.json()["total_matches"] == 1
+
+        row_id = search_response.json()["matches"][0]["mapping"]["row_id"]
+        lookup_response = client.get(f"/api/excel/sheets/{first_sheet_id}/rows/{row_id}")
+        assert lookup_response.status_code == 200
+        assert lookup_response.json()["row"][1:] == ["Apex", "High", "North"]
+
+        summary_response = client.post(f"/api/excel/versions/{version_id}/summary/generate")
+        assert summary_response.status_code == 200
+        update_summary_response = client.patch(
+            f"/api/excel/versions/{version_id}/summary",
+            json={
+                "document_title": "Workflow workbook",
+                "summary_text": "Small workflow workbook for smoke testing.",
+                "business_domain": "quality operations",
+                "key_topics": ["Apex", "North"],
+            },
+        )
+        assert update_summary_response.status_code == 200
+        assert update_summary_response.json()["document_title"] == "Workflow workbook"
+
+        session_response = client.post("/api/excel/chat/sessions")
+        assert session_response.status_code == 200
+        session_id = session_response.json()["session_id"]
+
+        rename_response = client.patch(
+            f"/api/excel/chat/sessions/{session_id}",
+            json={"title": "Apex review"},
+        )
+        pin_response = client.patch(
+            f"/api/excel/chat/sessions/{session_id}/pin",
+            json={"pinned": True},
+        )
+        chat_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/messages",
+            json={"question": "What does Apex show?"},
+        )
+        assert rename_response.status_code == 200
+        assert rename_response.json()["title"] == "Apex review"
+        assert pin_response.status_code == 200
+        assert pin_response.json()["pinned_at"] is not None
+        assert chat_response.status_code == 200
+        assert chat_response.json()["citations"]
+
+        def fetch_preview_and_search(index: int) -> tuple[int, int]:
+            preview = client.get(
+                f"/api/excel/sheets/{first_sheet_id}/preview?offset={index % 2}&limit=2"
+            )
+            search = client.get(
+                f"/api/excel/versions/{version_id}/search?query=North&limit=5"
+            )
+            return preview.status_code, search.status_code
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            statuses = list(executor.map(fetch_preview_and_search, range(12)))
+        assert statuses == [(200, 200)] * 12
+
+        hide_response = client.patch(
+            f"/api/excel/files/{file_id}/visibility",
+            json={"visible_to_members": False},
+        )
+        assert hide_response.status_code == 200
+        assert hide_response.json()["visible_to_members"] is False
 
 
 def test_llm_request_error_returns_user_safe_api_error(tmp_path: Path) -> None:
@@ -286,6 +396,66 @@ def test_chat_session_sends_all_rows_and_deduplicates_attached_file(
         assert persisted_turns[0]["answer"]["citations"][0]["row"] == (
             first_answer["citations"][0]["row"]
         )
+
+
+def test_parallel_questions_for_same_session_are_serialized(
+    tmp_path: Path,
+) -> None:
+    barrier = Barrier(2)
+    llm_client = BlockingCapturingLlmClient(barrier)
+    with _client_with_llm(tmp_path, llm_client) as client:
+        workbook_path = tmp_path / "standards.xlsx"
+        _write_large_xlsx_fixture(workbook_path, rows=3)
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "standards.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        assert upload_response.status_code == 200
+        version_id = upload_response.json()["version"]["version_id"]
+        assert client.post(f"/api/excel/versions/{version_id}/summary/generate").status_code == 200
+        session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+
+        responses: dict[str, int] = {}
+
+        def ask(question: str) -> None:
+            response = client.post(
+                f"/api/excel/chat/sessions/{session_id}/messages",
+                json={"question": question},
+            )
+            responses[question] = response.status_code
+
+        first_thread = Thread(target=ask, args=("First concurrent question?",))
+        second_thread = Thread(target=ask, args=("Second concurrent question?",))
+        first_thread.start()
+        barrier.wait(timeout=3)
+        second_thread.start()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+
+        assert responses == {
+            "First concurrent question?": 200,
+            "Second concurrent question?": 200,
+        }
+        assert [call["question"] for call in llm_client.route_calls] == [
+            "First concurrent question?",
+            "Second concurrent question?",
+        ]
+        assert llm_client.route_calls[1]["user_questions"] == [
+            "First concurrent question?",
+            "Second concurrent question?",
+        ]
+        turns = client.get(f"/api/excel/chat/sessions/{session_id}/turns").json()["turns"]
+        assert [turn["question"] for turn in turns] == [
+            "First concurrent question?",
+            "Second concurrent question?",
+        ]
 
 
 def test_file_referenced_by_chat_attachment_can_be_deleted_without_breaking_chat(
@@ -666,7 +836,10 @@ def test_chat_turn_uses_model_preference_snapshot_when_defaults_change_mid_turn(
         workbook_reader=OpenpyxlWorkbookReader(),
     )
     excel_assets.initialize()
-    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences = WorkspaceLlmPreferenceService(
+        repository=repository,
+        settings=Settings(_env_file=None),
+    )
     llm_preferences.save_preference(
         summary_provider="initial-summary-provider",
         summary_model="initial-summary-model",
@@ -713,7 +886,10 @@ def test_cancelled_chat_turn_is_not_persisted_or_used_as_context(
         workbook_reader=OpenpyxlWorkbookReader(),
     )
     excel_assets.initialize()
-    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences = WorkspaceLlmPreferenceService(
+        repository=repository,
+        settings=Settings(_env_file=None),
+    )
     cancellation = ChatCancellationToken(request_id="chat-cancel-test")
     llm_client = CancellingAfterRouteLlmClient(cancellation)
     summaries = DocumentSummaryService(
@@ -759,6 +935,21 @@ def test_cancelled_chat_turn_is_not_persisted_or_used_as_context(
     assert llm_client.answer_calls[-1]["previous_turns"] == []
 
 
+def test_chat_cancellation_is_shared_across_registries(tmp_path: Path) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    repository.initialize()
+    cancelling_registry = ChatCancellationRegistry(repository=repository)
+    answering_registry = ChatCancellationRegistry(repository=repository)
+
+    cancelled_immediately = cancelling_registry.cancel("chat-shared-cancel")
+    token = answering_registry.register("chat-shared-cancel")
+
+    assert cancelled_immediately is True
+    assert token is not None
+    with pytest.raises(ChatRequestCancelledError):
+        token.raise_if_cancelled()
+
+
 def test_hidden_file_is_not_routed_or_used_for_member_chat(
     tmp_path: Path,
 ) -> None:
@@ -769,7 +960,10 @@ def test_hidden_file_is_not_routed_or_used_for_member_chat(
         workbook_reader=OpenpyxlWorkbookReader(),
     )
     excel_assets.initialize()
-    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences = WorkspaceLlmPreferenceService(
+        repository=repository,
+        settings=Settings(_env_file=None),
+    )
     llm_client = CapturingLlmClient()
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
@@ -820,7 +1014,10 @@ def test_member_chat_revalidates_visibility_after_model_answer(
         workbook_reader=OpenpyxlWorkbookReader(),
     )
     excel_assets.initialize()
-    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences = WorkspaceLlmPreferenceService(
+        repository=repository,
+        settings=Settings(_env_file=None),
+    )
     llm_client = VisibilityHidingLlmClient(excel_assets)
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
@@ -1024,6 +1221,19 @@ def _write_xlsx_fixture(path: Path) -> None:
     workbook.save(path)
 
 
+def _write_workflow_xlsx_fixture(path: Path) -> None:
+    workbook = Workbook()
+    suppliers = workbook.active
+    suppliers.title = "Suppliers"
+    suppliers.append(["Supplier", "Risk", "Region"])
+    suppliers.append(["Apex", "High", "North"])
+    suppliers.append(["Beacon", "Low", "South"])
+    orders = workbook.create_sheet("Orders")
+    orders.append(["Order", "Owner"])
+    orders.append(["PO-100", "Liu"])
+    workbook.save(path)
+
+
 def _write_large_xlsx_fixture(path: Path, rows: int) -> None:
     workbook = Workbook()
     worksheet = workbook.active
@@ -1145,6 +1355,19 @@ class CapturingLlmClient(FakeLlmClient):
         )
 
 
+class BlockingCapturingLlmClient(CapturingLlmClient):
+    def __init__(self, first_route_started: Barrier) -> None:
+        super().__init__()
+        self._first_route_started = first_route_started
+        self._route_count = 0
+
+    def route_documents(self, *args, **kwargs) -> list[SelectedDocument]:
+        self._route_count += 1
+        if self._route_count == 1:
+            self._first_route_started.wait(timeout=3)
+        return super().route_documents(*args, **kwargs)
+
+
 class PreferenceMutatingLlmClient(CapturingLlmClient):
     def __init__(self, preferences: WorkspaceLlmPreferenceService) -> None:
         super().__init__()
@@ -1228,7 +1451,10 @@ def _client_with_llm(
         workbook_reader=OpenpyxlWorkbookReader(),
     )
     excel_assets.initialize()
-    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences = WorkspaceLlmPreferenceService(
+        repository=repository,
+        settings=Settings(_env_file=None),
+    )
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
         llm_client=llm_client,
@@ -1257,7 +1483,7 @@ def _client_with_llm(
 
 class _StaticLlmPreferences:
     def get_preference(self) -> LlmPreference:
-        settings = Settings()
+        settings = Settings(_env_file=None)
         return LlmPreference(
             scope="workspace",
             summary_provider=settings.llm_summary_provider,

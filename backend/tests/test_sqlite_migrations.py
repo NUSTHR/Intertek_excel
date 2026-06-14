@@ -1,4 +1,5 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from app.adapters.repositories import sqlite_repository
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.core.config import Settings
+from app.domain.models import ExcelUploadTask, ExcelUploadTaskStatus
 
 
 def test_repository_initialization_records_schema_migration(tmp_path: Path) -> None:
@@ -25,7 +27,7 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
             """
         ).fetchall()
 
-    assert [int(row["version"]) for row in rows] == list(range(1, 10))
+    assert [int(row["version"]) for row in rows] == list(range(1, 13))
     assert [row["name"] for row in rows] == [
         "initial_excel_workspace_schema",
         "add_chat_session_metadata",
@@ -36,6 +38,9 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
         "remove_chat_turn_performance_timings",
         "soft_delete_excel_files",
         "add_excel_file_visibility",
+        "add_row_mapping_raw_order_index",
+        "add_upload_tasks_and_shared_chat_cancellations",
+        "add_shared_auth_login_attempts",
     ]
     assert all(row["checksum"] for row in rows)
 
@@ -47,6 +52,7 @@ def test_repository_configures_connections_for_long_running_use(tmp_path: Path) 
     repository.initialize()
 
     with repository._connect() as connection:
+        isolation_level = connection.isolation_level
         busy_timeout_ms = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
         foreign_keys_enabled = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
         journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
@@ -54,10 +60,72 @@ def test_repository_configures_connections_for_long_running_use(tmp_path: Path) 
             connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
         )
 
+    assert isolation_level == "IMMEDIATE"
     assert busy_timeout_ms == sqlite_repository.SQLITE_BUSY_TIMEOUT_MS
     assert foreign_keys_enabled == 1
     assert journal_mode.lower() == "wal"
     assert wal_autocheckpoint == sqlite_repository.SQLITE_WAL_AUTOCHECKPOINT_PAGES
+
+
+def test_repository_concurrent_upload_task_claims_are_unique(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    repository.initialize()
+
+    created_at = "2026-06-14T00:00:00+00:00"
+    for index in range(8):
+        repository.create_upload_task(
+            ExcelUploadTask(
+                task_id=f"task_{index}",
+                user_id="user_admin",
+                original_filename=f"workbook_{index}.xlsx",
+                staging_path=f"staging/{index}.xlsx",
+                replace_existing=False,
+                status=ExcelUploadTaskStatus.QUEUED,
+                error_message=None,
+                result={},
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+
+    def claim(worker_index: int) -> str | None:
+        task = repository.claim_next_upload_task(
+            worker_id=f"worker_{worker_index}",
+            started_at=f"2026-06-14T00:00:{worker_index:02d}+00:00",
+        )
+        return task.task_id if task is not None else None
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        claimed_task_ids = [
+            task_id
+            for task_id in executor.map(claim, range(8))
+            if task_id is not None
+        ]
+
+    assert len(claimed_task_ids) == 8
+    assert len(set(claimed_task_ids)) == 8
+    assert repository.claim_next_upload_task(
+        worker_id="worker_extra",
+        started_at="2026-06-14T00:01:00+00:00",
+    ) is None
+
+
+def test_repository_creates_raw_row_mapping_pagination_index(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+
+    repository.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list('excel_row_mappings')"
+            ).fetchall()
+        }
+
+    assert "idx_mappings_sheet_raw_csv_row" in indexes
 
 
 def test_repository_throttles_periodic_sqlite_maintenance(tmp_path: Path) -> None:
@@ -214,7 +282,12 @@ def test_repository_operational_maintenance_removes_expired_runtime_records(
             )
         }
 
-    assert deleted == {"auth_sessions": 2, "password_reset_tokens": 2}
+    assert deleted == {
+        "auth_sessions": 2,
+        "password_reset_tokens": 2,
+        "chat_request_cancellations": 0,
+        "auth_login_attempts": 0,
+    }
     assert auth_session_ids == {"auth_active", "auth_recent_expired"}
     assert reset_token_ids == {"reset_active", "reset_recent_expired"}
 
@@ -272,3 +345,25 @@ def test_removed_legacy_chat_rows_setting_is_ignored() -> None:
     settings = Settings(_env_file=None, llm_chat_rows_per_sheet=999)
 
     assert not hasattr(settings, "llm_chat_rows_per_sheet")
+
+
+def test_production_settings_reject_unsafe_defaults() -> None:
+    settings = Settings(_env_file=None, app_env="production")
+
+    with pytest.raises(RuntimeError, match="unsafe production configuration"):
+        settings.validate_runtime_safety()
+
+
+def test_production_settings_accept_explicit_safe_runtime_values() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        app_cors_origins="https://excel.example.com",
+        auth_admin_password="safe-admin-password",
+        auth_expose_reset_token=False,
+        auth_cookie_secure=True,
+        llm_api_key="siliconflow-key",
+        deepseek_api_key="deepseek-key",
+    )
+
+    settings.validate_runtime_safety()

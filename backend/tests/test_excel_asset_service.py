@@ -42,6 +42,22 @@ class FakeWorkbookReader:
         )
 
 
+class LargeWorkbookReader:
+    def read(self, _path: Path) -> WorkbookData:
+        return WorkbookData(
+            sheets=[
+                WorkbookSheet(
+                    sheet_index=1,
+                    sheet_name="Large",
+                    rows=[
+                        ["Index", "Value"],
+                        *[[str(index), f"value-{index}"] for index in range(1, 1201)],
+                    ],
+                )
+            ]
+        )
+
+
 @pytest.fixture
 def service(tmp_path: Path) -> ExcelAssetService:
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
@@ -49,6 +65,18 @@ def service(tmp_path: Path) -> ExcelAssetService:
         repository=repository,
         storage=FilesystemExcelArtifactStorage(tmp_path / "storage"),
         workbook_reader=FakeWorkbookReader(),
+    )
+    service.initialize()
+    return service
+
+
+@pytest.fixture
+def large_service(tmp_path: Path) -> ExcelAssetService:
+    repository = SQLiteExcelAssetRepository(tmp_path / "large.sqlite3")
+    service = ExcelAssetService(
+        repository=repository,
+        storage=FilesystemExcelArtifactStorage(tmp_path / "storage"),
+        workbook_reader=LargeWorkbookReader(),
     )
     service.initialize()
     return service
@@ -134,6 +162,33 @@ def test_failed_replacement_does_not_change_active_version(
     ]
 
 
+def test_atomic_artifact_write_cleans_temporary_file_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = FilesystemExcelArtifactStorage(tmp_path / "storage")
+
+    def fail_fsync(_file_descriptor: int) -> None:
+        raise OSError("disk sync failed")
+
+    monkeypatch.setattr(
+        "app.adapters.storage.filesystem_storage.os.fsync",
+        fail_fsync,
+    )
+
+    with pytest.raises(OSError, match="disk sync failed"):
+        storage.save_original(
+            file_id="file_1",
+            version_id="version_1",
+            original_filename="risk.xlsx",
+            content=b"workbook",
+        )
+
+    original_dir = tmp_path / "storage" / "files" / "file_1" / "version_1" / "original"
+    assert not (original_dir / "risk.xlsx").exists()
+    assert list(original_dir.glob("*.tmp")) == []
+
+
 def test_profile_artifacts_active_version_and_paginated_rows(
     service: ExcelAssetService,
 ) -> None:
@@ -160,6 +215,27 @@ def test_profile_artifacts_active_version_and_paginated_rows(
     assert rows.total_rows == 3
     assert rows.mappings[0].row_id == "S001_R2"
     assert rows.rows[0] == ["S001_R2", "Apex", "High"]
+
+
+def test_large_sheet_preview_and_rows_keep_pagination_contract(
+    large_service: ExcelAssetService,
+) -> None:
+    result = large_service.upload_workbook("large.xlsx", b"large workbook")
+    sheet_id = result.sheets[0].sheet_id
+
+    preview = large_service.preview_sheet(sheet_id, offset=1000, limit=2)
+    rows = large_service.list_sheet_rows(sheet_id, offset=1000, limit=2)
+    lookup = large_service.lookup_row(sheet_id, "S001_R1001")
+
+    assert preview.total_rows == 1201
+    assert preview.rows == [
+        ["S001_R1001", "1000", "value-1000"],
+        ["S001_R1002", "1001", "value-1001"],
+    ]
+    assert rows.total_rows == 1201
+    assert [mapping.row_id for mapping in rows.mappings] == ["S001_R1001", "S001_R1002"]
+    assert rows.rows == preview.rows
+    assert lookup.row == ["S001_R1001", "1000", "value-1000"]
 
 
 def test_search_sheet_rows_returns_bounded_matches_with_columns(

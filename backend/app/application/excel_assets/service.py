@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 from app.application.excel_assets.access import FileAccessContext
@@ -93,7 +94,14 @@ class ExcelAssetService:
             updated_at=now,
         )
         if existing_file is None:
-            self._repository.create_file(file)
+            try:
+                self._repository.create_file(file)
+            except sqlite3.IntegrityError as exc:
+                conflict = self._repository.find_file_by_display_name(display_name)
+                raise FileNameConflictError(
+                    display_name=display_name,
+                    file_id=conflict.file_id if conflict is not None else file.file_id,
+                ) from exc
 
         file_hash = self._sha256(content)
         version = ExcelFileVersion(
@@ -156,11 +164,18 @@ class ExcelAssetService:
                 file_id=existing_file.file_id,
             )
 
-        updated_file = self._repository.update_file_display_name(
-            file_id=file.file_id,
-            display_name=normalized_name,
-            updated_at=utc_now_iso(),
-        )
+        try:
+            updated_file = self._repository.update_file_display_name(
+                file_id=file.file_id,
+                display_name=normalized_name,
+                updated_at=utc_now_iso(),
+            )
+        except sqlite3.IntegrityError as exc:
+            conflict = self._repository.find_file_by_display_name(normalized_name)
+            raise FileNameConflictError(
+                display_name=normalized_name,
+                file_id=conflict.file_id if conflict is not None else file.file_id,
+            ) from exc
         if updated_file is None:
             raise AssetNotFoundError("Excel file was not found")
         return updated_file
@@ -323,13 +338,12 @@ class ExcelAssetService:
         access: FileAccessContext | None = None,
     ) -> SheetPreviewResult:
         sheet = self._require_sheet(sheet_id, access=access)
-        rows = self._read_csv_rows(Path(sheet.raw_csv_path))
         safe_offset = max(0, offset)
         safe_limit = max(1, min(5000, limit))
         return SheetPreviewResult(
             sheet=sheet,
-            rows=rows[safe_offset : safe_offset + safe_limit],
-            total_rows=len(rows),
+            rows=self._read_csv_rows_page(Path(sheet.raw_csv_path), safe_offset, safe_limit),
+            total_rows=sheet.row_count,
             offset=safe_offset,
             limit=safe_limit,
         )
@@ -342,15 +356,17 @@ class ExcelAssetService:
         access: FileAccessContext | None = None,
     ) -> SheetRowsResult:
         sheet = self._require_sheet(sheet_id, access=access)
-        rows = self._read_csv_rows(Path(sheet.raw_csv_path))
-        mappings = self._repository.list_row_mappings_for_sheet(sheet_id)
         safe_offset = max(0, offset)
         safe_limit = max(1, min(5000, limit))
         return SheetRowsResult(
             sheet=sheet,
-            mappings=mappings[safe_offset : safe_offset + safe_limit],
-            rows=rows[safe_offset : safe_offset + safe_limit],
-            total_rows=len(rows),
+            mappings=self._repository.list_row_mappings_for_sheet_page(
+                sheet_id,
+                safe_offset,
+                safe_limit,
+            ),
+            rows=self._read_csv_rows_page(Path(sheet.raw_csv_path), safe_offset, safe_limit),
+            total_rows=sheet.row_count,
             offset=safe_offset,
             limit=safe_limit,
         )
@@ -362,15 +378,17 @@ class ExcelAssetService:
         limit: int = 500,
     ) -> SheetRowsResult:
         sheet = self._require_sheet_from_deleted_file(sheet_id)
-        rows = self._read_csv_rows(Path(sheet.raw_csv_path))
-        mappings = self._repository.list_row_mappings_for_sheet(sheet_id)
         safe_offset = max(0, offset)
         safe_limit = max(1, min(5000, limit))
         return SheetRowsResult(
             sheet=sheet,
-            mappings=mappings[safe_offset : safe_offset + safe_limit],
-            rows=rows[safe_offset : safe_offset + safe_limit],
-            total_rows=len(rows),
+            mappings=self._repository.list_row_mappings_for_sheet_page(
+                sheet_id,
+                safe_offset,
+                safe_limit,
+            ),
+            rows=self._read_csv_rows_page(Path(sheet.raw_csv_path), safe_offset, safe_limit),
+            total_rows=sheet.row_count,
             offset=safe_offset,
             limit=safe_limit,
         )
@@ -445,11 +463,11 @@ class ExcelAssetService:
         mapping = self._repository.get_row_mapping(sheet_id=sheet_id, row_id=row_id)
         if mapping is None:
             raise AssetNotFoundError("row mapping was not found")
-        rows = self._read_csv_rows(Path(sheet.raw_csv_path))
         row_index = mapping.raw_csv_row_number - 1
-        if row_index < 0 or row_index >= len(rows):
+        row = self._read_csv_row(Path(sheet.raw_csv_path), row_index)
+        if row is None:
             raise AssetNotFoundError("mapped CSV row was not found")
-        return RowLookupResult(sheet=sheet, mapping=mapping, row=rows[row_index])
+        return RowLookupResult(sheet=sheet, mapping=mapping, row=row)
 
     def _process_version(
         self,
@@ -634,6 +652,30 @@ class ExcelAssetService:
         with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
             return [row for row in csv.reader(csv_file)]
 
+    def _read_csv_rows_page(self, path: Path, offset: int, limit: int) -> list[list[str]]:
+        safe_offset = max(0, offset)
+        safe_limit = max(1, limit)
+        rows: list[list[str]] = []
+        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.reader(csv_file)
+            for index, row in enumerate(reader):
+                if index < safe_offset:
+                    continue
+                if len(rows) >= safe_limit:
+                    break
+                rows.append(row)
+        return rows
+
+    def _read_csv_row(self, path: Path, row_index: int) -> list[str] | None:
+        if row_index < 0:
+            return None
+        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.reader(csv_file)
+            for index, row in enumerate(reader):
+                if index == row_index:
+                    return row
+        return None
+
     def _search_sheet(
         self,
         sheet: ExcelSheet,
@@ -641,16 +683,14 @@ class ExcelAssetService:
         limit: int,
     ) -> SheetSearchResult:
         safe_limit = self._search_policy.normalize_limit(limit)
-        rows = self._read_csv_rows(Path(sheet.raw_csv_path))
         mappings = self._repository.list_row_mappings_for_sheet(sheet.sheet_id)
         matches: list[SheetSearchMatch] = []
         total_matches = 0
 
-        for mapping in mappings:
-            row_index = mapping.raw_csv_row_number - 1
-            if row_index < 0 or row_index >= len(rows):
-                continue
-            row = rows[row_index]
+        for mapping, row in self._iter_csv_rows_for_mappings(
+            Path(sheet.raw_csv_path),
+            mappings,
+        ):
             matched_columns = self._search_policy.matched_column_indexes(row, query)
             if not matched_columns:
                 continue
@@ -672,6 +712,39 @@ class ExcelAssetService:
             total_matches=total_matches,
             limit=safe_limit,
         )
+
+    def _iter_csv_rows_for_mappings(
+        self,
+        path: Path,
+        mappings: list[ExcelRowMapping],
+    ):
+        pending_mappings = sorted(
+            (
+                mapping
+                for mapping in mappings
+                if mapping.raw_csv_row_number > 0
+            ),
+            key=lambda item: item.raw_csv_row_number,
+        )
+        if not pending_mappings:
+            return
+        mapping_index = 0
+        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.reader(csv_file)
+            for row_index, row in enumerate(reader, start=1):
+                while (
+                    mapping_index < len(pending_mappings)
+                    and pending_mappings[mapping_index].raw_csv_row_number < row_index
+                ):
+                    mapping_index += 1
+                if mapping_index >= len(pending_mappings):
+                    break
+                while (
+                    mapping_index < len(pending_mappings)
+                    and pending_mappings[mapping_index].raw_csv_row_number == row_index
+                ):
+                    yield pending_mappings[mapping_index], row
+                    mapping_index += 1
 
     def _summary_profile_rows(
         self,

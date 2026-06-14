@@ -16,12 +16,15 @@ from app.api.dependencies import (
     get_excel_asset_service,
     get_llm_preference_service,
 )
+from app.application.auth.rate_limit import AuthenticationRateLimiter
 from app.application.auth.service import AuthService
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.llm_preferences import WorkspaceLlmPreferenceService
+from app.core.auth import normalize_email
 from app.core.config import Settings
+from app.core.errors import AuthenticationError, RateLimitError
 from app.main import app
 
 
@@ -35,7 +38,10 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     )
     excel_assets.initialize()
     llm_client = FakeLlmClient()
-    llm_preferences = WorkspaceLlmPreferenceService(repository=repository, settings=Settings())
+    llm_preferences = WorkspaceLlmPreferenceService(
+        repository=repository,
+        settings=Settings(_env_file=None),
+    )
     summaries = DocumentSummaryService(
         excel_assets=excel_assets,
         llm_client=llm_client,
@@ -56,6 +62,11 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
+        login_rate_limiter=AuthenticationRateLimiter(
+            max_failed_attempts=3,
+            window_seconds=60,
+            repository=repository,
+        ),
     )
     auth.initialize()
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
@@ -232,6 +243,116 @@ def test_register_login_me_logout_and_password_reset(client: TestClient) -> None
     assert logout_response.status_code == 204
     logged_out_me_response = client.get("/api/auth/me", headers=new_auth_header)
     assert logged_out_me_response.status_code == 401
+
+
+def test_browser_session_uses_http_only_cookie_and_csrf(client: TestClient) -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "969348539@qq.com", "password": "Intertek_AI"},
+    )
+    assert login_response.status_code == 200
+
+    session_cookie = client.cookies.get("excelai_session")
+    csrf_cookie = client.cookies.get("excelai_csrf")
+    assert session_cookie
+    assert csrf_cookie
+    assert "httponly" in ",".join(login_response.headers.get_list("set-cookie")).lower()
+
+    me_response = client.get("/api/auth/me")
+    assert me_response.status_code == 200
+    assert me_response.json()["email"] == "969348539@qq.com"
+
+    rejected_logout_response = client.post("/api/auth/logout")
+    assert rejected_logout_response.status_code == 401
+    assert rejected_logout_response.json()["detail"] == "csrf token is invalid or missing"
+
+    logout_response = client.post(
+        "/api/auth/logout",
+        headers={"X-CSRF-Token": csrf_cookie},
+    )
+    assert logout_response.status_code == 204
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_login_rate_limit_blocks_repeated_failures(client: TestClient) -> None:
+    for attempt in range(2):
+        response = client.post(
+            "/api/auth/login",
+            json={"email": "969348539@qq.com", "password": f"wrong-pass-{attempt}"},
+        )
+        assert response.status_code == 401
+
+    limited_response = client.post(
+        "/api/auth/login",
+        json={"email": "969348539@qq.com", "password": "wrong-pass-final"},
+    )
+    assert limited_response.status_code == 429
+    assert limited_response.json()["retry_after_seconds"] > 0
+
+    still_limited_response = client.post(
+        "/api/auth/login",
+        json={"email": "969348539@qq.com", "password": "Intertek_AI"},
+    )
+    assert still_limited_response.status_code == 429
+
+
+def test_login_success_resets_failed_attempt_counter(client: TestClient) -> None:
+    for attempt in range(2):
+        response = client.post(
+            "/api/auth/login",
+            json={"email": "969348539@qq.com", "password": f"wrong-pass-{attempt}"},
+        )
+        assert response.status_code == 401
+
+    successful_response = client.post(
+        "/api/auth/login",
+        json={"email": "969348539@qq.com", "password": "Intertek_AI"},
+    )
+    assert successful_response.status_code == 200
+
+
+def test_login_rate_limit_is_shared_through_repository(tmp_path: Path) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    first_service = AuthService(
+        repository=repository,
+        admin_email="969348539@qq.com",
+        admin_password="Intertek_AI",
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+        login_rate_limiter=AuthenticationRateLimiter(
+            max_failed_attempts=2,
+            window_seconds=60,
+            repository=repository,
+        ),
+    )
+    second_service = AuthService(
+        repository=repository,
+        admin_email="969348539@qq.com",
+        admin_password="Intertek_AI",
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+        login_rate_limiter=AuthenticationRateLimiter(
+            max_failed_attempts=2,
+            window_seconds=60,
+            repository=repository,
+        ),
+    )
+    first_service.initialize()
+    second_service.initialize()
+
+    with pytest.raises(AuthenticationError, match="invalid email or password"):
+        first_service.login("969348539@qq.com", "wrong-pass-1")
+    with pytest.raises(RateLimitError, match="too many failed login attempts"):
+        second_service.login("969348539@qq.com", "wrong-pass-2")
+    with pytest.raises(RateLimitError, match="too many failed login attempts"):
+        first_service.login("969348539@qq.com", "Intertek_AI")
+
+    repository.clear_login_rate_limit(normalize_email("969348539@qq.com"))
+    assert second_service.login("969348539@qq.com", "Intertek_AI").user.email == (
+        "969348539@qq.com"
+    )
 
 
 def test_chat_sessions_are_isolated_per_user(client: TestClient) -> None:

@@ -3,9 +3,9 @@ import type { PrimaryNavItem } from './workspace-types'
 export const previewLimit = 250
 export const sheetSearchLimit = 50
 export const filePageSize = 6
-export const allowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm']
+export const fallbackAllowedUploadExtensions = ['.xls', '.xlsx', '.xlsm', '.xltx', '.xltm']
 export const pinnedFileStorageKey = 'excelai-pinned-file-ids'
-export const maxUploadBytes = 50 * 1024 * 1024
+export const fallbackMaxUploadBytes = 50 * 1024 * 1024
 export const minChatColumnWidth = 360
 export const maxChatColumnWidth = 560
 export const defaultExcelCellWidth = 120

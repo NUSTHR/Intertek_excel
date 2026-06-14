@@ -61,11 +61,26 @@ class Settings(BaseSettings):
     maintenance_interval_seconds: float = 300.0
     maintenance_auth_session_retention_days: int = 30
     maintenance_password_reset_token_retention_days: int = 7
+    upload_task_worker_enabled: bool = True
+    upload_task_worker_poll_interval_seconds: float = 0.5
+    upload_task_stale_processing_minutes: int = 60
+    chat_cancellation_retention_seconds: int = 300
     auth_admin_email: str = "969348539@qq.com"
     auth_admin_password: str = "Intertek_AI"
     auth_session_ttl_hours: int = 24 * 14
     auth_password_reset_ttl_minutes: int = 30
     auth_password_hash_iterations: int = 260_000
+    auth_expose_reset_token: bool = True
+    auth_login_rate_limit_max_failures: int = 5
+    auth_login_rate_limit_window_seconds: int = 300
+    auth_cookie_name: str = "excelai_session"
+    auth_csrf_cookie_name: str = "excelai_csrf"
+    auth_cookie_secure: bool = False
+    auth_cookie_samesite: str = "lax"
+    log_level: str = "INFO"
+    log_file_path: str = ""
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
 
     @property
     def backend_root(self) -> Path:
@@ -88,12 +103,77 @@ class Settings(BaseSettings):
         return (self.storage_root / "excel-workspace.sqlite3").resolve()
 
     @property
+    def log_path(self) -> Path:
+        if self.log_file_path.strip():
+            return Path(self.log_file_path).expanduser().resolve()
+        return (self.storage_root / "logs" / "backend.log").resolve()
+
+    @property
     def cors_origins(self) -> list[str]:
         return self._split_csv(self.app_cors_origins)
 
     @property
     def supported_excel_extensions(self) -> tuple[str, ...]:
         return tuple(item.lower() for item in self._split_csv(self.excel_supported_extensions))
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() in {"prod", "production"}
+
+    def validate_runtime_safety(self) -> None:
+        if not self.is_production:
+            return
+
+        errors: list[str] = []
+        if self.auth_admin_password == "Intertek_AI":
+            errors.append("AUTH_ADMIN_PASSWORD must be changed for production")
+        if self.auth_expose_reset_token:
+            errors.append("AUTH_EXPOSE_RESET_TOKEN must be false for production")
+        if not self.auth_cookie_secure:
+            errors.append("AUTH_COOKIE_SECURE must be true for production")
+        if self.auth_cookie_samesite.strip().lower() not in {"lax", "strict", "none"}:
+            errors.append("AUTH_COOKIE_SAMESITE must be lax, strict, or none")
+        if self.auth_cookie_samesite.strip().lower() == "none" and not self.auth_cookie_secure:
+            errors.append("AUTH_COOKIE_SECURE must be true when AUTH_COOKIE_SAMESITE=none")
+        if self.auth_login_rate_limit_max_failures <= 0:
+            errors.append("AUTH_LOGIN_RATE_LIMIT_MAX_FAILURES must be greater than 0")
+        if self.auth_login_rate_limit_window_seconds <= 0:
+            errors.append("AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS must be greater than 0")
+        if self.log_max_bytes <= 0:
+            errors.append("LOG_MAX_BYTES must be greater than 0")
+        if self.log_backup_count < 1:
+            errors.append("LOG_BACKUP_COUNT must be at least 1")
+        if not self.cors_origins:
+            errors.append("APP_CORS_ORIGINS must be set for production")
+        for origin in self.cors_origins:
+            normalized_origin = origin.lower()
+            if origin == "*":
+                errors.append("APP_CORS_ORIGINS must not contain '*' in production")
+            if "localhost" in normalized_origin or "127.0.0.1" in normalized_origin:
+                errors.append(
+                    "APP_CORS_ORIGINS must not contain localhost origins in production"
+                )
+                break
+        if self.llm_provider.strip().lower() == "fake":
+            errors.append("LLM_PROVIDER=fake is not allowed in production")
+
+        provider_keys = {
+            "siliconflow": self.llm_api_key,
+            "deepseek": self.deepseek_api_key,
+            "volcengine_ark": self.volcengine_ark_api_key,
+        }
+        for stage, provider in {
+            "summary": self.llm_summary_provider,
+            "router": self.llm_router_provider,
+            "answer": self.llm_answer_provider,
+        }.items():
+            provider_key = provider_keys.get(provider.strip().lower())
+            if provider_key is not None and not provider_key.strip():
+                errors.append(f"{stage} provider '{provider}' requires an API key in production")
+
+        if errors:
+            details = "; ".join(errors)
+            raise RuntimeError(f"unsafe production configuration: {details}")
 
     @staticmethod
     def _split_csv(value: str) -> list[str]:

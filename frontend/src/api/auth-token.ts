@@ -1,6 +1,5 @@
-const authTokenStorageKey = 'excelai-auth-token'
-
-let inMemoryAuthToken = loadStoredAuthToken()
+const csrfCookieName = 'excelai_csrf'
+let inMemoryAuthToken = ''
 
 export function getAuthToken(): string {
   return inMemoryAuthToken
@@ -8,21 +7,21 @@ export function getAuthToken(): string {
 
 export function setAuthToken(token: string): void {
   inMemoryAuthToken = token
-  if (typeof window !== 'undefined') {
-    window.localStorage.setItem(authTokenStorageKey, token)
-  }
 }
 
 export function clearAuthToken(): void {
   inMemoryAuthToken = ''
-  if (typeof window !== 'undefined') {
-    window.localStorage.removeItem(authTokenStorageKey)
-  }
 }
 
-function loadStoredAuthToken(): string {
-  if (typeof window === 'undefined') {
+export function getCsrfToken(): string {
+  if (typeof document === 'undefined') {
     return ''
   }
-  return window.localStorage.getItem(authTokenStorageKey) ?? ''
+  const cookie = document.cookie
+    .split('; ')
+    .find((item) => item.startsWith(`${csrfCookieName}=`))
+  if (!cookie) {
+    return ''
+  }
+  return decodeURIComponent(cookie.slice(csrfCookieName.length + 1))
 }

@@ -4,6 +4,7 @@
 # Backend local environment and generated files
 backend/.env
 backend/.venv/
+backend/.venv-codex/
 backend/.pytest_cache/
 backend/pytest-cache/
 backend/pytest-tmp/
