@@ -448,4 +448,43 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=13,
+        name="normalize_storage_artifact_references",
+        statements=(
+            """
+            UPDATE excel_sheets
+            SET raw_csv_path = replace(raw_csv_path, char(92), '/')
+            WHERE raw_csv_path LIKE '%' || char(92) || '%'
+            """,
+            """
+            UPDATE excel_sheets
+            SET raw_csv_path = substr(raw_csv_path, instr(raw_csv_path, '/files/') + 1)
+            WHERE raw_csv_path LIKE '%/files/%'
+              AND raw_csv_path NOT LIKE 'files/%'
+            """,
+            """
+            UPDATE excel_artifacts
+            SET path = replace(path, char(92), '/')
+            WHERE path LIKE '%' || char(92) || '%'
+            """,
+            """
+            UPDATE excel_artifacts
+            SET path = substr(path, instr(path, '/files/') + 1)
+            WHERE path LIKE '%/files/%'
+              AND path NOT LIKE 'files/%'
+            """,
+            """
+            UPDATE excel_upload_tasks
+            SET staging_path = replace(staging_path, char(92), '/')
+            WHERE staging_path LIKE '%' || char(92) || '%'
+            """,
+            """
+            UPDATE excel_upload_tasks
+            SET staging_path = substr(staging_path, instr(staging_path, '/upload-tasks/') + 1)
+            WHERE staging_path LIKE '%/upload-tasks/%'
+              AND staging_path NOT LIKE 'upload-tasks/%'
+            """,
+        ),
+    ),
 )

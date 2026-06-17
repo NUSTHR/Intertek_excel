@@ -276,10 +276,12 @@ def test_api_upload_task_records_failure_and_cleans_staging(client: TestClient) 
         task_id,
         user_id=admin_user().user_id,
     )
-    staging_path = Path(task.staging_path)
+    assert not Path(task.staging_path).is_absolute()
+    assert task.staging_path.startswith(f"upload-tasks/{task_id}/")
+    worker = app.dependency_overrides[get_upload_task_worker]()
+    staging_path = worker._staging_path(task)
     assert staging_path.exists()
 
-    worker = app.dependency_overrides[get_upload_task_worker]()
     assert worker.run_once() is True
 
     failed_response = client.get(f"/api/excel/files/upload-tasks/{task_id}")

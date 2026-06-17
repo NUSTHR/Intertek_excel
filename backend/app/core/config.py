@@ -93,20 +93,29 @@ class Settings(BaseSettings):
     @property
     def storage_root(self) -> Path:
         if self.excel_storage_root.strip():
-            return Path(self.excel_storage_root).expanduser().resolve()
+            return self._runtime_path(self.excel_storage_root)
         return (self.workspace_root / "storage").resolve()
 
     @property
     def database_path(self) -> Path:
         if self.excel_database_path.strip():
-            return Path(self.excel_database_path).expanduser().resolve()
+            return self._runtime_path(self.excel_database_path)
         return (self.storage_root / "excel-workspace.sqlite3").resolve()
 
     @property
     def log_path(self) -> Path:
         if self.log_file_path.strip():
-            return Path(self.log_file_path).expanduser().resolve()
+            return self._runtime_path(self.log_file_path)
         return (self.storage_root / "logs" / "backend.log").resolve()
+
+    def _runtime_path(self, configured_path: str) -> Path:
+        path = Path(configured_path.strip()).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        resolved_path = (self.workspace_root / path).resolve()
+        if not resolved_path.is_relative_to(self.workspace_root):
+            raise ValueError("relative runtime path must stay within project root")
+        return resolved_path
 
     @property
     def cors_origins(self) -> list[str]:

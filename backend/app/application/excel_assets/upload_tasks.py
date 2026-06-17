@@ -26,7 +26,8 @@ class UploadTaskService:
         storage_root: Path,
     ) -> None:
         self._repository = repository
-        self._staging_root = (storage_root / "upload-tasks").resolve()
+        self._storage_root = storage_root.expanduser().resolve()
+        self._staging_root = (self._storage_root / "upload-tasks").resolve()
 
     def create_task(
         self,
@@ -43,7 +44,7 @@ class UploadTaskService:
             task_id=task_id,
             user_id=user_id,
             original_filename=original_filename,
-            staging_path=str(staging_path),
+            staging_path=self._staging_reference(staging_path),
             replace_existing=replace_existing,
             status=ExcelUploadTaskStatus.QUEUED,
             error_message=None,
@@ -94,6 +95,12 @@ class UploadTaskService:
         self._write_bytes_atomic(staging_path, content)
         return staging_path
 
+    def _staging_reference(self, path: Path) -> str:
+        resolved_path = path.expanduser().resolve()
+        if not resolved_path.is_relative_to(self._storage_root):
+            raise ExcelWorkspaceError("upload staging path is invalid")
+        return resolved_path.relative_to(self._storage_root).as_posix()
+
     def _write_bytes_atomic(self, path: Path, content: bytes) -> None:
         temporary_file = tempfile.NamedTemporaryFile(
             delete=False,
@@ -124,7 +131,12 @@ class UploadTaskWorker:
     ) -> None:
         self._repository = repository
         self._excel_assets = excel_assets
-        self._staging_root = (storage_root / "upload-tasks").resolve() if storage_root else None
+        self._storage_root = storage_root.expanduser().resolve() if storage_root else None
+        self._staging_root = (
+            (self._storage_root / "upload-tasks").resolve()
+            if self._storage_root
+            else None
+        )
         self._poll_interval_seconds = max(0.1, poll_interval_seconds)
         self._worker_id = f"worker-{uuid.uuid4()}"
         self._stop_event = threading.Event()
@@ -197,7 +209,7 @@ class UploadTaskWorker:
     def _delete_staging_tree(self, task: ExcelUploadTask) -> None:
         try:
             _delete_staging_path(
-                Path(task.staging_path),
+                self._staging_path(task),
                 task.task_id,
                 staging_root=self._staging_root,
             )
@@ -209,13 +221,23 @@ class UploadTaskWorker:
             )
 
     def _validated_staging_path(self, task: ExcelUploadTask) -> Path:
-        staging_path = Path(task.staging_path).expanduser().resolve()
+        staging_path = self._staging_path(task)
         if self._staging_root is None:
             return staging_path
         expected_task_dir = (self._staging_root / task.task_id).resolve()
         if not staging_path.is_relative_to(expected_task_dir) or staging_path == expected_task_dir:
             raise ExcelWorkspaceError("upload task staging path is invalid")
         return staging_path
+
+    def _staging_path(self, task: ExcelUploadTask) -> Path:
+        path = Path(task.staging_path).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        if ".." in path.parts:
+            raise ExcelWorkspaceError("upload task staging path is invalid")
+        if self._storage_root is None:
+            return path.resolve()
+        return (self._storage_root / path).resolve()
 
 
 def _upload_result_payload(result: UploadExcelResult) -> dict[str, object]:

@@ -1,8 +1,9 @@
 # Project Inspection: Excel Workspace / Document Assistant
 
 Date: 2026-06-05  
-Workspace root: `/Users/intertek/Desktop/Intertek-dev/Document-Assistant`  
-Main implementation directory: `excel_workspace/`
+Project root: this `excel_workspace/` directory. Runtime and documentation
+commands should avoid machine-specific absolute paths so the project can be
+moved without changing startup behavior.
 
 ## 1. Executive Summary
 
@@ -642,15 +643,15 @@ VITE_EXCEL_WORKSPACE_CHAT_TIMEOUT_MS
 Backend:
 
 ```bash
-cd /Users/intertek/Desktop/Intertek-dev/Document-Assistant/excel_workspace/backend
+cd backend
 ./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 ```
 
 Frontend:
 
 ```bash
-cd /Users/intertek/Desktop/Intertek-dev/Document-Assistant/excel_workspace/frontend
-PATH=/private/tmp/node-v24.14.0-darwin-arm64/bin:$PATH npm run dev -- --host 127.0.0.1 --port 5174
+cd frontend
+npm run dev -- --host 127.0.0.1 --port 5174
 ```
 
 URLs:
@@ -660,14 +661,14 @@ Backend health: http://127.0.0.1:8090/health
 Frontend:       http://127.0.0.1:5174/
 ```
 
-The local Node path above was used in the current Codex environment. On a normal workstation, system Node/npm may be fine if versions satisfy `package.json`.
+Use the system Node/npm installation when it satisfies `package.json`.
 
 ## 19. How To Test
 
 Backend:
 
 ```bash
-cd /Users/intertek/Desktop/Intertek-dev/Document-Assistant/excel_workspace/backend
+cd backend
 ./.venv/bin/python -m ruff check app tests
 ./.venv/bin/python -m pytest
 ```
@@ -675,8 +676,8 @@ cd /Users/intertek/Desktop/Intertek-dev/Document-Assistant/excel_workspace/backe
 Frontend:
 
 ```bash
-cd /Users/intertek/Desktop/Intertek-dev/Document-Assistant/excel_workspace/frontend
-PATH=/private/tmp/node-v24.14.0-darwin-arm64/bin:$PATH npm run build --cache /private/tmp/npm-cache
+cd frontend
+npm run build
 ```
 
 Latest recorded status:

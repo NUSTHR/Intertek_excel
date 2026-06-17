@@ -294,7 +294,7 @@ class ExcelAssetService:
         )
         if profile_artifact is None:
             raise AssetNotFoundError("workbook profile was not found")
-        return self._read_profile(Path(profile_artifact.path), version=version)
+        return self._read_profile(self._artifact_path(profile_artifact.path), version=version)
 
     def get_summary_profile(self, version_id: str) -> WorkbookProfile:
         profile = self.get_profile(version_id)
@@ -316,7 +316,7 @@ class ExcelAssetService:
                     profile_rows=self._summary_profile_rows(
                         sheet_profile,
                         raw_csv_path=(
-                            Path(sheet.raw_csv_path)
+                            self._artifact_path(sheet.raw_csv_path)
                             if (sheet := sheets.get(sheet_profile.sheet_id)) is not None
                             else None
                         ),
@@ -342,7 +342,11 @@ class ExcelAssetService:
         safe_limit = max(1, min(5000, limit))
         return SheetPreviewResult(
             sheet=sheet,
-            rows=self._read_csv_rows_page(Path(sheet.raw_csv_path), safe_offset, safe_limit),
+            rows=self._read_csv_rows_page(
+                self._artifact_path(sheet.raw_csv_path),
+                safe_offset,
+                safe_limit,
+            ),
             total_rows=sheet.row_count,
             offset=safe_offset,
             limit=safe_limit,
@@ -365,7 +369,11 @@ class ExcelAssetService:
                 safe_offset,
                 safe_limit,
             ),
-            rows=self._read_csv_rows_page(Path(sheet.raw_csv_path), safe_offset, safe_limit),
+            rows=self._read_csv_rows_page(
+                self._artifact_path(sheet.raw_csv_path),
+                safe_offset,
+                safe_limit,
+            ),
             total_rows=sheet.row_count,
             offset=safe_offset,
             limit=safe_limit,
@@ -387,7 +395,11 @@ class ExcelAssetService:
                 safe_offset,
                 safe_limit,
             ),
-            rows=self._read_csv_rows_page(Path(sheet.raw_csv_path), safe_offset, safe_limit),
+            rows=self._read_csv_rows_page(
+                self._artifact_path(sheet.raw_csv_path),
+                safe_offset,
+                safe_limit,
+            ),
             total_rows=sheet.row_count,
             offset=safe_offset,
             limit=safe_limit,
@@ -464,7 +476,7 @@ class ExcelAssetService:
         if mapping is None:
             raise AssetNotFoundError("row mapping was not found")
         row_index = mapping.raw_csv_row_number - 1
-        row = self._read_csv_row(Path(sheet.raw_csv_path), row_index)
+        row = self._read_csv_row(self._artifact_path(sheet.raw_csv_path), row_index)
         if row is None:
             raise AssetNotFoundError("mapped CSV row was not found")
         return RowLookupResult(sheet=sheet, mapping=mapping, row=row)
@@ -488,7 +500,7 @@ class ExcelAssetService:
                 artifact_id=new_id("artifact"),
                 version_id=version.version_id,
                 artifact_type=ExcelArtifactType.ORIGINAL,
-                path=str(original_path),
+                path=self._artifact_reference(original_path),
                 created_at=created_at,
             )
         ]
@@ -533,7 +545,7 @@ class ExcelAssetService:
                 sheet_name=sheet.sheet_name,
                 row_count=len(sheet.rows),
                 column_count=self._column_count(sheet.rows) + 1,
-                raw_csv_path=str(raw_csv_path),
+                raw_csv_path=self._artifact_reference(raw_csv_path),
                 created_at=created_at,
             )
             self._repository.create_sheet(created_sheet)
@@ -544,7 +556,7 @@ class ExcelAssetService:
                 artifact_id=new_id("artifact"),
                 version_id=version.version_id,
                 artifact_type=ExcelArtifactType.RAW_CSV,
-                path=str(raw_csv_path),
+                path=self._artifact_reference(raw_csv_path),
                 created_at=created_at,
             )
             self._repository.create_artifact(artifact)
@@ -560,7 +572,7 @@ class ExcelAssetService:
             artifact_id=new_id("artifact"),
             version_id=version.version_id,
             artifact_type=ExcelArtifactType.ROW_MAPPING,
-            path=str(mapping_path),
+            path=self._artifact_reference(mapping_path),
             created_at=created_at,
         )
         self._repository.create_artifact(mapping_artifact)
@@ -583,7 +595,7 @@ class ExcelAssetService:
             artifact_id=new_id("artifact"),
             version_id=version.version_id,
             artifact_type=ExcelArtifactType.PROFILE,
-            path=str(profile_path),
+            path=self._artifact_reference(profile_path),
             created_at=created_at,
         )
         self._repository.create_artifact(profile_artifact)
@@ -648,6 +660,12 @@ class ExcelAssetService:
     def _column_count(self, rows: list[list[str]]) -> int:
         return max((len(row) for row in rows), default=0)
 
+    def _artifact_reference(self, path: Path) -> str:
+        return self._storage.artifact_reference(path)
+
+    def _artifact_path(self, reference: str) -> Path:
+        return self._storage.resolve_artifact_reference(reference)
+
     def _read_csv_rows(self, path: Path) -> list[list[str]]:
         with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
             return [row for row in csv.reader(csv_file)]
@@ -688,7 +706,7 @@ class ExcelAssetService:
         total_matches = 0
 
         for mapping, row in self._iter_csv_rows_for_mappings(
-            Path(sheet.raw_csv_path),
+            self._artifact_path(sheet.raw_csv_path),
             mappings,
         ):
             matched_columns = self._search_policy.matched_column_indexes(row, query)

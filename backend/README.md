@@ -87,10 +87,25 @@ Windows PowerShell:
 By default runtime files are written under:
 
 ```text
-excel_workspace/storage/
+../storage/
 ```
 
-Override with `EXCEL_STORAGE_ROOT` and `EXCEL_DATABASE_PATH`.
+Override with `EXCEL_STORAGE_ROOT` and `EXCEL_DATABASE_PATH`. Leave them empty
+to use the project-relative defaults. Relative override values are resolved from
+the project root, not from the shell's current working directory:
+
+```text
+EXCEL_STORAGE_ROOT=runtime/storage
+EXCEL_DATABASE_PATH=runtime/excel-workspace.sqlite3
+```
+
+Absolute override values are accepted for deliberate external volumes, but the
+project does not need absolute paths to run. Persisted Excel artifact references
+are storage-relative (`files/...`, `upload-tasks/...`) and are resolved through
+the filesystem storage adapter at runtime. Migration `13`,
+`normalize_storage_artifact_references`, normalizes legacy absolute artifact
+rows during startup so moving the project directory does not break previews,
+row lookup, search, profile loading, or upload task cleanup.
 
 Long-running controls:
 

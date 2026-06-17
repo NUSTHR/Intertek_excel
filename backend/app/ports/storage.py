@@ -40,3 +40,9 @@ class ExcelArtifactStorage(Protocol):
 
     def delete_file_tree(self, file_id: str) -> None:
         ...
+
+    def artifact_reference(self, path: Path) -> str:
+        ...
+
+    def resolve_artifact_reference(self, reference: str) -> Path:
+        ...

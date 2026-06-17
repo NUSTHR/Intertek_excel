@@ -27,7 +27,7 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
             """
         ).fetchall()
 
-    assert [int(row["version"]) for row in rows] == list(range(1, 13))
+    assert [int(row["version"]) for row in rows] == list(range(1, 14))
     assert [row["name"] for row in rows] == [
         "initial_excel_workspace_schema",
         "add_chat_session_metadata",
@@ -41,6 +41,7 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
         "add_row_mapping_raw_order_index",
         "add_upload_tasks_and_shared_chat_cancellations",
         "add_shared_auth_login_attempts",
+        "normalize_storage_artifact_references",
     ]
     assert all(row["checksum"] for row in rows)
 
@@ -126,6 +127,134 @@ def test_repository_creates_raw_row_mapping_pagination_index(tmp_path: Path) -> 
         }
 
     assert "idx_mappings_sheet_raw_csv_row" in indexes
+
+
+def test_repository_migration_normalizes_storage_references(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    repository.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO excel_files
+              (file_id, display_name, active_version_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "file_legacy_paths",
+                "legacy.xlsx",
+                "version_legacy_paths",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO excel_file_versions
+              (
+                version_id, file_id, original_filename, file_hash, status,
+                error_message, created_at, activated_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "version_legacy_paths",
+                "file_legacy_paths",
+                "legacy.xlsx",
+                "hash",
+                "ready",
+                None,
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO excel_sheets
+              (
+                sheet_id, version_id, sheet_index, sheet_code, sheet_name,
+                row_count, column_count, raw_csv_path, created_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "sheet_legacy_paths",
+                "version_legacy_paths",
+                1,
+                "S001",
+                "Legacy",
+                1,
+                1,
+                "/old/root/excel_workspace/storage/files/file_legacy_paths/"
+                "version_legacy_paths/sheets/S001.csv",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO excel_artifacts
+              (artifact_id, version_id, artifact_type, path, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "artifact_legacy_paths",
+                "version_legacy_paths",
+                "raw_csv",
+                "/old/root/excel_workspace/storage/files/file_legacy_paths/"
+                "version_legacy_paths/sheets/S001.csv",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO excel_upload_tasks
+              (
+                task_id, user_id, original_filename, staging_path,
+                replace_existing, status, result_json, created_at, updated_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "upload_legacy_paths",
+                "user_admin",
+                "legacy.xlsx",
+                "/old/root/excel_workspace/storage/upload-tasks/"
+                "upload_legacy_paths/legacy.xlsx",
+                0,
+                "queued",
+                "{}",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = 13"
+        )
+
+    repository.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        raw_csv_path = connection.execute(
+            "SELECT raw_csv_path FROM excel_sheets WHERE sheet_id = ?",
+            ("sheet_legacy_paths",),
+        ).fetchone()[0]
+        artifact_path = connection.execute(
+            "SELECT path FROM excel_artifacts WHERE artifact_id = ?",
+            ("artifact_legacy_paths",),
+        ).fetchone()[0]
+        staging_path = connection.execute(
+            "SELECT staging_path FROM excel_upload_tasks WHERE task_id = ?",
+            ("upload_legacy_paths",),
+        ).fetchone()[0]
+
+    assert raw_csv_path == (
+        "files/file_legacy_paths/version_legacy_paths/sheets/S001.csv"
+    )
+    assert artifact_path == (
+        "files/file_legacy_paths/version_legacy_paths/sheets/S001.csv"
+    )
+    assert staging_path == "upload-tasks/upload_legacy_paths/legacy.xlsx"
 
 
 def test_repository_throttles_periodic_sqlite_maintenance(tmp_path: Path) -> None:
@@ -345,6 +474,29 @@ def test_removed_legacy_chat_rows_setting_is_ignored() -> None:
     settings = Settings(_env_file=None, llm_chat_rows_per_sheet=999)
 
     assert not hasattr(settings, "llm_chat_rows_per_sheet")
+
+
+def test_relative_runtime_paths_are_project_root_relative() -> None:
+    settings = Settings(
+        _env_file=None,
+        excel_database_path="runtime/excel.sqlite3",
+        excel_storage_root="runtime/storage",
+        log_file_path="runtime/logs/backend.log",
+    )
+
+    assert settings.database_path == settings.workspace_root / "runtime/excel.sqlite3"
+    assert settings.storage_root == settings.workspace_root / "runtime/storage"
+    assert settings.log_path == settings.workspace_root / "runtime/logs/backend.log"
+
+
+def test_relative_runtime_paths_cannot_escape_project_root() -> None:
+    settings = Settings(
+        _env_file=None,
+        excel_database_path="../escape/excel.sqlite3",
+    )
+
+    with pytest.raises(ValueError, match="relative runtime path"):
+        _ = settings.database_path
 
 
 def test_production_settings_reject_unsafe_defaults() -> None:

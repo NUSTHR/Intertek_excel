@@ -67,6 +67,37 @@ class FilesystemExcelArtifactStorage:
             raise ValueError("refusing to delete outside storage files root")
         shutil.rmtree(target, ignore_errors=True)
 
+    def artifact_reference(self, path: Path) -> str:
+        resolved_path = path.expanduser().resolve()
+        if not resolved_path.is_relative_to(self._storage_root):
+            raise ValueError("artifact path must stay within storage root")
+        return resolved_path.relative_to(self._storage_root).as_posix()
+
+    def resolve_artifact_reference(self, reference: str) -> Path:
+        raw_reference = reference.strip()
+        if not raw_reference:
+            raise ValueError("artifact reference is required")
+
+        normalized_reference = raw_reference.replace("\\", "/")
+        if normalized_reference.startswith(("files/", "upload-tasks/")):
+            safe_path = self._safe_relative_path(normalized_reference)
+            resolved_path = (self._storage_root / safe_path).resolve()
+            if not resolved_path.is_relative_to(self._storage_root):
+                raise ValueError("artifact reference must stay within storage root")
+            return resolved_path
+
+        path = Path(raw_reference).expanduser()
+        if path.is_absolute() or self._looks_like_absolute_reference(normalized_reference):
+            legacy_relative = self._legacy_storage_relative_reference(normalized_reference)
+            if legacy_relative is not None:
+                return (self._storage_root / legacy_relative).resolve()
+            resolved_path = path.resolve()
+            if path.is_absolute() and resolved_path.is_relative_to(self._storage_root):
+                return resolved_path
+            raise ValueError("absolute artifact reference must stay within storage root")
+
+        raise ValueError("artifact reference must stay within storage root")
+
     def _version_dir(self, file_id: str, version_id: str) -> Path:
         path = self._storage_root / "files" / file_id / version_id
         path.mkdir(parents=True, exist_ok=True)
@@ -130,6 +161,22 @@ class FilesystemExcelArtifactStorage:
         if path.is_absolute() or ".." in path.parts:
             raise ValueError("relative artifact name must stay within the version directory")
         return path
+
+    def _legacy_storage_relative_reference(self, reference: str) -> Path | None:
+        parts = tuple(part for part in reference.split("/") if part)
+        for marker in ("files", "upload-tasks"):
+            if marker not in parts:
+                continue
+            marker_index = len(parts) - 1 - parts[::-1].index(marker)
+            relative_path = Path(*parts[marker_index:])
+            if ".." not in relative_path.parts:
+                return relative_path
+        return None
+
+    def _looks_like_absolute_reference(self, reference: str) -> bool:
+        return reference.startswith("/") or (
+            len(reference) >= 2 and reference[1] == ":"
+        )
 
 
 class _AtomicFileContext:

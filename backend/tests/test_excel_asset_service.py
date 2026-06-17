@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,68 @@ def test_upload_creates_version_sheets_mapping_and_preview(
     assert row.row == ["S001_R2", "Apex", "High"]
 
 
+def test_upload_persists_storage_relative_artifact_references(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook(
+        original_filename="risk.xlsx",
+        content=b"fake workbook",
+    )
+
+    stored_sheet = service._repository.get_sheet(result.sheets[0].sheet_id)
+    artifacts = service.list_artifacts(result.version.version_id)
+
+    assert stored_sheet is not None
+    assert not Path(stored_sheet.raw_csv_path).is_absolute()
+    assert stored_sheet.raw_csv_path == (
+        f"files/{result.file.file_id}/{result.version.version_id}/sheets/S001.csv"
+    )
+    assert all(not Path(artifact.path).is_absolute() for artifact in artifacts)
+    assert {
+        artifact.path
+        for artifact in artifacts
+        if artifact.artifact_type == ExcelArtifactType.RAW_CSV
+    } == {
+        f"files/{result.file.file_id}/{result.version.version_id}/sheets/S001.csv",
+        f"files/{result.file.file_id}/{result.version.version_id}/sheets/S002.csv",
+    }
+
+
+def test_storage_relative_references_survive_project_directory_move(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "first"
+    moved_root = tmp_path / "moved"
+    first_repository = SQLiteExcelAssetRepository(first_root / "excel.sqlite3")
+    first_service = ExcelAssetService(
+        repository=first_repository,
+        storage=FilesystemExcelArtifactStorage(first_root / "storage"),
+        workbook_reader=FakeWorkbookReader(),
+    )
+    first_service.initialize()
+    result = first_service.upload_workbook("risk.xlsx", b"fake workbook")
+
+    with first_repository._connect() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    moved_root.mkdir()
+    shutil.copy2(first_root / "excel.sqlite3", moved_root / "excel.sqlite3")
+    shutil.copytree(first_root / "storage", moved_root / "storage")
+
+    moved_service = ExcelAssetService(
+        repository=SQLiteExcelAssetRepository(moved_root / "excel.sqlite3"),
+        storage=FilesystemExcelArtifactStorage(moved_root / "storage"),
+        workbook_reader=FakeWorkbookReader(),
+    )
+    moved_service.initialize()
+
+    preview = moved_service.preview_sheet(result.sheets[0].sheet_id)
+    profile = moved_service.get_profile(result.version.version_id)
+
+    assert preview.rows[1] == ["S001_R2", "Apex", "High"]
+    assert profile.sheets[0].profile_rows[1] == ["Apex", "High"]
+
+
 def test_duplicate_upload_requires_explicit_replacement(
     service: ExcelAssetService,
 ) -> None:
@@ -187,6 +250,36 @@ def test_atomic_artifact_write_cleans_temporary_file_on_failure(
     original_dir = tmp_path / "storage" / "files" / "file_1" / "version_1" / "original"
     assert not (original_dir / "risk.xlsx").exists()
     assert list(original_dir.glob("*.tmp")) == []
+
+
+def test_filesystem_storage_references_are_relative_and_relocatable(
+    tmp_path: Path,
+) -> None:
+    storage = FilesystemExcelArtifactStorage(tmp_path / "storage")
+
+    path = storage.write_csv(
+        file_id="file_1",
+        version_id="version_1",
+        sheet_code="S001",
+        rows=[["S001_R1", "value"]],
+    )
+    reference = storage.artifact_reference(path)
+
+    assert reference == "files/file_1/version_1/sheets/S001.csv"
+    assert storage.resolve_artifact_reference(reference) == path
+    assert storage.resolve_artifact_reference(
+        "/old/project/storage/files/file_1/version_1/sheets/S001.csv"
+    ) == path
+    assert storage.resolve_artifact_reference(
+        r"C:\old\project\storage\files\file_1\version_1\sheets\S001.csv"
+    ) == path
+    with pytest.raises(ValueError, match="artifact reference must stay within storage root"):
+        storage.resolve_artifact_reference("nested/files/file_1/version_1/sheets/S001.csv")
+
+    with pytest.raises(ValueError, match="absolute artifact reference"):
+        storage.resolve_artifact_reference(str(tmp_path / "outside.csv"))
+    with pytest.raises(ValueError, match="absolute artifact reference"):
+        storage.resolve_artifact_reference(r"C:\outside\sheet.csv")
 
 
 def test_profile_artifacts_active_version_and_paginated_rows(
