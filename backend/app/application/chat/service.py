@@ -4,10 +4,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from threading import Lock, RLock
 
+from app.application.chat.access_control import ChatAccessController
 from app.application.chat.cancellation import (
     ChatCancellationToken,
     ChatRequestCancelledError,
 )
+from app.application.chat.citations import CitationVerifier
 from app.application.chat.policy import ChatServicePolicy
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.access import FileAccessContext
@@ -68,6 +70,8 @@ class ChatService:
         self._sessions = sessions
         self._llm_preferences = llm_preferences
         self._workflow = workflow
+        self._citation_verifier = CitationVerifier()
+        self._access_controller = ChatAccessController(excel_assets)
         self._session_locks: dict[str, _SessionOperationLock] = {}
         self._session_locks_guard = Lock()
 
@@ -559,13 +563,10 @@ class ChatService:
         *,
         access: FileAccessContext | None,
     ) -> list[AttachedDocument]:
-        if access is None or access.can_manage_files:
-            return documents
-        return [
-            document
-            for document in documents
-            if self._can_access_document(document, access=access)
-        ]
+        return self._access_controller.filter_attached_documents(
+            documents,
+            access=access,
+        )
 
     def _filter_accessible_selected_documents(
         self,
@@ -573,13 +574,10 @@ class ChatService:
         *,
         access: FileAccessContext | None,
     ) -> list[SelectedDocument]:
-        if access is None or access.can_manage_files:
-            return documents
-        return [
-            document
-            for document in documents
-            if self._can_access_file(document.file_id, access=access)
-        ]
+        return self._access_controller.filter_selected_documents(
+            documents,
+            access=access,
+        )
 
     def _filter_accessible_turn_context(
         self,
@@ -587,66 +585,7 @@ class ChatService:
         *,
         access: FileAccessContext | None,
     ) -> list[ChatTurn]:
-        if access is None or access.can_manage_files:
-            return turns
-        return [
-            turn
-            for turn in turns
-            if self._turn_context_is_accessible(turn, access=access)
-        ]
-
-    def _turn_context_is_accessible(
-        self,
-        turn: ChatTurn,
-        *,
-        access: FileAccessContext,
-    ) -> bool:
-        file_ids = {
-            document.file_id
-            for document in [
-                *turn.selected_documents,
-                *turn.newly_attached_documents,
-                *turn.attached_documents,
-            ]
-        }
-        file_ids.update(citation.file_id for citation in turn.citations)
-        if not file_ids:
-            return True
-        return all(self._can_access_file(file_id, access=access) for file_id in file_ids)
-
-    def _can_access_file(self, file_id: str, *, access: FileAccessContext) -> bool:
-        try:
-            self._excel_assets.get_file(file_id)
-        except AssetNotFoundError:
-            return True
-        try:
-            self._excel_assets.get_file(file_id, access=access)
-        except AssetNotFoundError:
-            return False
-        return True
-
-    def _can_access_document(
-        self,
-        document: SelectedDocument,
-        *,
-        access: FileAccessContext,
-    ) -> bool:
-        if not self._can_access_file(document.file_id, access=access):
-            return False
-        try:
-            self._excel_assets.list_sheets(document.version_id, access=access)
-        except AssetNotFoundError:
-            return self._can_use_deleted_legacy_document(document)
-        return True
-
-    def _can_use_deleted_legacy_document(self, document: SelectedDocument) -> bool:
-        try:
-            sheets = self._excel_assets.list_sheets_for_legacy_chat_context(
-                document.version_id
-            )
-        except AssetNotFoundError:
-            return False
-        return any(sheets)
+        return self._access_controller.filter_turn_context(turns, access=access)
 
     def _answer_with_current_access(
         self,
@@ -950,7 +889,7 @@ class ChatService:
                         if not row_response:
                             continue
                         row_id = row_response[0]
-                        evidence_id = self._evidence_id(
+                        evidence_id = self._citation_verifier.evidence_id(
                             version_id=document.version_id,
                             sheet_id=sheet.sheet_id,
                             row_id=row_id,
@@ -999,121 +938,12 @@ class ChatService:
         evidence_ids: list[str],
         citation_index: dict[str, ExcelCitation],
     ) -> tuple[list[ExcelCitation], dict[str, str], list[str]]:
-        citations: list[ExcelCitation] = []
-        evidence_id_to_citation_id: dict[str, str] = {}
-        warnings: list[str] = []
-        row_matches_by_row_id = self._row_matches_by_row_id(citation_index)
-        quotes_by_evidence_id: dict[str, str] = {}
-        for draft in draft_citations:
-            resolved_evidence_id, warning = self._resolve_draft_citation_evidence_id(
-                draft,
-                citation_index,
-                row_matches_by_row_id,
-            )
-            if warning is not None:
-                warnings.append(warning)
-                continue
-            if resolved_evidence_id is None:
-                continue
-            quotes_by_evidence_id[resolved_evidence_id] = draft.quote
-
-        for evidence_reference in [*quotes_by_evidence_id, *evidence_ids]:
-            resolved_evidence_id, warning = self._resolve_evidence_reference(
-                evidence_reference,
-                citation_index,
-                row_matches_by_row_id,
-            )
-            if warning is not None:
-                warnings.append(warning)
-                continue
-            if resolved_evidence_id is None:
-                continue
-            source = citation_index.get(resolved_evidence_id)
-            if source is None:
-                warnings.append(
-                    f"ignored invalid citation evidence_id: {resolved_evidence_id}"
-                )
-                continue
-            if resolved_evidence_id in evidence_id_to_citation_id:
-                continue
-            citation_id = f"C{len(citations) + 1}"
-            evidence_id_to_citation_id[resolved_evidence_id] = citation_id
-            citations.append(
-                ExcelCitation(
-                    citation_id=citation_id,
-                    evidence_id=source.evidence_id,
-                    file_id=source.file_id,
-                    version_id=source.version_id,
-                    sheet_id=source.sheet_id,
-                    sheet_name=source.sheet_name,
-                    row_id=source.row_id,
-                    row=source.row,
-                    quote=quotes_by_evidence_id.get(resolved_evidence_id, ""),
-                )
-            )
-        return citations, evidence_id_to_citation_id, warnings
-
-    def _row_matches_by_row_id(
-        self,
-        citation_index: dict[str, ExcelCitation],
-    ) -> dict[str, list[ExcelCitation]]:
-        matches: dict[str, list[ExcelCitation]] = {}
-        for citation in citation_index.values():
-            matches.setdefault(citation.row_id, []).append(citation)
-        return matches
-
-    def _resolve_draft_citation_evidence_id(
-        self,
-        draft_citation,
-        citation_index: dict[str, ExcelCitation],
-        row_matches_by_row_id: dict[str, list[ExcelCitation]],
-    ) -> tuple[str | None, str | None]:
-        if draft_citation.evidence_id:
-            if draft_citation.evidence_id in citation_index:
-                return draft_citation.evidence_id, None
-            return (
-                None,
-                f"ignored invalid citation evidence_id: {draft_citation.evidence_id}",
-            )
-        if draft_citation.version_id and draft_citation.sheet_id and draft_citation.row_id:
-            evidence_id = self._evidence_id(
-                version_id=draft_citation.version_id,
-                sheet_id=draft_citation.sheet_id,
-                row_id=draft_citation.row_id,
-            )
-            if evidence_id in citation_index:
-                return evidence_id, None
-            return None, f"ignored invalid citation evidence_id: {evidence_id}"
-        if draft_citation.row_id:
-            return self._resolve_evidence_reference(
-                draft_citation.row_id,
-                citation_index,
-                row_matches_by_row_id,
-            )
-        return None, None
-
-    def _resolve_evidence_reference(
-        self,
-        evidence_reference: str,
-        citation_index: dict[str, ExcelCitation],
-        row_matches_by_row_id: dict[str, list[ExcelCitation]],
-    ) -> tuple[str | None, str | None]:
-        if evidence_reference in citation_index:
-            return evidence_reference, None
-        matches = row_matches_by_row_id.get(evidence_reference, [])
-        if not matches:
-            if "::" in evidence_reference:
-                return (
-                    None,
-                    f"ignored invalid citation evidence_id: {evidence_reference}",
-                )
-            return None, f"ignored invalid citation row_id: {evidence_reference}"
-        if len(matches) > 1:
-            return None, f"ignored ambiguous citation row_id: {evidence_reference}"
-        return matches[0].evidence_id, None
-
-    def _evidence_id(self, *, version_id: str, sheet_id: str, row_id: str) -> str:
-        return f"{version_id}::{sheet_id}::{row_id}"
+        result = self._citation_verifier.build_verified_citations(
+            draft_citations,
+            evidence_ids,
+            citation_index,
+        )
+        return result.citations, result.evidence_id_to_citation_id, result.warnings
 
     def _attached_to_selected_documents(
         self,

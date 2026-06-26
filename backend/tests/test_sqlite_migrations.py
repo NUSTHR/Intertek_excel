@@ -27,7 +27,7 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
             """
         ).fetchall()
 
-    assert [int(row["version"]) for row in rows] == list(range(1, 14))
+    assert [int(row["version"]) for row in rows] == list(range(1, 15))
     assert [row["name"] for row in rows] == [
         "initial_excel_workspace_schema",
         "add_chat_session_metadata",
@@ -42,8 +42,19 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
         "add_upload_tasks_and_shared_chat_cancellations",
         "add_shared_auth_login_attempts",
         "normalize_storage_artifact_references",
+        "add_excel_row_search_fts_index",
     ]
     assert all(row["checksum"] for row in rows)
+
+    with sqlite3.connect(database_path) as connection:
+        search_index = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'excel_row_search_index'
+            """
+        ).fetchone()
+    assert search_index is not None
 
 
 def test_repository_configures_connections_for_long_running_use(tmp_path: Path) -> None:

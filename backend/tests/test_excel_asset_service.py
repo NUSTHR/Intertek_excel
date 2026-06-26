@@ -346,6 +346,43 @@ def test_search_sheet_rows_returns_bounded_matches_with_columns(
     assert search.matches[0].matched_columns == [1]
 
 
+def test_search_sheet_rows_keeps_short_query_scan_fallback(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+
+    search = service.search_sheet_rows(result.sheets[1].sheet_id, query="Li", limit=10)
+
+    assert search.total_matches == 1
+    assert search.matches[0].mapping.row_id == "S002_R2"
+    assert search.matches[0].matched_columns == [2]
+
+
+def test_search_sheet_rows_handles_special_characters_from_index(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+
+    search = service.search_sheet_rows(result.sheets[0].sheet_id, query="S001_R2", limit=10)
+
+    assert search.total_matches == 1
+    assert search.matches[0].row == ["S001_R2", "Apex", "High"]
+    assert search.matches[0].matched_columns == [0]
+
+
+def test_search_rebuilds_missing_row_index_for_existing_versions(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+    service._repository.replace_row_search_entries(result.version.version_id, [])
+
+    search = service.search_sheet_rows(result.sheets[0].sheet_id, query="apex", limit=10)
+
+    assert search.total_matches == 1
+    assert search.matches[0].row == ["S001_R2", "Apex", "High"]
+    assert service._repository.has_row_search_entries(result.version.version_id)
+
+
 def test_search_version_rows_searches_all_sheets(
     service: ExcelAssetService,
 ) -> None:

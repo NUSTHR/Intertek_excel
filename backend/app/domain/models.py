@@ -92,6 +92,30 @@ class ExcelRowMapping:
 
 
 @dataclass(frozen=True)
+class ExcelRowSearchEntry:
+    mapping_id: str
+    version_id: str
+    sheet_id: str
+    row_id: str
+    original_row_number: int
+    raw_csv_row_number: int
+    created_at: str
+    row: list[str]
+
+
+@dataclass(frozen=True)
+class ExcelRowSearchMatch:
+    mapping_id: str
+    version_id: str
+    sheet_id: str
+    row_id: str
+    original_row_number: int
+    raw_csv_row_number: int
+    created_at: str
+    row: list[str]
+
+
+@dataclass(frozen=True)
 class ExcelUploadTask:
     task_id: str
     user_id: str

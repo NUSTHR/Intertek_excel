@@ -11,6 +11,8 @@ from app.domain.models import (
     ExcelFileVersion,
     ExcelFileVisibility,
     ExcelRowMapping,
+    ExcelRowSearchEntry,
+    ExcelRowSearchMatch,
     ExcelSheet,
     ExcelUploadTask,
     ExcelVersionStatus,
@@ -112,6 +114,26 @@ class ExcelAssetRepository(Protocol):
         offset: int,
         limit: int,
     ) -> list[ExcelRowMapping]:
+        ...
+
+    def replace_row_search_entries(
+        self,
+        version_id: str,
+        entries: list[ExcelRowSearchEntry],
+    ) -> None:
+        ...
+
+    def has_row_search_entries(self, version_id: str) -> bool:
+        ...
+
+    def search_row_index(
+        self,
+        *,
+        version_id: str,
+        query: str,
+        sheet_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[ExcelRowSearchMatch]:
         ...
 
 

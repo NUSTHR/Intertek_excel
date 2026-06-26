@@ -35,6 +35,8 @@ from app.domain.models import (
     ExcelFileVersion,
     ExcelFileVisibility,
     ExcelRowMapping,
+    ExcelRowSearchEntry,
+    ExcelRowSearchMatch,
     ExcelSheet,
     ExcelUploadTask,
     ExcelUploadTaskStatus,
@@ -556,6 +558,102 @@ class SQLiteExcelAssetRepository:
                 (sheet_id, max(1, limit), max(0, offset)),
             ).fetchall()
         return [mapping for row in rows if (mapping := self._to_mapping(row)) is not None]
+
+    def replace_row_search_entries(
+        self,
+        version_id: str,
+        entries: list[ExcelRowSearchEntry],
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM excel_row_search_index
+                WHERE version_id = ?
+                """,
+                (version_id,),
+            )
+            if not entries:
+                return
+            connection.executemany(
+                """
+                INSERT INTO excel_row_search_index
+                  (
+                    mapping_id, version_id, sheet_id, row_id,
+                    original_row_number, raw_csv_row_number, created_at,
+                    row_json, searchable_text
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        entry.mapping_id,
+                        entry.version_id,
+                        entry.sheet_id,
+                        entry.row_id,
+                        entry.original_row_number,
+                        entry.raw_csv_row_number,
+                        entry.created_at,
+                        self._dump_json(entry.row),
+                        self._row_search_text(entry.row),
+                    )
+                    for entry in entries
+                ],
+            )
+
+    def has_row_search_entries(self, version_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM excel_row_search_index
+                WHERE version_id = ?
+                LIMIT 1
+                """,
+                (version_id,),
+            ).fetchone()
+        return row is not None
+
+    def search_row_index(
+        self,
+        *,
+        version_id: str,
+        query: str,
+        sheet_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[ExcelRowSearchMatch]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return []
+        bounded_limit = max(1, limit) if limit is not None else None
+        sql = """
+            SELECT
+              mapping_id,
+              version_id,
+              sheet_id,
+              row_id,
+              original_row_number,
+              raw_csv_row_number,
+              created_at,
+              row_json
+            FROM excel_row_search_index
+            WHERE excel_row_search_index MATCH ?
+              AND version_id = ?
+        """
+        parameters: list[object] = [self._fts_phrase(normalized_query), version_id]
+        if sheet_id is not None:
+            sql += " AND sheet_id = ?"
+            parameters.append(sheet_id)
+        sql += " ORDER BY CAST(raw_csv_row_number AS INTEGER) ASC"
+        if bounded_limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(bounded_limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, tuple(parameters)).fetchall()
+        return [
+            match
+            for row in rows
+            if (match := self._to_row_search_match(row)) is not None
+        ]
 
     def create_upload_task(self, task: ExcelUploadTask) -> None:
         with self._connect() as connection:
@@ -1566,6 +1664,24 @@ class SQLiteExcelAssetRepository:
             created_at=str(row["created_at"]),
         )
 
+    def _to_row_search_match(
+        self,
+        row: sqlite3.Row | None,
+    ) -> ExcelRowSearchMatch | None:
+        if row is None:
+            return None
+        row_values = self._load_row_json(str(row["row_json"]))
+        return ExcelRowSearchMatch(
+            mapping_id=str(row["mapping_id"]),
+            version_id=str(row["version_id"]),
+            sheet_id=str(row["sheet_id"]),
+            row_id=str(row["row_id"]),
+            original_row_number=int(row["original_row_number"]),
+            raw_csv_row_number=int(row["raw_csv_row_number"]),
+            created_at=str(row["created_at"]),
+            row=row_values,
+        )
+
     def _upload_task_values(self, task: ExcelUploadTask) -> tuple[object, ...]:
         return (
             task.task_id,
@@ -1948,6 +2064,13 @@ class SQLiteExcelAssetRepository:
     def _dump_json(self, value: object) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
+    def _row_search_text(self, row: list[str]) -> str:
+        return "\n".join(cell for cell in row if cell)
+
+    def _fts_phrase(self, query: str) -> str:
+        escaped_query = query.replace('"', '""')
+        return f'"{escaped_query}"'
+
     def _load_string_list(self, value: object) -> list[str]:
         try:
             parsed = json.loads(str(value))
@@ -1982,6 +2105,15 @@ class SQLiteExcelAssetRepository:
         if not isinstance(parsed, list):
             return []
         return [item for item in parsed if isinstance(item, dict)]
+
+    def _load_row_json(self, value: object) -> list[str]:
+        try:
+            parsed = json.loads(str(value))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed]
 
     def _load_json_object(self, value: object) -> dict[str, object]:
         try:

@@ -487,4 +487,25 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=14,
+        name="add_excel_row_search_fts_index",
+        statements=(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS excel_row_search_index
+            USING fts5(
+              mapping_id UNINDEXED,
+              version_id UNINDEXED,
+              sheet_id UNINDEXED,
+              row_id UNINDEXED,
+              original_row_number UNINDEXED,
+              raw_csv_row_number UNINDEXED,
+              created_at UNINDEXED,
+              row_json UNINDEXED,
+              searchable_text,
+              tokenize='trigram'
+            )
+            """,
+        ),
+    ),
 )

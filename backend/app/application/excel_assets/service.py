@@ -17,7 +17,7 @@ from app.application.excel_assets.models import (
     WorkbookSearchResult,
 )
 from app.application.excel_assets.profile import WorkbookProfileBuilder
-from app.application.excel_assets.search import SheetRowSearchPolicy
+from app.application.excel_assets.search import SheetRowSearchEngine, SheetRowSearchPolicy
 from app.core.errors import (
     AssetNotFoundError,
     FileDeleteConfirmationRequiredError,
@@ -34,6 +34,7 @@ from app.domain.models import (
     ExcelFileVersion,
     ExcelFileVisibility,
     ExcelRowMapping,
+    ExcelRowSearchEntry,
     ExcelSheet,
     ExcelVersionStatus,
     SheetProfile,
@@ -58,6 +59,11 @@ class ExcelAssetService:
         self._workbook_reader = workbook_reader
         self._profile_builder = profile_builder or WorkbookProfileBuilder()
         self._search_policy = search_policy or SheetRowSearchPolicy()
+        self._search_engine = SheetRowSearchEngine(
+            repository=repository,
+            resolve_artifact_path=self._artifact_path,
+            policy=self._search_policy,
+        )
 
     def initialize(self) -> None:
         self._repository.initialize()
@@ -454,7 +460,7 @@ class ExcelAssetService:
                 limit=max(1, safe_limit - len(matches)),
             )
             total_matches += sheet_result.total_matches
-            if len(matches) < safe_limit:
+            if len(matches) < limit:
                 matches.extend(sheet_result.matches[: safe_limit - len(matches)])
 
         return WorkbookSearchResult(
@@ -509,6 +515,7 @@ class ExcelAssetService:
         sheet_tuples: list[tuple[str, str, WorkbookSheet]] = []
         created_sheets: list[ExcelSheet] = []
         all_mappings: list[ExcelRowMapping] = []
+        search_entries: list[ExcelRowSearchEntry] = []
         mapping_csv_rows = [
             [
                 "row_id",
@@ -551,6 +558,19 @@ class ExcelAssetService:
             self._repository.create_sheet(created_sheet)
             created_sheets.append(created_sheet)
             all_mappings.extend(mappings)
+            search_entries.extend(
+                ExcelRowSearchEntry(
+                    mapping_id=mapping.mapping_id,
+                    version_id=version.version_id,
+                    sheet_id=sheet_id,
+                    row_id=mapping.row_id,
+                    original_row_number=mapping.original_row_number,
+                    raw_csv_row_number=mapping.raw_csv_row_number,
+                    created_at=mapping.created_at,
+                    row=row,
+                )
+                for mapping, row in zip(mappings, csv_rows, strict=True)
+            )
             mapping_csv_rows.extend(mapping_rows)
             artifact = ExcelArtifact(
                 artifact_id=new_id("artifact"),
@@ -563,6 +583,7 @@ class ExcelAssetService:
             artifacts.append(artifact)
 
         self._repository.create_row_mappings(all_mappings)
+        self._repository.replace_row_search_entries(version.version_id, search_entries)
         mapping_path = self._storage.write_mapping_csv(
             file_id=file.file_id,
             version_id=version.version_id,
@@ -700,69 +721,11 @@ class ExcelAssetService:
         query: str,
         limit: int,
     ) -> SheetSearchResult:
-        safe_limit = self._search_policy.normalize_limit(limit)
-        mappings = self._repository.list_row_mappings_for_sheet(sheet.sheet_id)
-        matches: list[SheetSearchMatch] = []
-        total_matches = 0
-
-        for mapping, row in self._iter_csv_rows_for_mappings(
-            self._artifact_path(sheet.raw_csv_path),
-            mappings,
-        ):
-            matched_columns = self._search_policy.matched_column_indexes(row, query)
-            if not matched_columns:
-                continue
-            total_matches += 1
-            if len(matches) < safe_limit:
-                matches.append(
-                    SheetSearchMatch(
-                        sheet=sheet,
-                        mapping=mapping,
-                        row=row,
-                        matched_columns=matched_columns,
-                    )
-                )
-
-        return SheetSearchResult(
+        return self._search_engine.search_sheet(
             sheet=sheet,
             query=query,
-            matches=matches,
-            total_matches=total_matches,
-            limit=safe_limit,
+            limit=limit,
         )
-
-    def _iter_csv_rows_for_mappings(
-        self,
-        path: Path,
-        mappings: list[ExcelRowMapping],
-    ):
-        pending_mappings = sorted(
-            (
-                mapping
-                for mapping in mappings
-                if mapping.raw_csv_row_number > 0
-            ),
-            key=lambda item: item.raw_csv_row_number,
-        )
-        if not pending_mappings:
-            return
-        mapping_index = 0
-        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-            reader = csv.reader(csv_file)
-            for row_index, row in enumerate(reader, start=1):
-                while (
-                    mapping_index < len(pending_mappings)
-                    and pending_mappings[mapping_index].raw_csv_row_number < row_index
-                ):
-                    mapping_index += 1
-                if mapping_index >= len(pending_mappings):
-                    break
-                while (
-                    mapping_index < len(pending_mappings)
-                    and pending_mappings[mapping_index].raw_csv_row_number == row_index
-                ):
-                    yield pending_mappings[mapping_index], row
-                    mapping_index += 1
 
     def _summary_profile_rows(
         self,
