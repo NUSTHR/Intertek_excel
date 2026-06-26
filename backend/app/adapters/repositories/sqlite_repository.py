@@ -1,5 +1,3 @@
-import hashlib
-import json
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -7,6 +5,7 @@ from pathlib import Path
 from threading import Lock
 
 from app.adapters.repositories.sqlite.maintenance import SQLiteOperationalMaintenance
+from app.adapters.repositories.sqlite.migrations import SQLiteMigrationRunner
 from app.adapters.repositories.sqlite.policies import (
     AUTH_SESSION_RETENTION_DAYS,
     LOGIN_ATTEMPT_RETENTION_DAYS,
@@ -18,7 +17,18 @@ from app.adapters.repositories.sqlite.policies import (
     SQLiteConnectionPolicy,
     SQLiteMaintenancePolicy,
 )
+from app.adapters.repositories.sqlite.row_search import SQLiteRowSearchIndex
 from app.adapters.repositories.sqlite.schema import SCHEMA_MIGRATIONS, SchemaMigration
+from app.adapters.repositories.sqlite.serialization import (
+    dump_json,
+    load_json_object,
+    load_object_list,
+    load_scope_map,
+    load_string_list,
+    row_str,
+    row_value,
+    safe_int,
+)
 from app.core.time import utc_now_iso
 from app.domain.models import (
     AttachedDocument,
@@ -85,77 +95,17 @@ class SQLiteExcelAssetRepository:
             password_reset_token_retention_days=password_reset_token_retention_days,
         )
         self._maintenance = SQLiteOperationalMaintenance(self._maintenance_policy)
+        self._migration_runner = SQLiteMigrationRunner(SCHEMA_MIGRATIONS)
+        self._row_search_index = SQLiteRowSearchIndex(
+            connect=self._connect,
+            dump_json=dump_json,
+        )
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect(run_maintenance=False) as connection:
-            self._ensure_migration_table(connection)
-            self._apply_migrations(connection)
+            self._migration_runner.initialize_schema(connection)
         self.run_operational_maintenance()
-
-    def _ensure_migration_table(self, connection: sqlite3.Connection) -> None:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-              version INTEGER PRIMARY KEY,
-              name TEXT NOT NULL,
-              checksum TEXT NOT NULL,
-              applied_at TEXT NOT NULL
-            )
-            """
-        )
-
-    def _apply_migrations(self, connection: sqlite3.Connection) -> None:
-        applied = self._applied_migrations(connection)
-        known_versions = {migration.version for migration in SCHEMA_MIGRATIONS}
-        unknown_versions = sorted(set(applied) - known_versions)
-        if unknown_versions:
-            raise RuntimeError(
-                "database contains unknown schema migration version(s): "
-                f"{unknown_versions}"
-            )
-        for migration in sorted(SCHEMA_MIGRATIONS, key=lambda item: item.version):
-            checksum = self._migration_checksum(migration)
-            applied_checksum = applied.get(migration.version)
-            if applied_checksum is not None:
-                if applied_checksum != checksum:
-                    raise RuntimeError(
-                        "schema migration checksum mismatch "
-                        f"for version {migration.version}"
-                    )
-                continue
-
-            for statement in migration.statements:
-                connection.execute(statement)
-            connection.execute(
-                """
-                INSERT INTO schema_migrations
-                  (version, name, checksum, applied_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    migration.version,
-                    migration.name,
-                    checksum,
-                    utc_now_iso(),
-                ),
-            )
-
-    def _applied_migrations(self, connection: sqlite3.Connection) -> dict[int, str]:
-        rows = connection.execute(
-            "SELECT version, checksum FROM schema_migrations ORDER BY version ASC"
-        ).fetchall()
-        return {int(row["version"]): str(row["checksum"]) for row in rows}
-
-    def _migration_checksum(self, migration: SchemaMigration) -> str:
-        payload = "\n".join(
-            [
-                str(migration.version),
-                migration.name,
-                *[statement.strip() for statement in migration.statements],
-            ]
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def create_file(self, file: ExcelFile) -> None:
         with self._connect() as connection:
@@ -564,54 +514,10 @@ class SQLiteExcelAssetRepository:
         version_id: str,
         entries: list[ExcelRowSearchEntry],
     ) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                DELETE FROM excel_row_search_index
-                WHERE version_id = ?
-                """,
-                (version_id,),
-            )
-            if not entries:
-                return
-            connection.executemany(
-                """
-                INSERT INTO excel_row_search_index
-                  (
-                    mapping_id, version_id, sheet_id, row_id,
-                    original_row_number, raw_csv_row_number, created_at,
-                    row_json, searchable_text
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        entry.mapping_id,
-                        entry.version_id,
-                        entry.sheet_id,
-                        entry.row_id,
-                        entry.original_row_number,
-                        entry.raw_csv_row_number,
-                        entry.created_at,
-                        self._dump_json(entry.row),
-                        self._row_search_text(entry.row),
-                    )
-                    for entry in entries
-                ],
-            )
+        self._row_search_index.replace_entries(version_id, entries)
 
     def has_row_search_entries(self, version_id: str) -> bool:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT 1
-                FROM excel_row_search_index
-                WHERE version_id = ?
-                LIMIT 1
-                """,
-                (version_id,),
-            ).fetchone()
-        return row is not None
+        return self._row_search_index.has_entries(version_id)
 
     def search_row_index(
         self,
@@ -621,39 +527,12 @@ class SQLiteExcelAssetRepository:
         sheet_id: str | None = None,
         limit: int | None = None,
     ) -> list[ExcelRowSearchMatch]:
-        normalized_query = query.strip()
-        if not normalized_query:
-            return []
-        bounded_limit = max(1, limit) if limit is not None else None
-        sql = """
-            SELECT
-              mapping_id,
-              version_id,
-              sheet_id,
-              row_id,
-              original_row_number,
-              raw_csv_row_number,
-              created_at,
-              row_json
-            FROM excel_row_search_index
-            WHERE excel_row_search_index MATCH ?
-              AND version_id = ?
-        """
-        parameters: list[object] = [self._fts_phrase(normalized_query), version_id]
-        if sheet_id is not None:
-            sql += " AND sheet_id = ?"
-            parameters.append(sheet_id)
-        sql += " ORDER BY CAST(raw_csv_row_number AS INTEGER) ASC"
-        if bounded_limit is not None:
-            sql += " LIMIT ?"
-            parameters.append(bounded_limit)
-        with self._connect() as connection:
-            rows = connection.execute(sql, tuple(parameters)).fetchall()
-        return [
-            match
-            for row in rows
-            if (match := self._to_row_search_match(row)) is not None
-        ]
+        return self._row_search_index.search(
+            version_id=version_id,
+            query=query,
+            sheet_id=sheet_id,
+            limit=limit,
+        )
 
     def create_upload_task(self, task: ExcelUploadTask) -> None:
         with self._connect() as connection:
@@ -806,7 +685,7 @@ class SQLiteExcelAssetRepository:
                 (
                     status.value,
                     error_message,
-                    self._dump_json(result),
+                    dump_json(result),
                     finished_at,
                     finished_at,
                     task_id,
@@ -857,13 +736,13 @@ class SQLiteExcelAssetRepository:
                     summary.document_type,
                     summary.summary_text,
                     summary.business_domain,
-                    self._dump_json(summary.coverage_scope),
-                    self._dump_json(summary.key_topics),
-                    self._dump_json(summary.positive_routing_terms),
-                    self._dump_json(summary.negative_routing_terms),
-                    self._dump_json(summary.exact_identifiers),
-                    self._dump_json(summary.suitable_questions),
-                    self._dump_json(summary.unsuitable_questions),
+                    dump_json(summary.coverage_scope),
+                    dump_json(summary.key_topics),
+                    dump_json(summary.positive_routing_terms),
+                    dump_json(summary.negative_routing_terms),
+                    dump_json(summary.exact_identifiers),
+                    dump_json(summary.suitable_questions),
+                    dump_json(summary.unsuitable_questions),
                     summary.routing_notes,
                     summary.created_at,
                 ),
@@ -884,10 +763,10 @@ class SQLiteExcelAssetRepository:
                         sheet.sheet_id,
                         sheet.sheet_name,
                         sheet.summary,
-                        self._dump_json(sheet.important_columns),
-                        self._dump_json(sheet.likely_question_types),
-                        self._dump_json(sheet.header_terms),
-                        self._dump_json(sheet.sampled_identifiers),
+                        dump_json(sheet.important_columns),
+                        dump_json(sheet.likely_question_types),
+                        dump_json(sheet.header_terms),
+                        dump_json(sheet.sampled_identifiers),
                     )
                     for sheet in summary.sheet_summaries
                 ],
@@ -1120,20 +999,20 @@ class SQLiteExcelAssetRepository:
                     turn.session_id,
                     turn.question,
                     turn.answer_text,
-                    self._dump_json(turn.citation_ids),
-                    self._dump_json(self._selected_documents_payload(turn.selected_documents)),
+                    dump_json(turn.citation_ids),
+                    dump_json(self._selected_documents_payload(turn.selected_documents)),
                     turn.created_at,
-                    self._dump_json(self._answer_blocks_payload(turn.answer_blocks)),
-                    self._dump_json(
+                    dump_json(self._answer_blocks_payload(turn.answer_blocks)),
+                    dump_json(
                         self._selected_documents_payload(turn.newly_attached_documents)
                     ),
-                    self._dump_json(
+                    dump_json(
                         self._attached_documents_payload(turn.attached_documents)
                     ),
-                    self._dump_json(self._citations_payload(turn.citations)),
+                    dump_json(self._citations_payload(turn.citations)),
                     1 if turn.insufficient_evidence else 0,
-                    self._dump_json(turn.follow_up_suggestions),
-                    self._dump_json(turn.warnings),
+                    dump_json(turn.follow_up_suggestions),
+                    dump_json(turn.warnings),
                 ),
             )
 
@@ -1603,11 +1482,11 @@ class SQLiteExcelAssetRepository:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             status=ExcelFileStatus(
-                self._row_str(row, "status", ExcelFileStatus.ACTIVE.value)
+                row_str(row, "status", ExcelFileStatus.ACTIVE.value)
             ),
-            deleted_at=self._row_value(row, "deleted_at"),
+            deleted_at=row_value(row, "deleted_at"),
             visibility=ExcelFileVisibility(
-                self._row_str(row, "visibility", ExcelFileVisibility.VISIBLE.value)
+                row_str(row, "visibility", ExcelFileVisibility.VISIBLE.value)
             ),
         )
 
@@ -1664,24 +1543,6 @@ class SQLiteExcelAssetRepository:
             created_at=str(row["created_at"]),
         )
 
-    def _to_row_search_match(
-        self,
-        row: sqlite3.Row | None,
-    ) -> ExcelRowSearchMatch | None:
-        if row is None:
-            return None
-        row_values = self._load_row_json(str(row["row_json"]))
-        return ExcelRowSearchMatch(
-            mapping_id=str(row["mapping_id"]),
-            version_id=str(row["version_id"]),
-            sheet_id=str(row["sheet_id"]),
-            row_id=str(row["row_id"]),
-            original_row_number=int(row["original_row_number"]),
-            raw_csv_row_number=int(row["raw_csv_row_number"]),
-            created_at=str(row["created_at"]),
-            row=row_values,
-        )
-
     def _upload_task_values(self, task: ExcelUploadTask) -> tuple[object, ...]:
         return (
             task.task_id,
@@ -1691,7 +1552,7 @@ class SQLiteExcelAssetRepository:
             1 if task.replace_existing else 0,
             task.status.value,
             task.error_message,
-            self._dump_json(task.result),
+            dump_json(task.result),
             task.created_at,
             task.updated_at,
             task.started_at,
@@ -1710,7 +1571,7 @@ class SQLiteExcelAssetRepository:
             replace_existing=bool(int(row["replace_existing"])),
             status=ExcelUploadTaskStatus(str(row["status"])),
             error_message=row["error_message"],
-            result=self._load_json_object(self._row_value(row, "result_json", "{}")),
+            result=load_json_object(row_value(row, "result_json", "{}")),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             started_at=row["started_at"],
@@ -1729,23 +1590,23 @@ class SQLiteExcelAssetRepository:
             summary_id=str(row["summary_id"]),
             file_id=str(row["file_id"]),
             version_id=str(row["version_id"]),
-            document_title=self._row_str(row, "document_title"),
-            document_type=self._row_str(row, "document_type", "unknown") or "unknown",
+            document_title=row_str(row, "document_title"),
+            document_type=row_str(row, "document_type", "unknown") or "unknown",
             summary_text=str(row["summary_text"]),
             business_domain=str(row["business_domain"]),
-            coverage_scope=self._load_scope_map(self._row_value(row, "coverage_scope_json", "{}")),
-            key_topics=self._load_string_list(row["key_topics_json"]),
-            positive_routing_terms=self._load_string_list(
-                self._row_value(row, "positive_routing_terms_json", "[]")
+            coverage_scope=load_scope_map(row_value(row, "coverage_scope_json", "{}")),
+            key_topics=load_string_list(row["key_topics_json"]),
+            positive_routing_terms=load_string_list(
+                row_value(row, "positive_routing_terms_json", "[]")
             ),
-            negative_routing_terms=self._load_string_list(
-                self._row_value(row, "negative_routing_terms_json", "[]")
+            negative_routing_terms=load_string_list(
+                row_value(row, "negative_routing_terms_json", "[]")
             ),
-            exact_identifiers=self._load_string_list(
-                self._row_value(row, "exact_identifiers_json", "[]")
+            exact_identifiers=load_string_list(
+                row_value(row, "exact_identifiers_json", "[]")
             ),
-            suitable_questions=self._load_string_list(row["suitable_questions_json"]),
-            unsuitable_questions=self._load_string_list(
+            suitable_questions=load_string_list(row["suitable_questions_json"]),
+            unsuitable_questions=load_string_list(
                 row["unsuitable_questions_json"]
             ),
             sheet_summaries=[
@@ -1753,22 +1614,22 @@ class SQLiteExcelAssetRepository:
                     sheet_id=str(sheet_row["sheet_id"]),
                     sheet_name=str(sheet_row["sheet_name"]),
                     summary=str(sheet_row["summary"]),
-                    important_columns=self._load_string_list(
+                    important_columns=load_string_list(
                         sheet_row["important_columns_json"]
                     ),
-                    likely_question_types=self._load_string_list(
+                    likely_question_types=load_string_list(
                         sheet_row["likely_question_types_json"]
                     ),
-                    header_terms=self._load_string_list(
-                        self._row_value(sheet_row, "header_terms_json", "[]")
+                    header_terms=load_string_list(
+                        row_value(sheet_row, "header_terms_json", "[]")
                     ),
-                    sampled_identifiers=self._load_string_list(
-                        self._row_value(sheet_row, "sampled_identifiers_json", "[]")
+                    sampled_identifiers=load_string_list(
+                        row_value(sheet_row, "sampled_identifiers_json", "[]")
                     ),
                 )
                 for sheet_row in sheet_rows
             ],
-            routing_notes=self._row_str(row, "routing_notes"),
+            routing_notes=row_str(row, "routing_notes"),
             created_at=str(row["created_at"]),
         )
 
@@ -1852,12 +1713,12 @@ class SQLiteExcelAssetRepository:
     def _to_turn(self, row: sqlite3.Row | None) -> ChatTurn | None:
         if row is None:
             return None
-        citation_ids = self._load_string_list(row["citation_ids_json"])
+        citation_ids = load_string_list(row["citation_ids_json"])
         selected_documents = self._selected_documents_from_payload(
-            self._load_object_list(row["selected_documents_json"])
+            load_object_list(row["selected_documents_json"])
         )
         answer_blocks = self._answer_blocks_from_payload(
-            self._load_object_list(self._row_value(row, "answer_blocks_json", "[]"))
+            load_object_list(row_value(row, "answer_blocks_json", "[]"))
         )
         if not answer_blocks and str(row["answer_text"]):
             answer_blocks = [
@@ -1876,25 +1737,25 @@ class SQLiteExcelAssetRepository:
             created_at=str(row["created_at"]),
             answer_blocks=answer_blocks,
             newly_attached_documents=self._selected_documents_from_payload(
-                self._load_object_list(
-                    self._row_value(row, "newly_attached_documents_json", "[]")
+                load_object_list(
+                    row_value(row, "newly_attached_documents_json", "[]")
                 )
             ),
             attached_documents=self._attached_documents_from_payload(
-                self._load_object_list(
-                    self._row_value(row, "attached_documents_json", "[]")
+                load_object_list(
+                    row_value(row, "attached_documents_json", "[]")
                 )
             ),
             citations=self._citations_from_payload(
-                self._load_object_list(self._row_value(row, "citations_json", "[]"))
+                load_object_list(row_value(row, "citations_json", "[]"))
             ),
             insufficient_evidence=bool(
-                int(self._row_value(row, "insufficient_evidence", 0) or 0)
+                int(row_value(row, "insufficient_evidence", 0) or 0)
             ),
-            follow_up_suggestions=self._load_string_list(
-                self._row_value(row, "follow_up_suggestions_json", "[]")
+            follow_up_suggestions=load_string_list(
+                row_value(row, "follow_up_suggestions_json", "[]")
             ),
-            warnings=self._load_string_list(self._row_value(row, "warnings_json", "[]")),
+            warnings=load_string_list(row_value(row, "warnings_json", "[]")),
         )
 
     def _to_llm_preference(self, row: sqlite3.Row | None) -> LlmPreference | None:
@@ -2010,7 +1871,7 @@ class SQLiteExcelAssetRepository:
                     file_id=file_id,
                     version_id=version_id,
                     attached_at=str(document.get("attached_at", "")),
-                    row_count=self._safe_int(document.get("row_count"), 0),
+                    row_count=safe_int(document.get("row_count"), 0),
                     context_hash=str(document.get("context_hash", "")),
                     status=str(document.get("status", "attached")),
                 )
@@ -2060,92 +1921,6 @@ class SQLiteExcelAssetRepository:
                 )
             )
         return citations
-
-    def _dump_json(self, value: object) -> str:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-    def _row_search_text(self, row: list[str]) -> str:
-        return "\n".join(cell for cell in row if cell)
-
-    def _fts_phrase(self, query: str) -> str:
-        escaped_query = query.replace('"', '""')
-        return f'"{escaped_query}"'
-
-    def _load_string_list(self, value: object) -> list[str]:
-        try:
-            parsed = json.loads(str(value))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(parsed, list):
-            return []
-        return [str(item) for item in parsed if str(item).strip()]
-
-    def _load_scope_map(self, value: object) -> dict[str, list[str]]:
-        try:
-            parsed = json.loads(str(value))
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(parsed, dict):
-            return {}
-        return {
-            str(key): [
-                str(item)
-                for item in items
-                if str(item).strip()
-            ]
-            for key, items in parsed.items()
-            if isinstance(items, list)
-        }
-
-    def _load_object_list(self, value: object) -> list[dict]:
-        try:
-            parsed = json.loads(str(value))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(parsed, list):
-            return []
-        return [item for item in parsed if isinstance(item, dict)]
-
-    def _load_row_json(self, value: object) -> list[str]:
-        try:
-            parsed = json.loads(str(value))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(parsed, list):
-            return []
-        return [str(item) for item in parsed]
-
-    def _load_json_object(self, value: object) -> dict[str, object]:
-        try:
-            parsed = json.loads(str(value))
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(parsed, dict):
-            return {}
-        return parsed
-
-    def _row_value(
-        self,
-        row: sqlite3.Row,
-        column: str,
-        default: object = None,
-    ) -> object:
-        return row[column] if column in row.keys() else default
-
-    def _row_str(
-        self,
-        row: sqlite3.Row,
-        column: str,
-        default: str = "",
-    ) -> str:
-        value = self._row_value(row, column, default)
-        return str(value) if value is not None else default
-
-    def _safe_int(self, value: object, default: int) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
 
     def _deleted_file_display_name(self, *, file_id: str, display_name: str) -> str:
         return f"deleted:{file_id}:{display_name}"

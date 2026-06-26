@@ -1,10 +1,10 @@
-import csv
 import hashlib
-import json
 import sqlite3
 from pathlib import Path
 
 from app.application.excel_assets.access import FileAccessContext
+from app.application.excel_assets.access_guard import ExcelAssetAccessGuard
+from app.application.excel_assets.csv_rows import CsvRowReader
 from app.application.excel_assets.models import (
     DeleteExcelFileResult,
     FileNameCheckResult,
@@ -17,7 +17,9 @@ from app.application.excel_assets.models import (
     WorkbookSearchResult,
 )
 from app.application.excel_assets.profile import WorkbookProfileBuilder
+from app.application.excel_assets.profile_loader import WorkbookProfileLoader
 from app.application.excel_assets.search import SheetRowSearchEngine, SheetRowSearchPolicy
+from app.application.excel_assets.version_processor import WorkbookVersionProcessor
 from app.core.errors import (
     AssetNotFoundError,
     FileDeleteConfirmationRequiredError,
@@ -30,11 +32,8 @@ from app.domain.models import (
     ExcelArtifact,
     ExcelArtifactType,
     ExcelFile,
-    ExcelFileStatus,
     ExcelFileVersion,
     ExcelFileVisibility,
-    ExcelRowMapping,
-    ExcelRowSearchEntry,
     ExcelSheet,
     ExcelVersionStatus,
     SheetProfile,
@@ -42,7 +41,7 @@ from app.domain.models import (
 )
 from app.ports.repository import ExcelAssetRepository
 from app.ports.storage import ExcelArtifactStorage
-from app.ports.workbook_reader import WorkbookReader, WorkbookSheet
+from app.ports.workbook_reader import WorkbookReader
 
 
 class ExcelAssetService:
@@ -56,8 +55,16 @@ class ExcelAssetService:
     ) -> None:
         self._repository = repository
         self._storage = storage
-        self._workbook_reader = workbook_reader
-        self._profile_builder = profile_builder or WorkbookProfileBuilder()
+        profile_builder = profile_builder or WorkbookProfileBuilder()
+        self._csv_reader = CsvRowReader()
+        self._profile_loader = WorkbookProfileLoader(self._csv_reader)
+        self._access_guard = ExcelAssetAccessGuard(repository)
+        self._version_processor = WorkbookVersionProcessor(
+            repository=repository,
+            storage=storage,
+            workbook_reader=workbook_reader,
+            profile_builder=profile_builder,
+        )
         self._search_policy = search_policy or SheetRowSearchPolicy()
         self._search_engine = SheetRowSearchEngine(
             repository=repository,
@@ -123,7 +130,11 @@ class ExcelAssetService:
         self._repository.create_version(version)
 
         try:
-            result = self._process_version(file=file, version=version, content=content)
+            result = self._version_processor.process_version(
+                file=file,
+                version=version,
+                content=content,
+            )
             self._repository.activate_version(
                 file_id=file.file_id,
                 version_id=version.version_id,
@@ -150,7 +161,7 @@ class ExcelAssetService:
         return [
             file
             for file in self._repository.list_files()
-            if self._can_access_file(file, access)
+            if self._access_guard.can_access_file(file, access)
         ]
 
     def get_file(
@@ -487,188 +498,6 @@ class ExcelAssetService:
             raise AssetNotFoundError("mapped CSV row was not found")
         return RowLookupResult(sheet=sheet, mapping=mapping, row=row)
 
-    def _process_version(
-        self,
-        file: ExcelFile,
-        version: ExcelFileVersion,
-        content: bytes,
-    ) -> UploadExcelResult:
-        original_path = self._storage.save_original(
-            file_id=file.file_id,
-            version_id=version.version_id,
-            original_filename=version.original_filename,
-            content=content,
-        )
-        workbook = self._workbook_reader.read(original_path)
-        created_at = utc_now_iso()
-        artifacts = [
-            ExcelArtifact(
-                artifact_id=new_id("artifact"),
-                version_id=version.version_id,
-                artifact_type=ExcelArtifactType.ORIGINAL,
-                path=self._artifact_reference(original_path),
-                created_at=created_at,
-            )
-        ]
-        self._repository.create_artifact(artifacts[0])
-
-        sheet_tuples: list[tuple[str, str, WorkbookSheet]] = []
-        created_sheets: list[ExcelSheet] = []
-        all_mappings: list[ExcelRowMapping] = []
-        search_entries: list[ExcelRowSearchEntry] = []
-        mapping_csv_rows = [
-            [
-                "row_id",
-                "version_id",
-                "sheet_id",
-                "sheet_name",
-                "original_row_number",
-                "raw_csv_row_number",
-            ]
-        ]
-
-        for sheet in workbook.sheets:
-            sheet_code = f"S{sheet.sheet_index:03d}"
-            sheet_id = new_id("sheet")
-            sheet_tuples.append((sheet_id, sheet_code, sheet))
-            csv_rows, mappings, mapping_rows = self._build_sheet_rows(
-                version_id=version.version_id,
-                sheet_id=sheet_id,
-                sheet_code=sheet_code,
-                sheet=sheet,
-                created_at=created_at,
-            )
-            raw_csv_path = self._storage.write_csv(
-                file_id=file.file_id,
-                version_id=version.version_id,
-                sheet_code=sheet_code,
-                rows=csv_rows,
-            )
-            created_sheet = ExcelSheet(
-                sheet_id=sheet_id,
-                version_id=version.version_id,
-                sheet_index=sheet.sheet_index,
-                sheet_code=sheet_code,
-                sheet_name=sheet.sheet_name,
-                row_count=len(sheet.rows),
-                column_count=self._column_count(sheet.rows) + 1,
-                raw_csv_path=self._artifact_reference(raw_csv_path),
-                created_at=created_at,
-            )
-            self._repository.create_sheet(created_sheet)
-            created_sheets.append(created_sheet)
-            all_mappings.extend(mappings)
-            search_entries.extend(
-                ExcelRowSearchEntry(
-                    mapping_id=mapping.mapping_id,
-                    version_id=version.version_id,
-                    sheet_id=sheet_id,
-                    row_id=mapping.row_id,
-                    original_row_number=mapping.original_row_number,
-                    raw_csv_row_number=mapping.raw_csv_row_number,
-                    created_at=mapping.created_at,
-                    row=row,
-                )
-                for mapping, row in zip(mappings, csv_rows, strict=True)
-            )
-            mapping_csv_rows.extend(mapping_rows)
-            artifact = ExcelArtifact(
-                artifact_id=new_id("artifact"),
-                version_id=version.version_id,
-                artifact_type=ExcelArtifactType.RAW_CSV,
-                path=self._artifact_reference(raw_csv_path),
-                created_at=created_at,
-            )
-            self._repository.create_artifact(artifact)
-            artifacts.append(artifact)
-
-        self._repository.create_row_mappings(all_mappings)
-        self._repository.replace_row_search_entries(version.version_id, search_entries)
-        mapping_path = self._storage.write_mapping_csv(
-            file_id=file.file_id,
-            version_id=version.version_id,
-            rows=mapping_csv_rows,
-        )
-        mapping_artifact = ExcelArtifact(
-            artifact_id=new_id("artifact"),
-            version_id=version.version_id,
-            artifact_type=ExcelArtifactType.ROW_MAPPING,
-            path=self._artifact_reference(mapping_path),
-            created_at=created_at,
-        )
-        self._repository.create_artifact(mapping_artifact)
-        artifacts.append(mapping_artifact)
-
-        profile = self._profile_builder.build(
-            file_id=file.file_id,
-            version_id=version.version_id,
-            original_filename=version.original_filename,
-            file_hash=version.file_hash,
-            sheets=sheet_tuples,
-        )
-        profile_path = self._storage.write_json(
-            file_id=file.file_id,
-            version_id=version.version_id,
-            relative_name="profile.json",
-            payload=self._profile_builder.to_json_payload(profile),
-        )
-        profile_artifact = ExcelArtifact(
-            artifact_id=new_id("artifact"),
-            version_id=version.version_id,
-            artifact_type=ExcelArtifactType.PROFILE,
-            path=self._artifact_reference(profile_path),
-            created_at=created_at,
-        )
-        self._repository.create_artifact(profile_artifact)
-        artifacts.append(profile_artifact)
-
-        return UploadExcelResult(
-            file=file,
-            version=version,
-            sheets=created_sheets,
-            profile=profile,
-            artifacts=artifacts,
-        )
-
-    def _build_sheet_rows(
-        self,
-        version_id: str,
-        sheet_id: str,
-        sheet_code: str,
-        sheet: WorkbookSheet,
-        created_at: str,
-    ) -> tuple[list[list[str]], list[ExcelRowMapping], list[list[str]]]:
-        width = self._column_count(sheet.rows)
-        csv_rows: list[list[str]] = []
-        mappings: list[ExcelRowMapping] = []
-        mapping_csv_rows: list[list[str]] = []
-
-        for index, row in enumerate(sheet.rows, start=1):
-            row_id = f"{sheet_code}_R{index}"
-            padded_row = row + [""] * max(0, width - len(row))
-            csv_rows.append([row_id, *padded_row])
-            mapping = ExcelRowMapping(
-                mapping_id=new_id("mapping"),
-                version_id=version_id,
-                sheet_id=sheet_id,
-                row_id=row_id,
-                original_row_number=index,
-                raw_csv_row_number=index,
-                created_at=created_at,
-            )
-            mappings.append(mapping)
-            mapping_csv_rows.append(
-                [
-                    row_id,
-                    version_id,
-                    sheet_id,
-                    sheet.sheet_name,
-                    str(index),
-                    str(index),
-                ]
-            )
-        return csv_rows, mappings, mapping_csv_rows
-
     def _normalize_display_name(self, filename: str) -> str:
         normalized = Path(filename).name.strip()
         if not normalized:
@@ -678,42 +507,17 @@ class ExcelAssetService:
     def _sha256(self, content: bytes) -> str:
         return hashlib.sha256(content).hexdigest()
 
-    def _column_count(self, rows: list[list[str]]) -> int:
-        return max((len(row) for row in rows), default=0)
-
-    def _artifact_reference(self, path: Path) -> str:
-        return self._storage.artifact_reference(path)
-
     def _artifact_path(self, reference: str) -> Path:
         return self._storage.resolve_artifact_reference(reference)
 
     def _read_csv_rows(self, path: Path) -> list[list[str]]:
-        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-            return [row for row in csv.reader(csv_file)]
+        return self._csv_reader.read_rows(path)
 
     def _read_csv_rows_page(self, path: Path, offset: int, limit: int) -> list[list[str]]:
-        safe_offset = max(0, offset)
-        safe_limit = max(1, limit)
-        rows: list[list[str]] = []
-        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-            reader = csv.reader(csv_file)
-            for index, row in enumerate(reader):
-                if index < safe_offset:
-                    continue
-                if len(rows) >= safe_limit:
-                    break
-                rows.append(row)
-        return rows
+        return self._csv_reader.read_rows_page(path, offset, limit)
 
     def _read_csv_row(self, path: Path, row_index: int) -> list[str] | None:
-        if row_index < 0:
-            return None
-        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
-            reader = csv.reader(csv_file)
-            for index, row in enumerate(reader):
-                if index == row_index:
-                    return row
-        return None
+        return self._csv_reader.read_row(path, row_index)
 
     def _search_sheet(
         self,
@@ -732,101 +536,34 @@ class ExcelAssetService:
         sheet_profile: SheetProfile,
         raw_csv_path: Path | None,
     ) -> list[list[str]]:
-        if raw_csv_path is not None:
-            rows = self._read_csv_rows(raw_csv_path)
-            return [self._strip_internal_row_id(row, sheet_profile.sheet_code) for row in rows]
-        return sheet_profile.profile_rows or sheet_profile.sample_rows
-
-    def _strip_internal_row_id(self, row: list[str], sheet_code: str) -> list[str]:
-        if row and row[0].startswith(f"{sheet_code}_R"):
-            return row[1:]
-        return row
+        return self._profile_loader.summary_profile_rows(sheet_profile, raw_csv_path)
 
     def _read_profile(self, path: Path, version: ExcelFileVersion) -> WorkbookProfile:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise AssetNotFoundError("workbook profile was not found") from exc
-        sheets = [
-            SheetProfile(
-                sheet_id=str(sheet["sheet_id"]),
-                sheet_code=str(sheet["sheet_code"]),
-                sheet_name=str(sheet["sheet_name"]),
-                row_count=int(sheet["row_count"]),
-                column_count=int(sheet["column_count"]),
-                candidate_header=[str(value) for value in sheet.get("candidate_header", [])],
-                sample_rows=[
-                    [str(cell) for cell in row]
-                    for row in sheet.get("sample_rows", [])
-                ],
-                profile_rows=[
-                    [str(cell) for cell in row]
-                    for row in sheet.get("profile_rows", sheet.get("sample_rows", []))
-                ],
-            )
-            for sheet in payload.get("sheets", [])
-        ]
-        return WorkbookProfile(
-            file_id=str(payload.get("file_id", version.file_id)),
-            version_id=str(payload.get("version_id", version.version_id)),
-            original_filename=str(payload.get("original_filename", version.original_filename)),
-            file_hash=str(payload.get("file_hash", version.file_hash)),
-            sheets=sheets,
-        )
-
-    def _can_access_file(
-        self,
-        file: ExcelFile,
-        access: FileAccessContext | None,
-    ) -> bool:
-        if access is None or access.can_manage_files:
-            return True
-        return file.visibility == ExcelFileVisibility.VISIBLE
+        return self._profile_loader.read_profile(path, version=version)
 
     def _require_file(
         self,
         file_id: str,
         access: FileAccessContext | None = None,
     ) -> ExcelFile:
-        file = self._repository.get_file(file_id)
-        if file is None or not self._can_access_file(file, access):
-            raise AssetNotFoundError("Excel file was not found")
-        return file
+        return self._access_guard.require_file(file_id, access=access)
 
     def _require_version(
         self,
         version_id: str,
         access: FileAccessContext | None = None,
     ) -> ExcelFileVersion:
-        version = self._repository.get_version(version_id)
-        if version is None:
-            raise AssetNotFoundError("Excel file version was not found")
-        self._require_file(version.file_id, access=access)
-        return version
+        return self._access_guard.require_version(version_id, access=access)
 
     def _require_version_from_deleted_file(self, version_id: str) -> ExcelFileVersion:
-        version = self._repository.get_version(version_id)
-        if version is None:
-            raise AssetNotFoundError("Excel file version was not found")
-        file = self._repository.get_file_including_deleted(version.file_id)
-        if file is None or file.status != ExcelFileStatus.DELETED:
-            raise AssetNotFoundError("Excel file version was not found")
-        return version
+        return self._access_guard.require_version_from_deleted_file(version_id)
 
     def _require_sheet(
         self,
         sheet_id: str,
         access: FileAccessContext | None = None,
     ) -> ExcelSheet:
-        sheet = self._repository.get_sheet(sheet_id)
-        if sheet is None:
-            raise AssetNotFoundError("Excel sheet was not found")
-        self._require_version(sheet.version_id, access=access)
-        return sheet
+        return self._access_guard.require_sheet(sheet_id, access=access)
 
     def _require_sheet_from_deleted_file(self, sheet_id: str) -> ExcelSheet:
-        sheet = self._repository.get_sheet(sheet_id)
-        if sheet is None:
-            raise AssetNotFoundError("Excel sheet was not found")
-        self._require_version_from_deleted_file(sheet.version_id)
-        return sheet
+        return self._access_guard.require_sheet_from_deleted_file(sheet_id)

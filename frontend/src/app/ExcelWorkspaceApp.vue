@@ -14,13 +14,6 @@ import {
   searchExcelVersionRows,
   setExcelFileVisibility,
 } from '../api/excel-assets-api'
-import {
-  createChatSession,
-  deleteChatSession,
-  listChatSessions,
-  renameChatSession,
-  setChatSessionPinned,
-} from '../api/chat-api'
 import { getCurrentUser, logout as logoutSession } from '../api/auth-api'
 import { clearAuthToken } from '../api/auth-token'
 import {
@@ -28,7 +21,6 @@ import {
   getDocumentSummary,
   updateDocumentSummary,
 } from '../api/document-summaries-api'
-import { getLlmModelOptions, getLlmPreference, saveLlmPreference } from '../api/llm-api'
 import { getWorkspaceConfig } from '../api/workspace-api'
 import AppIcon from '../components/AppIcon.vue'
 import AuthPanel from '../components/AuthPanel.vue'
@@ -43,29 +35,22 @@ import {
   WorkbookUploadDialog,
   useUploadTaskPolling,
   type FileSchemaColumn,
-  type ModelStageDraft,
 } from '../features/file-management'
 import { useTransientFeedback } from './use-transient-feedback'
+import { useChatSessions } from './composables/use-chat-sessions'
+import { useFileLibrary } from './composables/use-file-library'
+import { useLlmPreferences } from './composables/use-llm-preferences'
+import { useWorkspaceResize } from './composables/use-workspace-resize'
 import {
-  defaultExcelCellWidth,
   defaultExcelRowHeight,
   fallbackAllowedUploadExtensions,
   fallbackMaxUploadBytes,
-  filePageSize,
-  maxChatColumnWidth,
-  maxExcelCellWidth,
-  maxExcelRowHeight,
-  minChatColumnWidth,
-  minExcelCellWidth,
-  minExcelRowHeight,
-  pinnedFileStorageKey,
   previewLimit,
   primaryNavItems,
   sheetSearchLimit,
 } from './workspace-constants'
 import {
   buildUploadAcceptValue,
-  clamp,
   columnLabel,
   csvEscape,
   formatBytes,
@@ -77,7 +62,6 @@ import {
 import type { AuthResponse, AuthUser } from '../types/auth'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
-import type { LlmModelDefaults, LlmProviderOption } from '../types/llm'
 import type {
   ExcelFile,
   ExcelFileVersion,
@@ -91,7 +75,6 @@ import type {
   ActiveView,
   ConfirmDialog,
   FileInsightTab,
-  ModelStage,
   PrimaryNavItem,
   RenameDialog,
   SelectedCell,
@@ -108,10 +91,6 @@ const isAuthChecking = ref<boolean>(true)
 const authErrorMessage = ref<string>('')
 const activeFileInsightTab = ref<FileInsightTab>('summary')
 const isFileInsightFullscreen = ref<boolean>(false)
-const chatSessions = ref<ChatSession[]>([])
-const activeChatSessionId = ref<string>('')
-const chatSessionError = ref<string>('')
-const isChatSessionLoading = ref<boolean>(false)
 const files = ref<ExcelFile[]>([])
 const versions = ref<ExcelFileVersion[]>([])
 const sheets = ref<ExcelSheet[]>([])
@@ -143,13 +122,39 @@ const {
   clear: clearChatSessionFeedback,
 } = useTransientFeedback(2800)
 const {
+  chatSessions,
+  activeChatSessionId,
+  activeChatSession,
+  chatSessionError,
+  isChatSessionLoading,
+  loadChatSessions,
+  startNewChatSession: createAndActivateChatSession,
+  selectChatSession: setActiveChatSession,
+  toggleChatSessionPin: pinChatSession,
+  confirmDeleteChatSession: deleteChatSessionAfterConfirmation,
+  handleChatSessionCreated,
+  handleChatSessionTitleSuggested,
+  renameActiveChatSession,
+  resetChatSessions,
+} = useChatSessions({
+  clearFeedback: clearChatSessionFeedback,
+  showFeedback: showChatSessionFeedback,
+  onSessionActivated: () => {
+    latestAnswer.value = null
+    clearSelection()
+    selectedCell.value = null
+  },
+  onActiveSessionDeleted: () => {
+    latestAnswer.value = null
+  },
+})
+const {
   uploadTask,
   isUploadTaskPending,
   setUploadTask,
   clearUploadTask,
   pollUploadTask,
 } = useUploadTaskPolling()
-const fileSearchTerm = ref<string>('')
 const documentSearchTerm = ref<string>('')
 const sheetSearchTerm = ref<string>('')
 const sheetSearchResults = ref<SheetSearchMatch[]>([])
@@ -162,46 +167,45 @@ const isSummaryLoading = ref<boolean>(false)
 const isSummarySaving = ref<boolean>(false)
 const isLookupLoading = ref<boolean>(false)
 const isSheetSearchLoading = ref<boolean>(false)
-const availableLlmModels = ref<string[]>([])
-const availableLlmProviders = ref<LlmProviderOption[]>([])
-const summaryProvider = ref<string>('siliconflow')
-const summaryModel = ref<string>('')
-const routerProvider = ref<string>('siliconflow')
-const routerModel = ref<string>('')
-const answerProvider = ref<string>('siliconflow')
-const answerModel = ref<string>('')
-const draftSummaryProvider = ref<string>('siliconflow')
-const draftSummaryModel = ref<string>('')
-const draftRouterProvider = ref<string>('siliconflow')
-const draftRouterModel = ref<string>('')
-const draftAnswerProvider = ref<string>('siliconflow')
-const draftAnswerModel = ref<string>('')
-const isModelPreferenceSaving = ref<boolean>(false)
-const modelPreferenceFeedback = ref<string>('')
-const modelPreferenceFeedbackKind = ref<'success' | 'error'>('success')
-const pinnedFileIds = ref<string[]>(loadPinnedFileIds())
 const selectedCell = ref<SelectedCell | null>(null)
-const excelColumnWidths = ref<Record<string, number>>({})
-const excelRowHeights = ref<Record<string, number>>({})
-const chatColumnWidth = ref<number>(420)
-const isChatResizing = ref<boolean>(false)
-const isExcelColumnResizing = ref<boolean>(false)
-const isExcelRowResizing = ref<boolean>(false)
 const isChatPanelCollapsed = ref<boolean>(false)
 const isChatAnswerPending = ref<boolean>(false)
-const filePage = ref<number>(1)
-let excelResizeStartX = 0
-let excelResizeStartY = 0
-let excelResizeStartWidth = 0
-let excelResizeStartHeight = 0
-let excelResizeTargetColumnKey = ''
-let excelResizeTargetRowKey = ''
+const {
+  fileSearchTerm,
+  pinnedFileIds,
+  filteredFiles,
+  filePageCount,
+  normalizedFilePage,
+  paginatedFiles,
+  visibleFilePages,
+  filePaginationLabel,
+  setFilePage,
+  stepFilePage,
+  toggleFilePin,
+  resetFilePage,
+} = useFileLibrary({ files, onInteraction: closeActionMenus })
+const {
+  availableLlmProviders,
+  routerProvider,
+  routerModel,
+  answerProvider,
+  answerModel,
+  modelStageDrafts,
+  answerSupportsDeepThinking,
+  canSaveModelPreference,
+  isModelPreferenceSaving,
+  modelPreferenceFeedback,
+  modelPreferenceFeedbackKind,
+  loadLlmModelOptions,
+  updateModelStageProvider,
+  updateModelStageModel,
+  saveModelPreferenceDefaults,
+} = useLlmPreferences({ onError: showWorkspaceError })
 let fileListRequestId = 0
 let workspaceSelectionRequestId = 0
 let rowLookupRequestId = 0
 let summaryGenerationRequestId = 0
 let summarySaveRequestId = 0
-let chatSessionListRequestId = 0
 let workspaceBusyRequestId = 0
 let sheetSearchRequestId = 0
 let previewAbortController: AbortController | null = null
@@ -218,48 +222,6 @@ const selectedSheet = computed(() => {
 
 const selectedVersion = computed(() => {
   return versions.value.find((version) => version.version_id === selectedVersionId.value) ?? null
-})
-
-const filteredFiles = computed(() => {
-  const query = fileSearchTerm.value.trim().toLowerCase()
-  const visibleFiles = !query
-    ? files.value
-    : files.value.filter((file) => file.display_name.toLowerCase().includes(query))
-  return sortFilesForDisplay(visibleFiles)
-})
-
-const filePageCount = computed(() => {
-  return Math.max(1, Math.ceil(filteredFiles.value.length / filePageSize))
-})
-
-const paginatedFiles = computed(() => {
-  const start = (normalizedFilePage.value - 1) * filePageSize
-  return filteredFiles.value.slice(start, start + filePageSize)
-})
-
-const normalizedFilePage = computed(() => {
-  return clamp(filePage.value, 1, filePageCount.value)
-})
-
-const visibleFilePages = computed(() => {
-  if (filteredFiles.value.length === 0) {
-    return []
-  }
-  const total = filePageCount.value
-  const current = normalizedFilePage.value
-  const start = clamp(current - 1, 1, Math.max(1, total - 2))
-  const end = Math.min(total, start + 2)
-  return Array.from({ length: end - start + 1 }, (_value, index) => start + index)
-})
-
-const filePaginationLabel = computed(() => {
-  const total = filteredFiles.value.length
-  if (total === 0) {
-    return '0 of 0'
-  }
-  const start = (normalizedFilePage.value - 1) * filePageSize + 1
-  const end = Math.min(total, start + filePageSize - 1)
-  return `${start}-${end} of ${total}`
 })
 
 const previewHeaders = computed(() => {
@@ -285,6 +247,30 @@ const excelColumnLabels = computed(() => {
 
 const excelDisplayRows = computed(() => {
   return preview.value?.rows ?? []
+})
+
+const {
+  chatColumnWidth,
+  isChatResizing,
+  isExcelColumnResizing,
+  isExcelRowResizing,
+  startChatResize,
+  stopChatResize,
+  excelRowKey,
+  fillerExcelRowKey,
+  fillerRowNumber,
+  getExcelColumnWidth,
+  getExcelRowStyle,
+  getFillerExcelRowStyle,
+  startExcelColumnResize,
+  startExcelColumnResizeFromHeader,
+  stopExcelColumnResize,
+  startExcelRowResize,
+  stopExcelRowResize,
+} = useWorkspaceResize({
+  selectedSheetId,
+  preview,
+  excelDisplayRows,
 })
 
 const excelFillerRowCount = computed(() => {
@@ -363,30 +349,6 @@ const uploadHelpText = computed(() => {
   return `Supports ${formatSupportedExtensions(uploadAllowedExtensions.value)} (Max ${formatBytes(uploadMaxBytes.value)})`
 })
 
-const modelStageDrafts = computed<ModelStageDraft[]>(() => [
-  {
-    stage: 'summary',
-    label: 'Summary Model',
-    provider: draftSummaryProvider.value,
-    model: draftSummaryModel.value,
-    modelOptions: modelsForProvider(draftSummaryProvider.value),
-  },
-  {
-    stage: 'router',
-    label: 'Router Model',
-    provider: draftRouterProvider.value,
-    model: draftRouterModel.value,
-    modelOptions: modelsForProvider(draftRouterProvider.value),
-  },
-  {
-    stage: 'answer',
-    label: 'Chat Model',
-    provider: draftAnswerProvider.value,
-    model: draftAnswerModel.value,
-    modelOptions: modelsForProvider(draftAnswerProvider.value),
-  },
-])
-
 const schemaColumns = computed<FileSchemaColumn[]>(() => {
   const headerRow = preview.value?.offset === 0 ? preview.value.rows[0] ?? [] : []
   const sampleRow = preview.value?.rows.find((row, index) => index > 0 && row.some(Boolean)) ?? []
@@ -440,35 +402,6 @@ const activeDocumentForChat = computed<SelectedDocument | null>(() => {
   }
 })
 
-const activeChatSession = computed(() => {
-  return (
-    chatSessions.value.find((session) => session.session_id === activeChatSessionId.value) ??
-    null
-  )
-})
-
-const answerSupportsDeepThinking = computed(() => {
-  const provider = availableLlmProviders.value.find(
-    (item) => item.provider === answerProvider.value,
-  )
-  return provider?.deep_thinking_models.includes(answerModel.value) ?? false
-})
-
-const hasModelPreferenceDraftChanges = computed(() => {
-  return (
-    draftSummaryProvider.value !== summaryProvider.value ||
-    draftSummaryModel.value !== summaryModel.value ||
-    draftRouterProvider.value !== routerProvider.value ||
-    draftRouterModel.value !== routerModel.value ||
-    draftAnswerProvider.value !== answerProvider.value ||
-    draftAnswerModel.value !== answerModel.value
-  )
-})
-
-const canSaveModelPreference = computed(() => {
-  return hasModelPreferenceDraftChanges.value && isCompleteModelPreference()
-})
-
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
 
 const visiblePrimaryNavItems = computed(() => {
@@ -510,7 +443,7 @@ onBeforeUnmount(() => {
 watch(
   () => filteredFiles.value.length,
   () => {
-    filePage.value = 1
+    resetFilePage()
     closeActionMenus()
   },
 )
@@ -578,8 +511,7 @@ async function signOut(): Promise<void> {
 }
 
 async function resetWorkspaceState(): Promise<void> {
-  chatSessions.value = []
-  activeChatSessionId.value = ''
+  resetChatSessions()
   files.value = []
   versions.value = []
   sheets.value = []
@@ -594,35 +526,8 @@ async function resetWorkspaceState(): Promise<void> {
   clearUploadTask()
   clearSheetSearch()
   clearWorkspaceError()
-  chatSessionError.value = ''
   isChatAnswerPending.value = false
   closeActionMenus()
-}
-
-async function loadLlmModelOptions(): Promise<void> {
-  const options = await getLlmModelOptions()
-  availableLlmModels.value = options.models
-  availableLlmProviders.value = options.providers
-  applyModelDefaults(options.defaults)
-  try {
-    const preference = await getLlmPreference()
-    applyModelDefaults(preference)
-  } catch (error: unknown) {
-    showWorkspaceError(error)
-  }
-}
-
-function applyModelDefaults(defaults: LlmModelDefaults): void {
-  summaryProvider.value = defaults.summary_provider
-  summaryModel.value = defaults.summary_model
-  routerProvider.value = defaults.router_provider
-  routerModel.value = defaults.router_model
-  answerProvider.value = defaults.answer_provider
-  answerModel.value = defaults.answer_model
-  ensureStageModel('summary')
-  ensureStageModel('router')
-  ensureStageModel('answer')
-  resetModelPreferenceDraft()
 }
 
 function setActiveView(view: ActiveView): void {
@@ -705,15 +610,6 @@ function isActionMenuTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest('.item-action-menu, .menu-trigger'))
 }
 
-function setFilePage(page: number): void {
-  filePage.value = clamp(page, 1, filePageCount.value)
-  closeActionMenus()
-}
-
-function stepFilePage(direction: -1 | 1): void {
-  setFilePage(normalizedFilePage.value + direction)
-}
-
 function collapseChatPanel(): void {
   stopChatResize()
   isChatPanelCollapsed.value = true
@@ -739,60 +635,17 @@ function clearWorkspaceError(): void {
   clearOperationFeedback()
 }
 
-async function loadChatSessions(preferredSessionId: string | null = null): Promise<void> {
-  const requestId = ++chatSessionListRequestId
-  chatSessionError.value = ''
-  clearChatSessionFeedback()
-  isChatSessionLoading.value = true
-  try {
-    const sessions = await listChatSessions()
-    if (requestId !== chatSessionListRequestId) {
-      return
-    }
-    chatSessions.value = sortChatSessions(sessions)
-    const nextActiveSessionId = preferredSessionId || activeChatSessionId.value
-    const activeStillExists = chatSessions.value.some(
-      (session) => session.session_id === nextActiveSessionId,
-    )
-    if (nextActiveSessionId && activeStillExists) {
-      activeChatSessionId.value = nextActiveSessionId
-      return
-    }
-    activeChatSessionId.value = chatSessions.value[0]?.session_id ?? ''
-  } catch (error: unknown) {
-    if (requestId === chatSessionListRequestId) {
-      chatSessionError.value = toErrorMessage(error)
-    }
-  } finally {
-    if (requestId === chatSessionListRequestId) {
-      isChatSessionLoading.value = false
-    }
-  }
-}
-
 async function startNewChatSession(): Promise<void> {
   closeActionMenus()
-  chatSessionError.value = ''
-  clearChatSessionFeedback()
-  isChatSessionLoading.value = true
-  try {
-    const session = await createChatSession()
-    upsertChatSession(session)
-    activeChatSessionId.value = session.session_id
-    latestAnswer.value = null
-    clearSelection()
-    selectedCell.value = null
+  const session = await createAndActivateChatSession()
+  if (session) {
     setActiveView('chat')
-  } catch (error: unknown) {
-    chatSessionError.value = toErrorMessage(error)
-  } finally {
-    isChatSessionLoading.value = false
   }
 }
 
 function selectChatSession(session: ChatSession): void {
   closeActionMenus()
-  activeChatSessionId.value = session.session_id
+  setActiveChatSession(session)
   latestAnswer.value = null
   setActiveView('chat')
 }
@@ -806,11 +659,7 @@ async function renameChatSessionPrompt(session: ChatSession): Promise<void> {
 
 async function toggleChatSessionPin(session: ChatSession): Promise<void> {
   closeActionMenus()
-  const pinned = !session.pinned_at
-  await updateChatSession(
-    () => setChatSessionPinned(session.session_id, pinned),
-    pinned ? 'Chat pinned.' : 'Chat unpinned.',
-  )
+  await pinChatSession(session)
 }
 
 async function removeChatSession(session: ChatSession): Promise<void> {
@@ -820,104 +669,10 @@ async function removeChatSession(session: ChatSession): Promise<void> {
 }
 
 async function confirmDeleteChatSession(session: ChatSession): Promise<void> {
-  chatSessionError.value = ''
-  clearChatSessionFeedback()
-  isChatSessionLoading.value = true
-  try {
-    await deleteChatSession(session.session_id)
+  const deleted = await deleteChatSessionAfterConfirmation(session)
+  if (deleted) {
     confirmDialog.value = null
-    chatSessions.value = chatSessions.value.filter(
-      (item) => item.session_id !== session.session_id,
-    )
-    if (activeChatSessionId.value === session.session_id) {
-      activeChatSessionId.value = chatSessions.value[0]?.session_id ?? ''
-      latestAnswer.value = null
-    }
-    showChatSessionFeedback('success', 'Chat deleted.')
-  } catch (error: unknown) {
-    chatSessionError.value = toErrorMessage(error)
-  } finally {
-    isChatSessionLoading.value = false
   }
-}
-
-function handleChatSessionCreated(session: ChatSession): void {
-  upsertChatSession(session)
-  activeChatSessionId.value = session.session_id
-}
-
-async function handleChatSessionTitleSuggested(sessionId: string, title: string): Promise<void> {
-  const session = chatSessions.value.find((item) => item.session_id === sessionId)
-  if (!session || session.title !== 'New chat') {
-    return
-  }
-  await updateChatSession(() => renameChatSession(sessionId, title))
-}
-
-async function updateChatSession(
-  action: () => Promise<ChatSession>,
-  successMessage = '',
-): Promise<void> {
-  chatSessionError.value = ''
-  clearChatSessionFeedback()
-  isChatSessionLoading.value = true
-  try {
-    const session = await action()
-    upsertChatSession(session)
-    if (successMessage) {
-      showChatSessionFeedback('success', successMessage)
-    }
-  } catch (error: unknown) {
-    chatSessionError.value = toErrorMessage(error)
-  } finally {
-    isChatSessionLoading.value = false
-  }
-}
-
-function upsertChatSession(session: ChatSession): void {
-  const sessions = chatSessions.value.filter((item) => item.session_id !== session.session_id)
-  chatSessions.value = sortChatSessions([session, ...sessions])
-}
-
-function sortChatSessions(sessions: ChatSession[]): ChatSession[] {
-  return [...sessions].sort((left, right) => {
-    if (left.pinned_at && !right.pinned_at) {
-      return -1
-    }
-    if (!left.pinned_at && right.pinned_at) {
-      return 1
-    }
-    const leftDate = left.pinned_at || left.updated_at
-    const rightDate = right.pinned_at || right.updated_at
-    return rightDate.localeCompare(leftDate)
-  })
-}
-
-function sortFilesForDisplay(items: ExcelFile[]): ExcelFile[] {
-  return [...items].sort((left, right) => {
-    const leftPinned = isFilePinned(left.file_id)
-    const rightPinned = isFilePinned(right.file_id)
-    if (leftPinned && !rightPinned) {
-      return -1
-    }
-    if (!leftPinned && rightPinned) {
-      return 1
-    }
-    return right.updated_at.localeCompare(left.updated_at)
-  })
-}
-
-function isFilePinned(fileId: string): boolean {
-  return pinnedFileIds.value.includes(fileId)
-}
-
-function toggleFilePin(file: ExcelFile): void {
-  closeActionMenus()
-  const nextIds = isFilePinned(file.file_id)
-    ? pinnedFileIds.value.filter((fileId) => fileId !== file.file_id)
-    : [file.file_id, ...pinnedFileIds.value]
-  pinnedFileIds.value = nextIds
-  savePinnedFileIds(nextIds)
 }
 
 async function toggleFileVisibility(file: ExcelFile): Promise<void> {
@@ -940,31 +695,6 @@ async function toggleFileVisibility(file: ExcelFile): Promise<void> {
   } finally {
     finishWorkspaceBusy(busyRequestId)
   }
-}
-
-function loadPinnedFileIds(): string[] {
-  if (typeof window === 'undefined') {
-    return []
-  }
-  const storedValue = window.localStorage.getItem(pinnedFileStorageKey)
-  if (!storedValue) {
-    return []
-  }
-  try {
-    const parsedValue = JSON.parse(storedValue)
-    return Array.isArray(parsedValue)
-      ? parsedValue.filter((item): item is string => typeof item === 'string')
-      : []
-  } catch {
-    return []
-  }
-}
-
-function savePinnedFileIds(fileIds: string[]): void {
-  if (typeof window === 'undefined') {
-    return
-  }
-  window.localStorage.setItem(pinnedFileStorageKey, JSON.stringify(fileIds))
 }
 
 function nextWorkspaceSelectionRequestId(): number {
@@ -1533,10 +1263,11 @@ async function submitRenameDialog(): Promise<void> {
       ))
       showOperationFeedback('success', `${renamedFile.display_name} renamed.`)
     } else {
-      await updateChatSession(
-        () => renameChatSession(dialog.session.session_id, trimmedValue),
-        'Chat renamed.',
-      )
+      const renamed = await renameActiveChatSession(dialog.session, trimmedValue)
+      if (!renamed) {
+        dialogError.value = chatSessionError.value
+        return
+      }
     }
     cancelDialog()
   } catch (error: unknown) {
@@ -1903,276 +1634,8 @@ function isGridCellSelected(row: string[], rowIndex: number, columnIndex: number
   return cell.rowKey === rowKey && cell.columnIndex === columnIndex
 }
 
-function startChatResize(event: PointerEvent): void {
-  event.preventDefault()
-  isChatResizing.value = true
-  window.addEventListener('pointermove', handleChatResize)
-  window.addEventListener('pointerup', stopChatResize)
-  window.addEventListener('pointercancel', stopChatResize)
-}
-
-function handleChatResize(event: PointerEvent): void {
-  const viewportWidth = window.innerWidth
-  const nextWidth = Math.round(viewportWidth - event.clientX)
-  chatColumnWidth.value = clamp(nextWidth, minChatColumnWidth, maxChatColumnWidth)
-}
-
-function stopChatResize(): void {
-  if (!isChatResizing.value) {
-    return
-  }
-  isChatResizing.value = false
-  window.removeEventListener('pointermove', handleChatResize)
-  window.removeEventListener('pointerup', stopChatResize)
-  window.removeEventListener('pointercancel', stopChatResize)
-}
-
-function excelColumnKey(columnIndex: number): string {
-  return `${selectedSheetId.value || 'sheet'}:C${columnIndex}`
-}
-
-function excelRowKey(row: string[], rowIndex: number): string {
-  const rowNumber = (preview.value?.offset ?? 0) + rowIndex + 1
-  return `${selectedSheetId.value || 'sheet'}:${row[0] || `R${rowNumber}`}`
-}
-
-function fillerExcelRowKey(fillerIndex: number): string {
-  return `${selectedSheetId.value || 'sheet'}:F${fillerRowNumber(fillerIndex)}`
-}
-
-function fillerRowNumber(fillerIndex: number): number {
-  return (preview.value?.offset ?? 0) + excelDisplayRows.value.length + fillerIndex + 1
-}
-
 function getGridCellValue(row: string[], columnIndex: number): string {
   return row[columnIndex] ?? ''
-}
-
-function getExcelColumnWidth(columnIndex: number): number {
-  return excelColumnWidths.value[excelColumnKey(columnIndex)] ?? defaultExcelCellWidth
-}
-
-function getExcelRowHeight(rowKey: string): number {
-  return excelRowHeights.value[rowKey] ?? defaultExcelRowHeight
-}
-
-function getExcelRowStyle(row: string[], rowIndex: number): Record<string, string> {
-  return {
-    '--excel-row-height-current': `${getExcelRowHeight(excelRowKey(row, rowIndex))}px`,
-  }
-}
-
-function getFillerExcelRowStyle(fillerIndex: number): Record<string, string> {
-  return {
-    '--excel-row-height-current': `${getExcelRowHeight(fillerExcelRowKey(fillerIndex))}px`,
-  }
-}
-
-function startExcelColumnResize(event: PointerEvent, columnIndex: number): void {
-  event.preventDefault()
-  event.stopPropagation()
-  isExcelColumnResizing.value = true
-  excelResizeStartX = event.clientX
-  excelResizeTargetColumnKey = excelColumnKey(columnIndex)
-  excelResizeStartWidth = getExcelColumnWidth(columnIndex)
-  window.addEventListener('pointermove', handleExcelColumnResize)
-  window.addEventListener('pointerup', stopExcelColumnResize)
-  window.addEventListener('pointercancel', stopExcelColumnResize)
-}
-
-function startExcelColumnResizeFromHeader(event: PointerEvent, columnIndex: number): void {
-  const target = event.currentTarget as HTMLElement
-  const rect = target.getBoundingClientRect()
-  if (rect.right - event.clientX > 14) {
-    return
-  }
-  startExcelColumnResize(event, columnIndex)
-}
-
-function handleExcelColumnResize(event: PointerEvent): void {
-  if (!excelResizeTargetColumnKey) {
-    return
-  }
-  const nextWidth = clamp(
-    excelResizeStartWidth + event.clientX - excelResizeStartX,
-    minExcelCellWidth,
-    maxExcelCellWidth,
-  )
-  excelColumnWidths.value = {
-    ...excelColumnWidths.value,
-    [excelResizeTargetColumnKey]: nextWidth,
-  }
-}
-
-function stopExcelColumnResize(): void {
-  if (!isExcelColumnResizing.value) {
-    return
-  }
-  isExcelColumnResizing.value = false
-  excelResizeTargetColumnKey = ''
-  window.removeEventListener('pointermove', handleExcelColumnResize)
-  window.removeEventListener('pointerup', stopExcelColumnResize)
-  window.removeEventListener('pointercancel', stopExcelColumnResize)
-}
-
-function startExcelRowResize(event: PointerEvent, rowKey: string): void {
-  event.preventDefault()
-  event.stopPropagation()
-  isExcelRowResizing.value = true
-  excelResizeStartY = event.clientY
-  excelResizeTargetRowKey = rowKey
-  excelResizeStartHeight = getExcelRowHeight(rowKey)
-  window.addEventListener('pointermove', handleExcelRowResize)
-  window.addEventListener('pointerup', stopExcelRowResize)
-  window.addEventListener('pointercancel', stopExcelRowResize)
-}
-
-function handleExcelRowResize(event: PointerEvent): void {
-  if (!excelResizeTargetRowKey) {
-    return
-  }
-  const nextHeight = clamp(
-    excelResizeStartHeight + event.clientY - excelResizeStartY,
-    minExcelRowHeight,
-    maxExcelRowHeight,
-  )
-  excelRowHeights.value = {
-    ...excelRowHeights.value,
-    [excelResizeTargetRowKey]: nextHeight,
-  }
-}
-
-function stopExcelRowResize(): void {
-  if (!isExcelRowResizing.value) {
-    return
-  }
-  isExcelRowResizing.value = false
-  excelResizeTargetRowKey = ''
-  window.removeEventListener('pointermove', handleExcelRowResize)
-  window.removeEventListener('pointerup', stopExcelRowResize)
-  window.removeEventListener('pointercancel', stopExcelRowResize)
-}
-
-function modelsForProvider(provider: string): string[] {
-  return availableLlmProviders.value.find((item) => item.provider === provider)?.models ?? []
-}
-
-function ensureStageModel(stage: ModelStage): void {
-  const provider =
-    stage === 'summary'
-      ? summaryProvider.value
-      : stage === 'router'
-        ? routerProvider.value
-        : answerProvider.value
-  const models = modelsForProvider(provider)
-  if (stage === 'summary' && !models.includes(summaryModel.value)) {
-    summaryModel.value = models[0] ?? ''
-  }
-  if (stage === 'router' && !models.includes(routerModel.value)) {
-    routerModel.value = models[0] ?? ''
-  }
-  if (stage === 'answer' && !models.includes(answerModel.value)) {
-    answerModel.value = models[0] ?? ''
-  }
-}
-
-function ensureDraftStageModel(stage: ModelStage): void {
-  const provider =
-    stage === 'summary'
-      ? draftSummaryProvider.value
-      : stage === 'router'
-        ? draftRouterProvider.value
-        : draftAnswerProvider.value
-  const models = modelsForProvider(provider)
-  if (stage === 'summary' && !models.includes(draftSummaryModel.value)) {
-    draftSummaryModel.value = models[0] ?? ''
-  }
-  if (stage === 'router' && !models.includes(draftRouterModel.value)) {
-    draftRouterModel.value = models[0] ?? ''
-  }
-  if (stage === 'answer' && !models.includes(draftAnswerModel.value)) {
-    draftAnswerModel.value = models[0] ?? ''
-  }
-}
-
-function handleModelProviderChange(stage: ModelStage): void {
-  ensureDraftStageModel(stage)
-  modelPreferenceFeedback.value = ''
-}
-
-function handleModelDraftChange(): void {
-  modelPreferenceFeedback.value = ''
-}
-
-function updateModelStageProvider(stage: ModelStage, provider: string): void {
-  if (stage === 'summary') {
-    draftSummaryProvider.value = provider
-  } else if (stage === 'router') {
-    draftRouterProvider.value = provider
-  } else {
-    draftAnswerProvider.value = provider
-  }
-  handleModelProviderChange(stage)
-}
-
-function updateModelStageModel(stage: ModelStage, model: string): void {
-  if (stage === 'summary') {
-    draftSummaryModel.value = model
-  } else if (stage === 'router') {
-    draftRouterModel.value = model
-  } else {
-    draftAnswerModel.value = model
-  }
-  handleModelDraftChange()
-}
-
-function resetModelPreferenceDraft(): void {
-  draftSummaryProvider.value = summaryProvider.value
-  draftSummaryModel.value = summaryModel.value
-  draftRouterProvider.value = routerProvider.value
-  draftRouterModel.value = routerModel.value
-  draftAnswerProvider.value = answerProvider.value
-  draftAnswerModel.value = answerModel.value
-  modelPreferenceFeedback.value = ''
-}
-
-async function saveModelPreferenceDefaults(): Promise<void> {
-  if (!isCompleteModelPreference()) {
-    modelPreferenceFeedbackKind.value = 'error'
-    modelPreferenceFeedback.value = 'Select a provider and model for every stage.'
-    return
-  }
-  isModelPreferenceSaving.value = true
-  modelPreferenceFeedback.value = ''
-  try {
-    const preference = await saveLlmPreference({
-      summary_provider: draftSummaryProvider.value,
-      summary_model: draftSummaryModel.value,
-      router_provider: draftRouterProvider.value,
-      router_model: draftRouterModel.value,
-      answer_provider: draftAnswerProvider.value,
-      answer_model: draftAnswerModel.value,
-    })
-    applyModelDefaults(preference)
-    modelPreferenceFeedbackKind.value = 'success'
-    modelPreferenceFeedback.value = 'Saved as workspace defaults.'
-  } catch (error: unknown) {
-    modelPreferenceFeedbackKind.value = 'error'
-    modelPreferenceFeedback.value = toErrorMessage(error)
-  } finally {
-    isModelPreferenceSaving.value = false
-  }
-}
-
-function isCompleteModelPreference(): boolean {
-  return Boolean(
-    draftSummaryProvider.value &&
-      draftSummaryModel.value &&
-      draftRouterProvider.value &&
-      draftRouterModel.value &&
-      draftAnswerProvider.value &&
-      draftAnswerModel.value,
-  )
 }
 
 </script>
