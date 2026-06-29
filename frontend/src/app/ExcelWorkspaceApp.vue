@@ -36,6 +36,7 @@ import {
   useUploadTaskPolling,
   type FileSchemaColumn,
 } from '../features/file-management'
+import { PdfKnowledgeWorkspace } from '../features/pdf-knowledge'
 import { useTransientFeedback } from './use-transient-feedback'
 import { useChatSessions } from './composables/use-chat-sessions'
 import { useFileLibrary } from './composables/use-file-library'
@@ -82,8 +83,22 @@ import type {
   UploadDialog,
 } from './workspace-types'
 
+function activeViewFromHash(hash: string): ActiveView {
+  if (hash === '#files') {
+    return 'files'
+  }
+  if (hash === '#pdf') {
+    return 'pdf'
+  }
+  return 'chat'
+}
+
+function activeViewHash(view: ActiveView): string {
+  return `#${view}`
+}
+
 const initialActiveView: ActiveView =
-  typeof window !== 'undefined' && window.location.hash === '#files' ? 'files' : 'chat'
+  typeof window !== 'undefined' ? activeViewFromHash(window.location.hash) : 'chat'
 
 const activeView = ref<ActiveView>(initialActiveView)
 const currentUser = ref<AuthUser | null>(null)
@@ -541,7 +556,7 @@ function setActiveView(view: ActiveView): void {
   }
   activeView.value = view
   if (typeof window !== 'undefined') {
-    window.history.replaceState(null, '', view === 'chat' ? '#chat' : '#files')
+    window.history.replaceState(null, '', activeViewHash(view))
   }
 }
 
@@ -556,7 +571,7 @@ function syncActiveViewFromLocation(): void {
   if (typeof window === 'undefined') {
     return
   }
-  const nextView: ActiveView = window.location.hash === '#files' ? 'files' : 'chat'
+  const nextView = activeViewFromHash(window.location.hash)
   if (nextView === 'files' && !isAdmin.value) {
     setActiveView('chat')
     return
@@ -1651,7 +1666,11 @@ function getGridCellValue(row: string[], columnIndex: number): string {
     v-else-if="!currentUser"
     @authenticated="handleAuthenticated"
   />
-  <main v-else class="excelai-app" :class="{ 'chat-mode': activeView === 'chat' }">
+  <main
+    v-else
+    class="excelai-app"
+    :class="{ 'chat-mode': activeView === 'chat', 'pdf-mode': activeView === 'pdf' }"
+  >
     <aside class="app-sidebar">
       <div class="brand-block">
         <h1>ExcelAI</h1>
@@ -1695,7 +1714,11 @@ function getGridCellValue(row: string[], columnIndex: number): string {
     </aside>
 
     <section class="app-main">
-      <header class="topbar" :class="{ 'file-topbar': activeView === 'files' }">
+      <header
+        v-if="activeView !== 'pdf'"
+        class="topbar"
+        :class="{ 'file-topbar': activeView === 'files' }"
+      >
         <template v-if="activeView === 'files'">
           <label class="search-field file-search-field">
             <span class="search-icon"><AppIcon name="search" /></span>
@@ -1726,7 +1749,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
             </div>
           </div>
         </template>
-        <template v-else>
+        <template v-else-if="activeView === 'chat'">
           <div>
           <p class="eyebrow">Conversation</p>
           <h2>Excel Analysis</h2>
@@ -1768,6 +1791,8 @@ function getGridCellValue(row: string[], columnIndex: number): string {
       >
         {{ chatSessionFeedback.message }}
       </div>
+
+      <PdfKnowledgeWorkspace v-if="activeView === 'pdf'" />
 
       <section v-if="activeView === 'files'" class="file-page">
         <div class="file-management-shell">

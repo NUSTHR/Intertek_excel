@@ -1,7 +1,7 @@
 import type { ChatSession } from '../types/chat'
 import type { ExcelFile } from '../types/excel-assets'
 
-export type ActiveView = 'files' | 'chat'
+export type ActiveView = 'files' | 'chat' | 'pdf'
 export type FileInsightTab = 'summary' | 'preview' | 'schema'
 export type ModelStage = 'summary' | 'router' | 'answer'
 export type PrimaryNavKey = ActiveView | 'settings'

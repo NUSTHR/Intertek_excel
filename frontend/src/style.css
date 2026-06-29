@@ -123,11 +123,19 @@ h3 {
   overflow: hidden;
 }
 
-.excelai-app.chat-mode .app-sidebar {
+.excelai-app.pdf-mode {
+  grid-template-columns: minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.excelai-app.chat-mode .app-sidebar,
+.excelai-app.pdf-mode .app-sidebar {
   display: none;
 }
 
-.excelai-app.chat-mode .app-main {
+.excelai-app.chat-mode .app-main,
+.excelai-app.pdf-mode .app-main {
   overflow: hidden;
 }
 

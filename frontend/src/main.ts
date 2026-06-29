@@ -8,5 +8,6 @@ import './styles/chat-message.css'
 import './styles/excel-grid.css'
 import './styles/file-management.css'
 import './styles/document-summary.css'
+import './styles/pdf-knowledge.css'
 
 createApp(ExcelWorkspaceApp).mount('#app')

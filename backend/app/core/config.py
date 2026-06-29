@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     upload_task_worker_enabled: bool = True
     upload_task_worker_poll_interval_seconds: float = 0.5
     upload_task_stale_processing_minutes: int = 60
+    pdf_upload_task_worker_enabled: bool = True
+    pdf_upload_task_worker_poll_interval_seconds: float = 0.5
+    pdf_upload_task_stale_processing_minutes: int = 60
+    pdf_parser_backend: str = "fake"
+    mineru_command: str = "mineru"
+    mineru_timeout_seconds: float = 300.0
     chat_cancellation_retention_seconds: int = 300
     auth_admin_email: str = "969348539@qq.com"
     auth_admin_password: str = "Intertek_AI"

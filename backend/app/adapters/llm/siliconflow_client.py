@@ -154,6 +154,26 @@ Rules:
 11. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
 """.strip()
 
+PDF_ANSWER_SYSTEM_PROMPT = """
+You are an enterprise PDF knowledge-base answer assistant.
+
+You answer user questions using only the provided PDF chunks.
+
+Rules:
+1. Use only the provided chunks as evidence.
+2. Do not use outside knowledge.
+3. Every factual claim based on PDF content must cite one or more evidence refs.
+4. Citations must reference evidence_id values from the provided chunks only.
+5. Do not invent file_id, chunk_id, page labels, titles, or document content.
+6. If the provided chunks are insufficient, say so clearly.
+7. Keep the answer concise and business-readable.
+8. Split the answer into separate answer_blocks by claim, paragraph, bullet, or table row
+   whenever different evidence supports different parts of the answer.
+9. Each answer_block must include only the evidence_ids that support that block's text.
+10. Do not collect all citations at the end of the answer or in one final answer block.
+11. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
+""".strip()
+
 
 @dataclass(frozen=True)
 class SiliconFlowConfig:
@@ -545,6 +565,94 @@ class MultiProviderLlmClient:
                         str(citation.get("row_id", "")).strip(),
                     ]
                 )
+            ],
+            insufficient_evidence=bool(payload.get("insufficient_evidence", False)),
+            follow_up_suggestions=self._string_list(payload.get("follow_up_suggestions")),
+        )
+
+    def answer_with_pdf_chunks(
+        self,
+        question: str,
+        chunks: list[dict],
+        model: str | None = None,
+        provider: str | None = None,
+        enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> DraftChatAnswer:
+        provider_config, resolved_model = self._resolve_request(
+            provider=provider,
+            model=model,
+            stage="answer",
+        )
+        chunks_json = json.dumps(chunks, ensure_ascii=False)
+        logger.debug(
+            "preparing PDF answer model payload chunk_count=%s",
+            len(chunks),
+        )
+        payload, reasoning_content = self._chat_json_with_reasoning(
+            stage="pdf_answer_model",
+            provider_config=provider_config,
+            model=resolved_model,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=cancellation_checker,
+            messages=[
+                {"role": "system", "content": PDF_ANSWER_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Answer the question using the provided PDF chunks.\n\n"
+                        f"Question:\n{question}\n\n"
+                        f"Chunks:\n{chunks_json}\n\n"
+                        "Each chunk object has evidence_id, file_id, file_name, "
+                        "chunk_id, chunk_index, page_label, title, text, and excerpt.\n\n"
+                        "Return JSON in exactly this shape:\n\n"
+                        "{\n"
+                        '  "answer_blocks": [\n'
+                        "    {\n"
+                        '      "text": "string",\n'
+                        '      "evidence_ids": ["string"]\n'
+                        "    }\n"
+                        "  ],\n"
+                        '  "citations": [\n'
+                        "    {\n"
+                        '      "evidence_id": "string",\n'
+                        '      "quote": "string"\n'
+                        "    }\n"
+                        "  ],\n"
+                        '  "insufficient_evidence": false,\n'
+                        '  "follow_up_suggestions": ["string"]\n'
+                        "}\n\n"
+                        "Important:\n"
+                        "- evidence_ids must contain only evidence_id values from Chunks.\n"
+                        "- Prefer using evidence_id everywhere citations are needed.\n"
+                        "- quote should be a short snippet copied or summarized from the "
+                        "cited chunk.\n"
+                        "- If no provided chunk supports an answer, set insufficient_evidence "
+                        "to true and return empty citations."
+                    ),
+                },
+            ],
+        )
+        answer_blocks = [
+            DraftAnswerBlock(
+                text=str(block.get("text", "")).strip(),
+                evidence_ids=self._string_list(
+                    block.get("evidence_ids", block.get("evidence_chunk_ids"))
+                ),
+                reasoning=reasoning_content if index == 0 else "",
+            )
+            for index, block in enumerate(self._object_list(payload.get("answer_blocks")))
+            if str(block.get("text", "")).strip()
+        ]
+        return DraftChatAnswer(
+            answer_blocks=answer_blocks,
+            citations=[
+                DraftCitation(
+                    evidence_id=str(citation.get("evidence_id", "")).strip(),
+                    quote=str(citation.get("quote", "")).strip(),
+                )
+                for citation in self._object_list(payload.get("citations"))
+                if str(citation.get("evidence_id", "")).strip()
             ],
             insufficient_evidence=bool(payload.get("insufficient_evidence", False)),
             follow_up_suggestions=self._string_list(payload.get("follow_up_suggestions")),

@@ -27,22 +27,11 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
             """
         ).fetchall()
 
-    assert [int(row["version"]) for row in rows] == list(range(1, 15))
+    assert [int(row["version"]) for row in rows] == [
+        migration.version for migration in sqlite_repository.SCHEMA_MIGRATIONS
+    ]
     assert [row["name"] for row in rows] == [
-        "initial_excel_workspace_schema",
-        "add_chat_session_metadata",
-        "add_document_routing_summary_fields",
-        "persist_chat_turn_snapshots_and_llm_preferences",
-        "add_authentication_and_session_ownership",
-        "add_operational_maintenance_indexes",
-        "remove_chat_turn_performance_timings",
-        "soft_delete_excel_files",
-        "add_excel_file_visibility",
-        "add_row_mapping_raw_order_index",
-        "add_upload_tasks_and_shared_chat_cancellations",
-        "add_shared_auth_login_attempts",
-        "normalize_storage_artifact_references",
-        "add_excel_row_search_fts_index",
+        migration.name for migration in sqlite_repository.SCHEMA_MIGRATIONS
     ]
     assert all(row["checksum"] for row in rows)
 

@@ -18,6 +18,15 @@ from app.domain.models import (
     ExcelVersionStatus,
     LlmPreference,
     PasswordResetToken,
+    PdfDocumentChunk,
+    PdfDocumentDetail,
+    PdfDocumentSummary,
+    PdfFile,
+    PdfFileVisibility,
+    PdfModelSetting,
+    PdfProcessingStatus,
+    PdfUploadTask,
+    PdfUploadTaskStage,
     UserAccount,
 )
 
@@ -339,4 +348,117 @@ class LlmPreferenceRepository(Protocol):
         ...
 
     def save_llm_preference(self, preference: LlmPreference) -> LlmPreference:
+        ...
+
+
+class PdfKnowledgeRepository(Protocol):
+    def create_pdf_file(self, file: PdfFile) -> None:
+        ...
+
+    def get_pdf_file(self, file_id: str) -> PdfFile | None:
+        ...
+
+    def list_pdf_files(self) -> list[PdfFile]:
+        ...
+
+    def update_pdf_file_processing(
+        self,
+        *,
+        file_id: str,
+        processing_status: PdfProcessingStatus,
+        progress: int,
+        status_detail: str,
+        updated_at: str,
+        error_message: str | None = None,
+        page_count: int | None = None,
+        chunk_count: int | None = None,
+    ) -> PdfFile | None:
+        ...
+
+    def update_pdf_file_visibility(
+        self,
+        file_id: str,
+        visibility: PdfFileVisibility,
+        updated_at: str,
+    ) -> PdfFile | None:
+        ...
+
+    def create_pdf_upload_task(self, task: PdfUploadTask) -> None:
+        ...
+
+    def get_pdf_upload_task(self, task_id: str) -> PdfUploadTask | None:
+        ...
+
+    def list_pdf_upload_tasks(self, user_id: str) -> list[PdfUploadTask]:
+        ...
+
+    def claim_next_pdf_upload_task(
+        self,
+        *,
+        worker_id: str,
+        started_at: str,
+    ) -> PdfUploadTask | None:
+        ...
+
+    def update_pdf_upload_task_progress(
+        self,
+        *,
+        task_id: str,
+        progress: int,
+        detail: str,
+        updated_at: str,
+        stage: PdfUploadTaskStage | None = None,
+    ) -> PdfUploadTask | None:
+        ...
+
+    def complete_pdf_upload_task(
+        self,
+        *,
+        task_id: str,
+        result: dict[str, object],
+        finished_at: str,
+    ) -> PdfUploadTask | None:
+        ...
+
+    def fail_pdf_upload_task(
+        self,
+        *,
+        task_id: str,
+        error_message: str,
+        failed_at: str,
+        error_code: str | None = None,
+    ) -> PdfUploadTask | None:
+        ...
+
+    def fail_stale_processing_pdf_upload_tasks(
+        self,
+        *,
+        cutoff_started_at: str,
+        failed_at: str,
+    ) -> int:
+        ...
+
+    def save_pdf_document_detail(self, detail: PdfDocumentDetail) -> None:
+        ...
+
+    def get_pdf_document_detail(self, file_id: str) -> PdfDocumentDetail | None:
+        ...
+
+    def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> None:
+        ...
+
+    def replace_pdf_document_chunks(
+        self,
+        file_id: str,
+        chunks: list[PdfDocumentChunk],
+    ) -> None:
+        ...
+
+    def list_pdf_document_chunks(self, file_id: str) -> list[PdfDocumentChunk]:
+        ...
+
+    def list_pdf_model_settings(self) -> list[PdfModelSetting]:
+        ...
+
+    def save_pdf_model_setting(self, setting: PdfModelSetting) -> PdfModelSetting:
         ...

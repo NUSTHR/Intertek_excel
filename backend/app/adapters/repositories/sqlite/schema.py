@@ -508,4 +508,197 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=15,
+        name="add_pdf_knowledge_schema",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_files (
+              file_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              parent_id TEXT,
+              display_name TEXT NOT NULL,
+              original_filename TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              size_bytes INTEGER NOT NULL,
+              storage_path TEXT,
+              status TEXT NOT NULL,
+              visibility TEXT NOT NULL,
+              processing_status TEXT NOT NULL,
+              progress INTEGER NOT NULL,
+              status_detail TEXT NOT NULL,
+              error_message TEXT,
+              page_count INTEGER,
+              chunk_count INTEGER,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              deleted_at TEXT,
+              FOREIGN KEY(parent_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_files_status_updated
+              ON pdf_files(status, updated_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_files_parent
+              ON pdf_files(parent_id, display_name)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_upload_tasks (
+              task_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              file_id TEXT,
+              original_filename TEXT NOT NULL,
+              staging_path TEXT NOT NULL,
+              status TEXT NOT NULL,
+              progress INTEGER NOT NULL,
+              detail TEXT NOT NULL,
+              error_message TEXT,
+              result_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT,
+              worker_id TEXT,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_upload_tasks_status_created
+              ON pdf_upload_tasks(status, created_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_document_summaries (
+              file_id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              content TEXT NOT NULL,
+              updated_at TEXT,
+              error_message TEXT,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_preview_blocks (
+              block_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              page_label TEXT NOT NULL,
+              title TEXT NOT NULL,
+              content TEXT NOT NULL,
+              block_index INTEGER NOT NULL,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_preview_blocks_file
+              ON pdf_preview_blocks(file_id, block_index)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_schema_items (
+              item_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              label TEXT NOT NULL,
+              value TEXT NOT NULL,
+              item_index INTEGER NOT NULL,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_schema_items_file
+              ON pdf_schema_items(file_id, item_index)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_document_tags (
+              file_id TEXT NOT NULL,
+              tag TEXT NOT NULL,
+              tag_index INTEGER NOT NULL,
+              PRIMARY KEY(file_id, tag),
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_model_settings (
+              setting_id TEXT PRIMARY KEY,
+              label TEXT NOT NULL,
+              providers_json TEXT NOT NULL,
+              models_json TEXT NOT NULL,
+              selected_provider TEXT NOT NULL,
+              selected_model TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=16,
+        name="add_pdf_document_chunks",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_document_chunks (
+              chunk_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              chunk_index INTEGER NOT NULL,
+              text TEXT NOT NULL,
+              page_label TEXT,
+              title TEXT NOT NULL,
+              token_count INTEGER NOT NULL,
+              content_hash TEXT NOT NULL,
+              metadata_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id),
+              UNIQUE(file_id, chunk_index)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_document_chunks_file
+              ON pdf_document_chunks(file_id, chunk_index)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_document_chunks_hash
+              ON pdf_document_chunks(file_id, content_hash)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=17,
+        name="add_pdf_upload_task_diagnostics",
+        statements=(
+            """
+            ALTER TABLE pdf_upload_tasks
+              ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks
+              ADD COLUMN parser_backend TEXT NOT NULL DEFAULT 'unknown'
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks
+              ADD COLUMN error_code TEXT
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks
+              ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks
+              ADD COLUMN last_retry_at TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_upload_tasks_stage_updated
+              ON pdf_upload_tasks(stage, updated_at)
+            """,
+            """
+            UPDATE pdf_upload_tasks
+            SET stage = CASE
+              WHEN status = 'ready' THEN 'ready'
+              WHEN status = 'failed' THEN 'failed'
+              WHEN status = 'processing' AND progress >= 90 THEN 'indexing'
+              WHEN status = 'processing' THEN 'parsing'
+              ELSE 'queued'
+            END
+            WHERE stage = 'queued'
+            """,
+        ),
+    ),
 )

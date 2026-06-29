@@ -568,6 +568,81 @@ def test_siliconflow_answer_sends_history_as_role_messages() -> None:
     assert "Previous chat turns" not in messages[-1]["content"]
 
 
+def test_siliconflow_pdf_answer_uses_pdf_chunk_prompt() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_blocks": [
+                                        {
+                                            "text": "The PDF mentions compliance evidence.",
+                                            "evidence_ids": ["pdf_1::chunk_1"],
+                                        }
+                                    ],
+                                    "citations": [
+                                        {
+                                            "evidence_id": "pdf_1::chunk_1",
+                                            "quote": "compliance evidence",
+                                        }
+                                    ],
+                                    "insufficient_evidence": False,
+                                    "follow_up_suggestions": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+
+    answer = client.answer_with_pdf_chunks(
+        "What does the PDF say?",
+        [
+            {
+                "evidence_id": "pdf_1::chunk_1",
+                "file_id": "pdf_1",
+                "file_name": "guide.pdf",
+                "chunk_id": "chunk_1",
+                "chunk_index": 0,
+                "page_label": "Page 1",
+                "title": "Overview",
+                "text": "compliance evidence",
+                "excerpt": "compliance evidence",
+            }
+        ],
+    )
+
+    assert answer.answer_blocks[0].evidence_ids == ["pdf_1::chunk_1"]
+    assert answer.citations[0].quote == "compliance evidence"
+    assert requests[0]["messages"][0]["content"].startswith(
+        "You are an enterprise PDF knowledge-base answer assistant."
+    )
+    assert "provided PDF chunks" in requests[0]["messages"][-1]["content"]
+    assert '"evidence_id": "string"' in requests[0]["messages"][-1]["content"]
+
+
 def test_siliconflow_timeout_error_includes_stage_model_and_duration() -> None:
     def post(_url: str, **_kwargs: Any) -> httpx2.Response:
         request = httpx2.Request(

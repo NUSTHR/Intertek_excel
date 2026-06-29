@@ -1,9 +1,10 @@
 # Excel Workspace
 
-Excel Workspace is a standalone Excel knowledge-base and Q&A product area. It
-combines authenticated workbook management, deterministic Excel preprocessing,
-persisted document summaries, multi-turn chat, model routing, and backend-
-verified row-level citations.
+Excel Workspace is a standalone Excel and PDF knowledge-base and Q&A product
+area. It combines authenticated workbook management, deterministic Excel
+preprocessing, PDF knowledge ingestion, persisted document summaries,
+multi-turn chat, model routing, backend-verified row-level citations, and
+PDF-grounded citations.
 
 This module intentionally stays isolated from the legacy `D_ass` frontend and
 `ragflow_integration_service` backend. It can keep evolving inside this
@@ -13,7 +14,8 @@ RAGFlow code with it.
 ## What This Project Does
 
 Excel Workspace is not just an Excel preview page. The current implementation
-is a runnable MVP for enterprise Excel Q&A:
+is a runnable MVP for enterprise Excel Q&A, with an independent PDF knowledge
+module on the `add_pdf` branch:
 
 1. Users authenticate into a workspace.
 2. Admin users upload Excel workbooks into a shared library.
@@ -31,10 +33,15 @@ is a runnable MVP for enterprise Excel Q&A:
 10. The backend verifies cited row IDs before returning citations to the
     frontend.
 11. The frontend shows the answer, source rows, and row highlights.
+12. Admin users can upload PDF folders into a separate PDF knowledge area.
+13. The backend preserves PDF folder hierarchy, creates upload tasks, parses
+    supported files through the configured PDF parser, stores searchable
+    chunks, and exposes PDF citations for chat answers.
 
-The most important product rule is that original workbooks and backend row
-provenance remain the source of truth. LLM output is used for description,
-routing, and natural-language synthesis, not for inventing row identity.
+The most important product rule is that original workbooks, PDF source files,
+backend row provenance, and PDF chunk provenance remain the source of truth.
+LLM output is used for description, routing, and natural-language synthesis,
+not for inventing row identity or PDF evidence.
 
 ## Applications
 
@@ -70,6 +77,8 @@ Backend:
 - `openpyxl` for `.xlsx`, `.xlsm`, `.xltx`, and `.xltm`.
 - `xlrd` for legacy `.xls`.
 - `pydantic-settings`.
+- Configurable PDF parser backend: local fake parser for tests/development or
+  MinerU command-line parsing for PDF knowledge ingestion.
 - LangGraph for the route -> answer workflow adapter.
 - `pytest` and `ruff` for checks.
 
@@ -86,6 +95,7 @@ Runtime services:
 - SQLite database under `storage/` by default.
 - Filesystem artifact storage under `storage/` by default.
 - Optional external LLM providers for summary, router, and answer stages.
+- Optional MinerU runtime for production-like PDF parsing.
 
 ## Product Boundary Rules
 
@@ -203,6 +213,26 @@ Frontend workspace:
 - Chat session rail with pin, rename, and delete.
 - Resizable chat and table surfaces.
 
+PDF knowledge module:
+
+- Independent PDF workspace under the main app's `PDF AI` navigation item.
+- Admin folder upload flow using browser folder selection.
+- Folder hierarchy preservation for supported PDF knowledge files.
+- PDF upload tasks with stage diagnostics: queued, claimed, parsing, indexing,
+  ready, and failed.
+- Parser backend diagnostics, error codes, retry counters, and stale-task
+  failure marking for PDF upload tasks.
+- Configurable parser backend with `fake` for tests/development and `mineru`
+  for real PDF parsing.
+- PDF file list, detail, preview blocks, schema items, tags, and searchable
+  chunks persisted in SQLite.
+- PDF retrieval endpoint over indexed chunks.
+- PDF chat endpoint that answers from retrieved chunks and returns PDF
+  citations.
+- PDF model settings for summary, router, and chat engines.
+- Frontend PDF management and PDF chat surfaces styled to coordinate with the
+  Excel workspace.
+
 ## Architecture
 
 The backend uses a ports-and-adapters shape:
@@ -210,10 +240,10 @@ The backend uses a ports-and-adapters shape:
 ```text
 backend/app/
   api/          FastAPI routes, schemas, dependencies, exception handlers
-  application/  auth, upload, summary, preview, search, chat, preferences
+  application/  auth, upload, summary, preview, search, chat, PDF knowledge, preferences
   domain/       framework-free dataclasses and enums
-  ports/        repository, storage, workbook reader, LLM, chat workflow protocols
-  adapters/     SQLite, filesystem, workbook reader, LLM, LangGraph workflow
+  ports/        repository, storage, workbook reader, PDF parser, LLM, chat workflow protocols
+  adapters/     SQLite, filesystem, workbook reader, PDF parser, LLM, LangGraph workflow
   core/         config, IDs, auth helpers, logging, model catalog, errors, time
 ```
 
@@ -231,6 +261,9 @@ Important backend ownership:
   optimization.
 - `app/application/excel_assets/search.py` owns search normalization and
   match policy.
+- `app/application/pdf_knowledge/` owns PDF upload tasks, parsing orchestration,
+  indexing, retrieval, and PDF-grounded chat.
+- `app/adapters/pdf/` owns the fake parser and MinerU parser adapter.
 - `app/application/chat/policy.py` owns chat runtime guardrails.
 - `app/adapters/dialogue/langgraph_chat_workflow.py` owns the production
   route -> answer workflow orchestration.
@@ -242,7 +275,7 @@ frontend/src/
   api/          typed HTTP clients
   app/          workspace shell and shared workspace utilities
   components/   reusable UI panels and controls
-  features/     file-management feature components and composables
+  features/     file-management and pdf-knowledge feature components/composables
   styles/       CSS split by surface
   types/        frontend API/domain types
 ```
@@ -254,6 +287,8 @@ Default runtime data lives under:
 ```text
 storage/excel-workspace.sqlite3
 storage/files/
+storage/pdf-knowledge/files/
+storage/pdf-knowledge/upload-tasks/
 storage/logs/
 ```
 
@@ -291,6 +326,14 @@ Key SQLite areas:
 - chat session documents
 - chat turns
 - upload tasks
+- PDF files
+- PDF upload tasks
+- PDF document summaries
+- PDF preview blocks
+- PDF schema items
+- PDF document tags
+- PDF document chunks
+- PDF model settings
 - shared chat cancellation state
 - LLM preferences
 - user accounts
@@ -305,6 +348,11 @@ Important invariants:
 - `row_id` is deterministic within a sheet.
 - Failed version processing must not change the active version.
 - Citations are accepted only after backend row-ID verification.
+- PDF folder hierarchy is preserved through `parent_id` relationships.
+- PDF upload tasks use stage diagnostics and must not remain stuck in
+  processing after stale-task recovery.
+- PDF chat answers must be grounded in indexed chunks visible to the current
+  user role.
 - Admin users manage file mutation and model preferences.
 - Member users can authenticate, inspect visible shared files, and manage their
   own chat sessions.
@@ -396,6 +444,22 @@ UPLOAD_TASK_WORKER_POLL_INTERVAL_SECONDS=0.5
 UPLOAD_TASK_STALE_PROCESSING_MINUTES=60
 ```
 
+PDF knowledge task and parser settings:
+
+```text
+PDF_UPLOAD_TASK_WORKER_ENABLED=true
+PDF_UPLOAD_TASK_WORKER_POLL_INTERVAL_SECONDS=0.5
+PDF_UPLOAD_TASK_STALE_PROCESSING_MINUTES=60
+PDF_PARSER_BACKEND=fake
+MINERU_COMMAND=mineru
+MINERU_TIMEOUT_SECONDS=300
+```
+
+`PDF_PARSER_BACKEND=fake` is intended for local development and automated
+tests. Use `PDF_PARSER_BACKEND=mineru` only when the MinerU command is
+installed and available to the backend process. The `/api/pdf/parser/status`
+endpoint reports whether the configured parser appears available.
+
 Chat cancellation and guardrails:
 
 ```text
@@ -475,6 +539,9 @@ Production safety:
 - Set real non-localhost `APP_CORS_ORIGINS`.
 - Do not use `APP_CORS_ORIGINS=*` in production.
 - Do not use `LLM_PROVIDER=fake` in production.
+- Do not rely on `PDF_PARSER_BACKEND=fake` for production PDF parsing.
+- If PDF ingestion is enabled in production, install MinerU and set
+  `PDF_PARSER_BACKEND=mineru`.
 - Configure API keys for any provider selected by summary, router, or answer
   stages.
 
@@ -973,6 +1040,23 @@ POST   /api/excel/chat/sessions/{session_id}/route
 POST   /api/excel/chat/sessions/{session_id}/answer
 ```
 
+PDF knowledge:
+
+```text
+GET    /api/pdf/files
+GET    /api/pdf/parser/status
+POST   /api/pdf/files/upload-tasks                       admin
+GET    /api/pdf/files/upload-tasks                       admin
+GET    /api/pdf/files/upload-tasks/{task_id}             admin
+GET    /api/pdf/files/{file_id}/detail
+GET    /api/pdf/files/{file_id}/chunks
+POST   /api/pdf/retrieval/search
+POST   /api/pdf/chat
+POST   /api/pdf/files/{file_id}/summary/generate
+GET    /api/pdf/model-settings
+PATCH  /api/pdf/model-settings/{setting_id}
+```
+
 FastAPI also exposes a generated OpenAPI schema while the backend is running:
 
 ```text
@@ -996,6 +1080,20 @@ cd backend
 ./.venv/bin/python -m pytest
 ```
 
+PDF-focused backend tests:
+
+```bash
+cd backend
+./.venv/bin/python -m pytest tests/test_pdf_knowledge_api.py tests/test_pdf_parser_factory.py tests/test_mineru_parser.py
+```
+
+On Windows, if pytest cannot access its default temp directory, run the same
+PDF-focused tests with a project-local base temp directory:
+
+```powershell
+.\.venv\Scripts\python -m pytest tests/test_pdf_knowledge_api.py tests/test_pdf_parser_factory.py tests/test_mineru_parser.py --basetemp pytest-tmp -p no:cacheprovider
+```
+
 Frontend typecheck:
 
 ```bash
@@ -1015,6 +1113,7 @@ Latest recorded local status in the repository previously documented:
 ```text
 backend ruff: passed
 backend pytest: 57 passed
+backend PDF pytest subset: 19 passed
 frontend vue-tsc: passed
 frontend vite build: passed
 ```
@@ -1324,7 +1423,8 @@ is reachable and the UI should fall through to the sign-in page.
 ### Backend starts but summary/chat fails
 
 Upload, preview, search, and auth do not require LLM keys. Summary generation
-and chat do.
+and chat do. PDF chat also requires an answer-stage LLM provider when indexed
+PDF chunks are available.
 
 Check:
 
@@ -1338,6 +1438,45 @@ VOLCENGINE_ARK_API_KEY
 ```
 
 The selected provider for each stage must have a valid key.
+
+### PDF upload stays queued or parsing
+
+Check:
+
+- `PDF_UPLOAD_TASK_WORKER_ENABLED=true`.
+- The backend process was restarted after changing PDF worker settings.
+- `/api/pdf/files/upload-tasks` shows the task `stage`, `parser_backend`, and
+  `error_code`.
+- Stale processing tasks are marked failed during backend startup and by the
+  PDF worker stale-task cleanup path.
+
+If the parser backend is `mineru`, also check:
+
+```bash
+mineru --version
+```
+
+or call:
+
+```bash
+curl http://127.0.0.1:8090/api/pdf/parser/status
+```
+
+### PDF parsing fails with MinerU unavailable or timeout
+
+Check:
+
+- `PDF_PARSER_BACKEND=mineru` only when MinerU is installed.
+- `MINERU_COMMAND` matches the command available to the backend process.
+- `MINERU_TIMEOUT_SECONDS` is high enough for the uploaded PDF.
+- The PDF file is not empty, corrupted, unsupported, or above the upload size
+  limit.
+
+For local development without MinerU, use:
+
+```text
+PDF_PARSER_BACKEND=fake
+```
 
 ### Backend reports `No module named uvicorn`
 
@@ -1391,6 +1530,8 @@ update the frontend proxy accordingly.
 Check:
 
 - `EXCEL_MAX_UPLOAD_BYTES` in `backend/.env`.
+- PDF knowledge uploads currently use a 50 MB per-file limit.
+- `MINERU_TIMEOUT_SECONDS` if PDF parsing starts but does not finish.
 - nginx `client_max_body_size` in production.
 - Browser/network timeouts.
 - Whether async upload task polling is enabled.

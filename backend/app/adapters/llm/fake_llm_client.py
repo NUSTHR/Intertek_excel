@@ -155,6 +155,52 @@ class FakeLlmClient:
             follow_up_suggestions=[],
         )
 
+    def answer_with_pdf_chunks(
+        self,
+        question: str,
+        chunks: list[dict],
+        model: str | None = None,
+        provider: str | None = None,
+        enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> DraftChatAnswer:
+        _ = model, provider, enable_deep_thinking
+        if cancellation_checker is not None:
+            cancellation_checker()
+        evidence_ids = [str(chunk["evidence_id"]) for chunk in chunks[:3]]
+        if not evidence_ids:
+            return DraftChatAnswer(
+                answer_blocks=[
+                    DraftAnswerBlock(
+                        text="No visible PDF evidence is available for this question.",
+                        evidence_ids=[],
+                    )
+                ],
+                citations=[],
+                insufficient_evidence=True,
+                follow_up_suggestions=[],
+            )
+        return DraftChatAnswer(
+            answer_blocks=[
+                DraftAnswerBlock(
+                    text=(
+                        f"Draft PDF answer for: {question} "
+                        f"Inspected {len(chunks)} chunk(s)."
+                    ),
+                    evidence_ids=evidence_ids[:1],
+                )
+            ],
+            citations=[
+                DraftCitation(
+                    evidence_id=evidence_id,
+                    quote=f"PDF evidence {evidence_id}",
+                )
+                for evidence_id in evidence_ids
+            ],
+            insufficient_evidence=False,
+            follow_up_suggestions=[],
+        )
+
     def _score(self, question: str, summary: DocumentSummary) -> int:
         haystack = " ".join(
             [

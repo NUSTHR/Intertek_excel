@@ -34,6 +34,48 @@ class ExcelUploadTaskStatus(StrEnum):
     FAILED = "failed"
 
 
+class PdfFileStatus(StrEnum):
+    ACTIVE = "active"
+    DELETED = "deleted"
+
+
+class PdfFileVisibility(StrEnum):
+    VISIBLE = "visible"
+    HIDDEN = "hidden"
+
+
+class PdfFileKind(StrEnum):
+    FOLDER = "folder"
+    PDF = "pdf"
+    CSV = "csv"
+    XLSX = "xlsx"
+
+
+class PdfProcessingStatus(StrEnum):
+    UPLOADING = "uploading"
+    QUEUED = "queued"
+    PARSING = "parsing"
+    INDEXING = "indexing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class PdfUploadTaskStatus(StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class PdfUploadTaskStage(StrEnum):
+    QUEUED = "queued"
+    CLAIMED = "claimed"
+    PARSING = "parsing"
+    INDEXING = "indexing"
+    READY = "ready"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class ExcelFile:
     file_id: str
@@ -130,6 +172,115 @@ class ExcelUploadTask:
     started_at: str | None = None
     finished_at: str | None = None
     worker_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfFile:
+    file_id: str
+    user_id: str
+    parent_id: str | None
+    display_name: str
+    original_filename: str
+    kind: PdfFileKind
+    size_bytes: int
+    storage_path: str | None
+    status: PdfFileStatus
+    visibility: PdfFileVisibility
+    processing_status: PdfProcessingStatus
+    progress: int
+    status_detail: str
+    error_message: str | None
+    page_count: int | None
+    chunk_count: int | None
+    created_at: str
+    updated_at: str
+    deleted_at: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfUploadTask:
+    task_id: str
+    user_id: str
+    file_id: str | None
+    original_filename: str
+    staging_path: str
+    status: PdfUploadTaskStatus
+    progress: int
+    detail: str
+    error_message: str | None
+    result: dict[str, object]
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    worker_id: str | None = None
+    stage: PdfUploadTaskStage = PdfUploadTaskStage.QUEUED
+    parser_backend: str = "unknown"
+    error_code: str | None = None
+    retry_count: int = 0
+    last_retry_at: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfDocumentSummary:
+    file_id: str
+    status: str
+    content: str
+    updated_at: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfPreviewBlock:
+    block_id: str
+    file_id: str
+    page_label: str
+    title: str
+    content: str
+    block_index: int
+
+
+@dataclass(frozen=True)
+class PdfSchemaItem:
+    item_id: str
+    file_id: str
+    label: str
+    value: str
+    item_index: int
+
+
+@dataclass(frozen=True)
+class PdfDocumentChunk:
+    chunk_id: str
+    file_id: str
+    chunk_index: int
+    text: str
+    page_label: str | None
+    title: str
+    token_count: int
+    content_hash: str
+    metadata: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PdfDocumentDetail:
+    file_id: str
+    summary: PdfDocumentSummary
+    preview_blocks: list[PdfPreviewBlock]
+    schema: list[PdfSchemaItem]
+    tags: list[str]
+
+
+@dataclass(frozen=True)
+class PdfModelSetting:
+    setting_id: str
+    label: str
+    providers: list[str]
+    models: list[str]
+    selected_provider: str
+    selected_model: str
+    created_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)

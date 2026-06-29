@@ -49,3 +49,14 @@ class LlmClient(Protocol):
         cancellation_checker: CancellationChecker | None = None,
     ) -> DraftChatAnswer:
         ...
+
+    def answer_with_pdf_chunks(
+        self,
+        question: str,
+        chunks: list[dict],
+        model: str | None = None,
+        provider: str | None = None,
+        enable_deep_thinking: bool = False,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> DraftChatAnswer:
+        ...

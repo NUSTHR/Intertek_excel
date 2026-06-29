@@ -53,6 +53,20 @@ from app.domain.models import (
     ExcelVersionStatus,
     LlmPreference,
     PasswordResetToken,
+    PdfDocumentChunk,
+    PdfDocumentDetail,
+    PdfDocumentSummary,
+    PdfFile,
+    PdfFileKind,
+    PdfFileStatus,
+    PdfFileVisibility,
+    PdfModelSetting,
+    PdfPreviewBlock,
+    PdfProcessingStatus,
+    PdfSchemaItem,
+    PdfUploadTask,
+    PdfUploadTaskStage,
+    PdfUploadTaskStatus,
     SelectedDocument,
     SheetSummary,
     UserAccount,
@@ -660,6 +674,607 @@ class SQLiteExcelAssetRepository:
                 ),
             )
         return max(0, cursor.rowcount)
+
+    def create_pdf_file(self, file: PdfFile) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pdf_files
+                  (
+                    file_id, user_id, parent_id, display_name, original_filename,
+                    kind, size_bytes, storage_path, status, visibility,
+                    processing_status, progress, status_detail, error_message,
+                    page_count, chunk_count, created_at, updated_at, deleted_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._pdf_file_values(file),
+            )
+
+    def get_pdf_file(self, file_id: str) -> PdfFile | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_files
+                WHERE file_id = ? AND status = ?
+                """,
+                (file_id, PdfFileStatus.ACTIVE.value),
+            ).fetchone()
+        return self._to_pdf_file(row)
+
+    def list_pdf_files(self) -> list[PdfFile]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM pdf_files
+                WHERE status = ?
+                ORDER BY updated_at DESC, display_name ASC
+                """,
+                (PdfFileStatus.ACTIVE.value,),
+            ).fetchall()
+        return [file for row in rows if (file := self._to_pdf_file(row)) is not None]
+
+    def update_pdf_file_processing(
+        self,
+        *,
+        file_id: str,
+        processing_status: PdfProcessingStatus,
+        progress: int,
+        status_detail: str,
+        updated_at: str,
+        error_message: str | None = None,
+        page_count: int | None = None,
+        chunk_count: int | None = None,
+    ) -> PdfFile | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_files
+                SET processing_status = ?,
+                    progress = ?,
+                    status_detail = ?,
+                    error_message = ?,
+                    page_count = COALESCE(?, page_count),
+                    chunk_count = COALESCE(?, chunk_count),
+                    updated_at = ?
+                WHERE file_id = ? AND status = ?
+                """,
+                (
+                    processing_status.value,
+                    progress,
+                    status_detail,
+                    error_message,
+                    page_count,
+                    chunk_count,
+                    updated_at,
+                    file_id,
+                    PdfFileStatus.ACTIVE.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_files
+                WHERE file_id = ? AND status = ?
+                """,
+                (file_id, PdfFileStatus.ACTIVE.value),
+            ).fetchone()
+        return self._to_pdf_file(row)
+
+    def update_pdf_file_visibility(
+        self,
+        file_id: str,
+        visibility: PdfFileVisibility,
+        updated_at: str,
+    ) -> PdfFile | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_files
+                SET visibility = ?, updated_at = ?
+                WHERE file_id = ? AND status = ?
+                """,
+                (
+                    visibility.value,
+                    updated_at,
+                    file_id,
+                    PdfFileStatus.ACTIVE.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_files
+                WHERE file_id = ? AND status = ?
+                """,
+                (file_id, PdfFileStatus.ACTIVE.value),
+            ).fetchone()
+        return self._to_pdf_file(row)
+
+    def create_pdf_upload_task(self, task: PdfUploadTask) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pdf_upload_tasks
+                  (
+                    task_id, user_id, file_id, original_filename, staging_path,
+                    status, progress, detail, error_message, result_json,
+                    created_at, updated_at, started_at, finished_at, worker_id,
+                    stage, parser_backend, error_code, retry_count, last_retry_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._pdf_upload_task_values(task),
+            )
+
+    def get_pdf_upload_task(self, task_id: str) -> PdfUploadTask | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
+    def list_pdf_upload_tasks(self, user_id: str) -> list[PdfUploadTask]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM pdf_upload_tasks
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT 20
+                """,
+                (user_id,),
+            ).fetchall()
+        return [task for row in rows if (task := self._to_pdf_upload_task(row)) is not None]
+
+    def claim_next_pdf_upload_task(
+        self,
+        *,
+        worker_id: str,
+        started_at: str,
+    ) -> PdfUploadTask | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET status = ?,
+                    worker_id = ?,
+                    started_at = ?,
+                    updated_at = ?,
+                    error_message = NULL,
+                    error_code = NULL,
+                    stage = ?,
+                    detail = ?,
+                    progress = ?
+                WHERE task_id = (
+                  SELECT task_id
+                  FROM pdf_upload_tasks
+                  WHERE status = ?
+                  ORDER BY created_at ASC
+                  LIMIT 1
+                )
+                """,
+                (
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    started_at,
+                    started_at,
+                    PdfUploadTaskStage.CLAIMED.value,
+                    "MinerU parsing started.",
+                    20,
+                    PdfUploadTaskStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_upload_tasks
+                WHERE worker_id = ?
+                  AND status = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (worker_id, PdfUploadTaskStatus.PROCESSING.value),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
+    def update_pdf_upload_task_progress(
+        self,
+        *,
+        task_id: str,
+        progress: int,
+        detail: str,
+        updated_at: str,
+        stage: PdfUploadTaskStage | None = None,
+    ) -> PdfUploadTask | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET progress = ?,
+                    detail = ?,
+                    stage = COALESCE(?, stage),
+                    updated_at = ?
+                WHERE task_id = ?
+                  AND status = ?
+                """,
+                (
+                    progress,
+                    detail,
+                    stage.value if stage is not None else None,
+                    updated_at,
+                    task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
+    def complete_pdf_upload_task(
+        self,
+        *,
+        task_id: str,
+        result: dict[str, object],
+        finished_at: str,
+    ) -> PdfUploadTask | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET status = ?,
+                    progress = ?,
+                    stage = ?,
+                    detail = ?,
+                    result_json = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    PdfUploadTaskStatus.READY.value,
+                    100,
+                    PdfUploadTaskStage.READY.value,
+                    "Ready for PDF-grounded chat.",
+                    dump_json(result),
+                    finished_at,
+                    finished_at,
+                    task_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
+    def fail_pdf_upload_task(
+        self,
+        *,
+        task_id: str,
+        error_message: str,
+        failed_at: str,
+        error_code: str | None = None,
+    ) -> PdfUploadTask | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET status = ?,
+                    progress = ?,
+                    stage = ?,
+                    detail = ?,
+                    error_message = ?,
+                    error_code = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    PdfUploadTaskStatus.FAILED.value,
+                    100,
+                    PdfUploadTaskStage.FAILED.value,
+                    "PDF parsing failed.",
+                    error_message,
+                    error_code,
+                    failed_at,
+                    failed_at,
+                    task_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
+    def fail_stale_processing_pdf_upload_tasks(
+        self,
+        *,
+        cutoff_started_at: str,
+        failed_at: str,
+    ) -> int:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE pdf_files
+                SET processing_status = ?,
+                    progress = ?,
+                    status_detail = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE file_id IN (
+                  SELECT file_id
+                  FROM pdf_upload_tasks
+                  WHERE status = ?
+                    AND started_at IS NOT NULL
+                    AND started_at < ?
+                    AND file_id IS NOT NULL
+                )
+                """,
+                (
+                    PdfProcessingStatus.FAILED.value,
+                    100,
+                    "PDF processing was interrupted.",
+                    "PDF processing was interrupted. Please upload the document again.",
+                    failed_at,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    cutoff_started_at,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET status = ?,
+                    error_message = ?,
+                    error_code = ?,
+                    detail = ?,
+                    stage = ?,
+                    progress = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE status = ?
+                  AND started_at IS NOT NULL
+                  AND started_at < ?
+                """,
+                (
+                    PdfUploadTaskStatus.FAILED.value,
+                    "PDF processing was interrupted. Please upload the document again.",
+                    "stale_processing_task",
+                    "PDF processing was interrupted.",
+                    PdfUploadTaskStage.FAILED.value,
+                    100,
+                    failed_at,
+                    failed_at,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    cutoff_started_at,
+                ),
+            )
+        return max(0, cursor.rowcount)
+
+    def save_pdf_document_detail(self, detail: PdfDocumentDetail) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM pdf_preview_blocks WHERE file_id = ?",
+                (detail.file_id,),
+            )
+            connection.execute(
+                "DELETE FROM pdf_schema_items WHERE file_id = ?",
+                (detail.file_id,),
+            )
+            connection.execute(
+                "DELETE FROM pdf_document_tags WHERE file_id = ?",
+                (detail.file_id,),
+            )
+            self._save_pdf_summary(connection, detail.summary)
+            connection.executemany(
+                """
+                INSERT INTO pdf_preview_blocks
+                  (block_id, file_id, page_label, title, content, block_index)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        block.block_id,
+                        block.file_id,
+                        block.page_label,
+                        block.title,
+                        block.content,
+                        block.block_index,
+                    )
+                    for block in detail.preview_blocks
+                ],
+            )
+            connection.executemany(
+                """
+                INSERT INTO pdf_schema_items
+                  (item_id, file_id, label, value, item_index)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        item.item_id,
+                        item.file_id,
+                        item.label,
+                        item.value,
+                        item.item_index,
+                    )
+                    for item in detail.schema
+                ],
+            )
+            connection.executemany(
+                """
+                INSERT INTO pdf_document_tags
+                  (file_id, tag, tag_index)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (detail.file_id, tag, index)
+                    for index, tag in enumerate(detail.tags)
+                ],
+            )
+
+    def get_pdf_document_detail(self, file_id: str) -> PdfDocumentDetail | None:
+        with self._connect() as connection:
+            summary_row = connection.execute(
+                "SELECT * FROM pdf_document_summaries WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+            block_rows = connection.execute(
+                """
+                SELECT * FROM pdf_preview_blocks
+                WHERE file_id = ?
+                ORDER BY block_index ASC
+                """,
+                (file_id,),
+            ).fetchall()
+            schema_rows = connection.execute(
+                """
+                SELECT * FROM pdf_schema_items
+                WHERE file_id = ?
+                ORDER BY item_index ASC
+                """,
+                (file_id,),
+            ).fetchall()
+            tag_rows = connection.execute(
+                """
+                SELECT tag FROM pdf_document_tags
+                WHERE file_id = ?
+                ORDER BY tag_index ASC
+                """,
+                (file_id,),
+            ).fetchall()
+        if summary_row is None and not block_rows and not schema_rows and not tag_rows:
+            return None
+        return PdfDocumentDetail(
+            file_id=file_id,
+            summary=self._to_pdf_summary(summary_row)
+            or PdfDocumentSummary(
+                file_id=file_id,
+                status="empty",
+                content="",
+            ),
+            preview_blocks=[self._to_pdf_preview_block(row) for row in block_rows],
+            schema=[self._to_pdf_schema_item(row) for row in schema_rows],
+            tags=[str(row["tag"]) for row in tag_rows],
+        )
+
+    def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> None:
+        with self._connect() as connection:
+            self._save_pdf_summary(connection, summary)
+
+    def replace_pdf_document_chunks(
+        self,
+        file_id: str,
+        chunks: list[PdfDocumentChunk],
+    ) -> None:
+        created_at = utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM pdf_document_chunks WHERE file_id = ?",
+                (file_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO pdf_document_chunks
+                  (
+                    chunk_id, file_id, chunk_index, text, page_label, title,
+                    token_count, content_hash, metadata_json, created_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        chunk.chunk_id,
+                        chunk.file_id,
+                        chunk.chunk_index,
+                        chunk.text,
+                        chunk.page_label,
+                        chunk.title,
+                        chunk.token_count,
+                        chunk.content_hash,
+                        dump_json(chunk.metadata),
+                        created_at,
+                    )
+                    for chunk in chunks
+                ],
+            )
+
+    def list_pdf_document_chunks(self, file_id: str) -> list[PdfDocumentChunk]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM pdf_document_chunks
+                WHERE file_id = ?
+                ORDER BY chunk_index ASC
+                """,
+                (file_id,),
+            ).fetchall()
+        return [self._to_pdf_chunk(row) for row in rows]
+
+    def list_pdf_model_settings(self) -> list[PdfModelSetting]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM pdf_model_settings
+                ORDER BY setting_id ASC
+                """
+            ).fetchall()
+        return [
+            setting
+            for row in rows
+            if (setting := self._to_pdf_model_setting(row)) is not None
+        ]
+
+    def save_pdf_model_setting(self, setting: PdfModelSetting) -> PdfModelSetting:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pdf_model_settings
+                  (
+                    setting_id, label, providers_json, models_json,
+                    selected_provider, selected_model, created_at, updated_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(setting_id) DO UPDATE SET
+                  label = excluded.label,
+                  providers_json = excluded.providers_json,
+                  models_json = excluded.models_json,
+                  selected_provider = excluded.selected_provider,
+                  selected_model = excluded.selected_model,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    setting.setting_id,
+                    setting.label,
+                    dump_json(setting.providers),
+                    dump_json(setting.models),
+                    setting.selected_provider,
+                    setting.selected_model,
+                    setting.created_at,
+                    setting.updated_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM pdf_model_settings WHERE setting_id = ?",
+                (setting.setting_id,),
+            ).fetchone()
+        saved = self._to_pdf_model_setting(row)
+        if saved is None:
+            raise RuntimeError("failed to save PDF model setting")
+        return saved
 
     def _finish_upload_task(
         self,
@@ -1579,6 +2194,193 @@ class SQLiteExcelAssetRepository:
             worker_id=row["worker_id"],
         )
 
+    def _pdf_file_values(self, file: PdfFile) -> tuple[object, ...]:
+        return (
+            file.file_id,
+            file.user_id,
+            file.parent_id,
+            file.display_name,
+            file.original_filename,
+            file.kind.value,
+            file.size_bytes,
+            file.storage_path,
+            file.status.value,
+            file.visibility.value,
+            file.processing_status.value,
+            file.progress,
+            file.status_detail,
+            file.error_message,
+            file.page_count,
+            file.chunk_count,
+            file.created_at,
+            file.updated_at,
+            file.deleted_at,
+        )
+
+    def _to_pdf_file(self, row: sqlite3.Row | None) -> PdfFile | None:
+        if row is None:
+            return None
+        return PdfFile(
+            file_id=str(row["file_id"]),
+            user_id=str(row["user_id"]),
+            parent_id=row["parent_id"],
+            display_name=str(row["display_name"]),
+            original_filename=str(row["original_filename"]),
+            kind=PdfFileKind(str(row["kind"])),
+            size_bytes=int(row["size_bytes"]),
+            storage_path=row["storage_path"],
+            status=PdfFileStatus(str(row["status"])),
+            visibility=PdfFileVisibility(str(row["visibility"])),
+            processing_status=PdfProcessingStatus(str(row["processing_status"])),
+            progress=int(row["progress"]),
+            status_detail=str(row["status_detail"]),
+            error_message=row["error_message"],
+            page_count=_optional_int(row["page_count"]),
+            chunk_count=_optional_int(row["chunk_count"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            deleted_at=row["deleted_at"],
+        )
+
+    def _pdf_upload_task_values(self, task: PdfUploadTask) -> tuple[object, ...]:
+        return (
+            task.task_id,
+            task.user_id,
+            task.file_id,
+            task.original_filename,
+            task.staging_path,
+            task.status.value,
+            task.progress,
+            task.detail,
+            task.error_message,
+            dump_json(task.result),
+            task.created_at,
+            task.updated_at,
+            task.started_at,
+            task.finished_at,
+            task.worker_id,
+            task.stage.value,
+            task.parser_backend,
+            task.error_code,
+            task.retry_count,
+            task.last_retry_at,
+        )
+
+    def _to_pdf_upload_task(self, row: sqlite3.Row | None) -> PdfUploadTask | None:
+        if row is None:
+            return None
+        return PdfUploadTask(
+            task_id=str(row["task_id"]),
+            user_id=str(row["user_id"]),
+            file_id=row["file_id"],
+            original_filename=str(row["original_filename"]),
+            staging_path=str(row["staging_path"]),
+            status=PdfUploadTaskStatus(str(row["status"])),
+            progress=int(row["progress"]),
+            detail=str(row["detail"]),
+            error_message=row["error_message"],
+            result=load_json_object(row_value(row, "result_json", "{}")),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            worker_id=row["worker_id"],
+            stage=PdfUploadTaskStage(
+                str(row_value(row, "stage", PdfUploadTaskStage.QUEUED.value))
+            ),
+            parser_backend=row_str(row, "parser_backend", "unknown"),
+            error_code=row_value(row, "error_code"),
+            retry_count=safe_int(row_value(row, "retry_count", 0), 0),
+            last_retry_at=row_value(row, "last_retry_at"),
+        )
+
+    def _save_pdf_summary(
+        self,
+        connection: sqlite3.Connection,
+        summary: PdfDocumentSummary,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO pdf_document_summaries
+              (file_id, status, content, updated_at, error_message)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(file_id) DO UPDATE SET
+              status = excluded.status,
+              content = excluded.content,
+              updated_at = excluded.updated_at,
+              error_message = excluded.error_message
+            """,
+            (
+                summary.file_id,
+                summary.status,
+                summary.content,
+                summary.updated_at,
+                summary.error_message,
+            ),
+        )
+
+    def _to_pdf_summary(self, row: sqlite3.Row | None) -> PdfDocumentSummary | None:
+        if row is None:
+            return None
+        return PdfDocumentSummary(
+            file_id=str(row["file_id"]),
+            status=str(row["status"]),
+            content=str(row["content"]),
+            updated_at=row["updated_at"],
+            error_message=row["error_message"],
+        )
+
+    def _to_pdf_preview_block(self, row: sqlite3.Row) -> PdfPreviewBlock:
+        return PdfPreviewBlock(
+            block_id=str(row["block_id"]),
+            file_id=str(row["file_id"]),
+            page_label=str(row["page_label"]),
+            title=str(row["title"]),
+            content=str(row["content"]),
+            block_index=int(row["block_index"]),
+        )
+
+    def _to_pdf_schema_item(self, row: sqlite3.Row) -> PdfSchemaItem:
+        return PdfSchemaItem(
+            item_id=str(row["item_id"]),
+            file_id=str(row["file_id"]),
+            label=str(row["label"]),
+            value=str(row["value"]),
+            item_index=int(row["item_index"]),
+        )
+
+    def _to_pdf_chunk(self, row: sqlite3.Row) -> PdfDocumentChunk:
+        metadata = load_json_object(row_value(row, "metadata_json", "{}"))
+        return PdfDocumentChunk(
+            chunk_id=str(row["chunk_id"]),
+            file_id=str(row["file_id"]),
+            chunk_index=int(row["chunk_index"]),
+            text=str(row["text"]),
+            page_label=row["page_label"],
+            title=str(row["title"]),
+            token_count=int(row["token_count"]),
+            content_hash=str(row["content_hash"]),
+            metadata={
+                str(key): str(value)
+                for key, value in metadata.items()
+                if str(key).strip()
+            },
+        )
+
+    def _to_pdf_model_setting(self, row: sqlite3.Row | None) -> PdfModelSetting | None:
+        if row is None:
+            return None
+        return PdfModelSetting(
+            setting_id=str(row["setting_id"]),
+            label=str(row["label"]),
+            providers=load_string_list(row["providers_json"]),
+            models=load_string_list(row["models_json"]),
+            selected_provider=str(row["selected_provider"]),
+            selected_model=str(row["selected_model"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
     def _to_summary(
         self,
         row: sqlite3.Row | None,
@@ -1931,6 +2733,15 @@ def _retry_after_seconds(blocked_until: str, now: str) -> int | None:
     if remaining_seconds <= 0:
         return None
     return max(1, int(remaining_seconds))
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _iso_seconds_between(start: str, end: str) -> float:

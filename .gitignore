@@ -3,9 +3,11 @@
 
 # Backend local environment and generated files
 backend/.env
+.venv/
 backend/.venv/
 backend/.venv-codex/
 backend/.pytest_cache/
+backend/.pytest-tmp/
 backend/pytest-cache/
 backend/pytest-tmp/
 backend/.ruff_cache/

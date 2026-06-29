@@ -11,6 +11,7 @@ from app.adapters.llm.siliconflow_client import (
     MultiProviderLlmClient,
     SiliconFlowConfig,
 )
+from app.adapters.pdf.factory import create_pdf_parser, get_pdf_parser_status
 from app.adapters.repositories.sqlite.policies import (
     SQLiteConnectionPolicy,
     SQLiteMaintenancePolicy,
@@ -27,6 +28,12 @@ from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.excel_assets.upload_tasks import UploadTaskService, UploadTaskWorker
 from app.application.llm_preferences import WorkspaceLlmPreferenceService
+from app.application.pdf_knowledge import (
+    PdfChatService,
+    PdfKnowledgeService,
+    PdfRetrievalService,
+    PdfUploadTaskWorker,
+)
 from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError, AuthorizationError
 from app.core.llm_catalog import (
@@ -93,6 +100,37 @@ def get_upload_task_worker() -> UploadTaskWorker:
         excel_assets=get_excel_asset_service(),
         storage_root=settings.storage_root,
         poll_interval_seconds=settings.upload_task_worker_poll_interval_seconds,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_knowledge_service() -> PdfKnowledgeService:
+    settings = get_settings()
+    return PdfKnowledgeService(
+        repository=get_excel_repository(),
+        storage_root=settings.storage_root,
+        parser=create_pdf_parser(settings),
+        parser_status=get_pdf_parser_status(settings),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_upload_task_worker() -> PdfUploadTaskWorker:
+    settings = get_settings()
+    return PdfUploadTaskWorker(
+        repository=get_excel_repository(),
+        pdf_knowledge=get_pdf_knowledge_service(),
+        storage_root=settings.storage_root,
+        poll_interval_seconds=settings.pdf_upload_task_worker_poll_interval_seconds,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_chat_service() -> PdfChatService:
+    return PdfChatService(
+        retrieval=PdfRetrievalService(repository=get_excel_repository()),
+        llm_client=get_llm_client(),
+        llm_preferences=get_llm_preference_service(),
     )
 
 
