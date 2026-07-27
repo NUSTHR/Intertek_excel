@@ -24,6 +24,10 @@ const resetTokenPreview = ref('')
 const errorMessage = ref('')
 const infoMessage = ref('')
 const isSubmitting = ref(false)
+const passwordMinLength = computed(() => (mode.value === 'login' ? 1 : 8))
+const passwordPlaceholder = computed(() =>
+  mode.value === 'login' ? 'Enter password' : 'At least 8 characters',
+)
 
 const title = computed(() => {
   if (mode.value === 'register') {
@@ -152,10 +156,10 @@ function switchMode(nextMode: AuthMode): void {
             <input
               v-model="password"
               type="password"
-              autocomplete="current-password"
-              placeholder="At least 8 characters"
+              :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
+              :placeholder="passwordPlaceholder"
               required
-              minlength="8"
+              :minlength="passwordMinLength"
             />
           </label>
 

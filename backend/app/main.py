@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import (
+    get_pdf_summary_task_worker,
     get_pdf_upload_task_worker,
     get_upload_task_service,
     get_upload_task_worker,
@@ -38,6 +39,12 @@ async def lifespan(app: FastAPI):
             max_processing_age_minutes=settings.pdf_upload_task_stale_processing_minutes,
         )
         pdf_worker.start()
+    if settings.pdf_summary_task_worker_enabled:
+        pdf_summary_worker = get_pdf_summary_task_worker()
+        pdf_summary_worker.mark_stale_running_tasks_failed(
+            max_running_age_minutes=settings.pdf_summary_task_stale_running_minutes,
+        )
+        pdf_summary_worker.start()
     try:
         yield
     finally:
@@ -45,6 +52,8 @@ async def lifespan(app: FastAPI):
             get_upload_task_worker().stop()
         if settings.pdf_upload_task_worker_enabled:
             get_pdf_upload_task_worker().stop()
+        if settings.pdf_summary_task_worker_enabled:
+            get_pdf_summary_task_worker().stop()
 
 
 def create_app() -> FastAPI:

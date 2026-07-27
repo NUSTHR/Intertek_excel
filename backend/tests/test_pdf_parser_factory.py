@@ -16,6 +16,8 @@ def test_missing_mineru_command_reports_unavailable() -> None:
         Settings(
             pdf_parser_backend="mineru",
             mineru_command="definitely_missing_mineru_for_tests_000000",
+            mineru_cli_backend="pipeline",
+            mineru_extra_args="--lang,ch",
         )
     )
 
@@ -23,6 +25,8 @@ def test_missing_mineru_command_reports_unavailable() -> None:
     assert status.available is False
     assert status.command == "definitely_missing_mineru_for_tests_000000"
     assert "not found" in status.detail
+    assert "CLI backend: pipeline" in status.detail
+    assert "Extra CLI args: --lang ch" in status.detail
 
 
 def test_unknown_pdf_parser_backend_reports_unavailable() -> None:

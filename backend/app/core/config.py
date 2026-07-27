@@ -67,12 +67,28 @@ class Settings(BaseSettings):
     pdf_upload_task_worker_enabled: bool = True
     pdf_upload_task_worker_poll_interval_seconds: float = 0.5
     pdf_upload_task_stale_processing_minutes: int = 60
+    pdf_summary_task_worker_enabled: bool = True
+    pdf_summary_task_worker_poll_interval_seconds: float = 0.5
+    pdf_summary_task_stale_running_minutes: int = 60
     pdf_parser_backend: str = "fake"
     mineru_command: str = "mineru"
     mineru_timeout_seconds: float = 300.0
+    mineru_cli_backend: str = "pipeline"
+    mineru_extra_args: str = ""
+    mineru_cloud_api_base_url: str = "https://mineru.net/api/v4"
+    mineru_cloud_api_token: str = ""
+    mineru_cloud_access_key: str = ""
+    mineru_cloud_secret_key: str = ""
+    mineru_cloud_model_version: str = "vlm"
+    mineru_cloud_timeout_seconds: float = 1200.0
+    mineru_cloud_poll_interval_seconds: float = 5.0
+    mineru_cloud_language: str = "ch"
+    mineru_cloud_enable_formula: bool = True
+    mineru_cloud_enable_table: bool = True
+    mineru_cloud_is_ocr: bool = False
     chat_cancellation_retention_seconds: int = 300
-    auth_admin_email: str = "969348539@qq.com"
-    auth_admin_password: str = "Intertek_AI"
+    auth_admin_email: str = "admin@qq.com"
+    auth_admin_password: str = "admin"
     auth_session_ttl_hours: int = 24 * 14
     auth_password_reset_ttl_minutes: int = 30
     auth_password_hash_iterations: int = 260_000
@@ -140,7 +156,7 @@ class Settings(BaseSettings):
             return
 
         errors: list[str] = []
-        if self.auth_admin_password == "Intertek_AI":
+        if self.auth_admin_password == "admin":
             errors.append("AUTH_ADMIN_PASSWORD must be changed for production")
         if self.auth_expose_reset_token:
             errors.append("AUTH_EXPOSE_RESET_TOKEN must be false for production")

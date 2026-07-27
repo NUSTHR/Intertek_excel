@@ -57,7 +57,9 @@ class PdfProcessingStatus(StrEnum):
     PARSING = "parsing"
     INDEXING = "indexing"
     READY = "ready"
+    PARTIAL = "partial"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class PdfUploadTaskStatus(StrEnum):
@@ -65,6 +67,16 @@ class PdfUploadTaskStatus(StrEnum):
     PROCESSING = "processing"
     READY = "ready"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class PdfSummaryTaskStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    READY = "ready"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    CANCELLED = "cancelled"
 
 
 class PdfUploadTaskStage(StrEnum):
@@ -74,6 +86,37 @@ class PdfUploadTaskStage(StrEnum):
     INDEXING = "indexing"
     READY = "ready"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class PdfUploadBatchStatus(StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    READY = "ready"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ChatWorkspace(StrEnum):
+    EXCEL = "excel"
+    PDF = "pdf"
+
+
+class PdfParseQualityStatus(StrEnum):
+    UNKNOWN = "unknown"
+    GOOD = "good"
+    WARNING = "warning"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class PdfParsePageStatus(StrEnum):
+    PARSED = "parsed"
+    EMPTY = "empty"
+    IMAGE_ONLY = "image_only"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -195,6 +238,31 @@ class PdfFile:
     created_at: str
     updated_at: str
     deleted_at: str | None = None
+    quality_status: PdfParseQualityStatus | None = None
+    coverage_ratio: float | None = None
+    warning_count: int | None = None
+    failed_page_count: int | None = None
+    parser_backend: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfUploadBatch:
+    batch_id: str
+    user_id: str
+    source_name: str
+    status: PdfUploadBatchStatus
+    total_files: int
+    accepted_files: int
+    skipped_files: int
+    total_bytes: int
+    progress: int
+    detail: str
+    parser_backend: str
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
+    error_message: str | None = None
+    result: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -219,6 +287,26 @@ class PdfUploadTask:
     error_code: str | None = None
     retry_count: int = 0
     last_retry_at: str | None = None
+    batch_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfSummaryTask:
+    task_id: str
+    user_id: str
+    file_id: str
+    status: PdfSummaryTaskStatus
+    progress: int
+    detail: str
+    error_message: str | None
+    result: dict[str, object]
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    worker_id: str | None = None
+    retry_count: int = 0
+    last_retry_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +316,16 @@ class PdfDocumentSummary:
     content: str
     updated_at: str | None = None
     error_message: str | None = None
+    document_title: str = ""
+    document_type: str = "pdf_document"
+    business_domain: str = "pdf knowledge"
+    key_topics: list[str] = field(default_factory=list)
+    positive_routing_terms: list[str] = field(default_factory=list)
+    negative_routing_terms: list[str] = field(default_factory=list)
+    exact_identifiers: list[str] = field(default_factory=list)
+    suitable_questions: list[str] = field(default_factory=list)
+    unsuitable_questions: list[str] = field(default_factory=list)
+    routing_notes: str = ""
 
 
 @dataclass(frozen=True)
@@ -263,12 +361,66 @@ class PdfDocumentChunk:
 
 
 @dataclass(frozen=True)
+class PdfParsePage:
+    page_id: str
+    file_id: str
+    page_number: int
+    page_label: str
+    status: PdfParsePageStatus
+    text_block_count: int
+    table_block_count: int
+    image_block_count: int
+    char_count: int
+    warning_message: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfParseArtifact:
+    artifact_id: str
+    file_id: str
+    artifact_type: str
+    name: str
+    path: str | None
+    size_bytes: int
+    content_hash: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class PdfParseReport:
+    file_id: str
+    parser_backend: str
+    quality_status: PdfParseQualityStatus
+    total_pages: int
+    parsed_pages: int
+    failed_pages: int
+    empty_pages: int
+    text_block_count: int
+    table_block_count: int
+    image_block_count: int
+    chunk_count: int
+    coverage_ratio: float
+    warning_count: int
+    error_count: int
+    warnings: list[str]
+    created_at: str
+    updated_at: str
+    parser_version: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    artifacts: list[PdfParseArtifact] = field(default_factory=list)
+    pages: list[PdfParsePage] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class PdfDocumentDetail:
     file_id: str
     summary: PdfDocumentSummary
     preview_blocks: list[PdfPreviewBlock]
     schema: list[PdfSchemaItem]
     tags: list[str]
+    parse_report: PdfParseReport | None = None
 
 
 @dataclass(frozen=True)
@@ -345,6 +497,7 @@ class ChatSession:
     title: str = "New chat"
     pinned_at: str | None = None
     status: str = "active"
+    workspace: ChatWorkspace = ChatWorkspace.EXCEL
 
 
 @dataclass(frozen=True)
@@ -364,6 +517,26 @@ class SelectedDocument:
     version_id: str
     reason: str
     confidence: float | None = None
+
+
+@dataclass(frozen=True)
+class PdfAttachedDocument:
+    session_id: str
+    file_id: str
+    attached_at: str
+    chunk_count: int
+    context_hash: str
+    status: str = "attached"
+
+
+@dataclass(frozen=True)
+class PdfChatRouteResult:
+    session_id: str
+    question: str
+    selected_documents: list[SelectedDocument]
+    newly_attached_documents: list[SelectedDocument]
+    attached_documents: list[PdfAttachedDocument]
+    created_at: str
 
 
 @dataclass(frozen=True)

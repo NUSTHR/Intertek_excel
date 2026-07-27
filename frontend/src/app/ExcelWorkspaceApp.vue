@@ -36,7 +36,7 @@ import {
   useUploadTaskPolling,
   type FileSchemaColumn,
 } from '../features/file-management'
-import { PdfKnowledgeWorkspace } from '../features/pdf-knowledge'
+import { PdfKnowledgeWorkspace, PdfParseDiagnosticsPage } from '../features/pdf-knowledge'
 import { useTransientFeedback } from './use-transient-feedback'
 import { useChatSessions } from './composables/use-chat-sessions'
 import { useFileLibrary } from './composables/use-file-library'
@@ -89,6 +89,9 @@ function activeViewFromHash(hash: string): ActiveView {
   }
   if (hash === '#pdf') {
     return 'pdf'
+  }
+  if (hash === '#pdf-diagnostics') {
+    return 'pdf-diagnostics'
   }
   return 'chat'
 }
@@ -1669,7 +1672,10 @@ function getGridCellValue(row: string[], columnIndex: number): string {
   <main
     v-else
     class="excelai-app"
-    :class="{ 'chat-mode': activeView === 'chat', 'pdf-mode': activeView === 'pdf' }"
+    :class="{
+      'chat-mode': activeView === 'chat',
+      'pdf-mode': activeView === 'pdf' || activeView === 'pdf-diagnostics',
+    }"
   >
     <aside class="app-sidebar">
       <div class="brand-block">
@@ -1792,7 +1798,19 @@ function getGridCellValue(row: string[], columnIndex: number): string {
         {{ chatSessionFeedback.message }}
       </div>
 
-      <PdfKnowledgeWorkspace v-if="activeView === 'pdf'" />
+      <PdfKnowledgeWorkspace
+        v-if="activeView === 'pdf'"
+        :is-admin="isAdmin"
+        :user-email="userEmail"
+        :user-role-label="userRoleLabel"
+        @open-diagnostics="setActiveView('pdf-diagnostics')"
+      />
+
+      <PdfParseDiagnosticsPage
+        v-if="activeView === 'pdf-diagnostics'"
+        :is-admin="isAdmin"
+        @open-pdf-workspace="setActiveView('pdf')"
+      />
 
       <section v-if="activeView === 'files'" class="file-page">
         <div class="file-management-shell">

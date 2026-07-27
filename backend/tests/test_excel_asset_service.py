@@ -12,7 +12,15 @@ from app.core.errors import (
     FileNameConflictError,
     InvalidExcelFileError,
 )
-from app.domain.models import ExcelArtifactType, ExcelVersionStatus
+from app.domain.models import (
+    AttachedDocument,
+    ChatSession,
+    DocumentSummary,
+    ExcelArtifactType,
+    ExcelFileStatus,
+    ExcelVersionStatus,
+    SheetSummary,
+)
 from app.ports.workbook_reader import WorkbookData, WorkbookSheet
 
 
@@ -201,6 +209,32 @@ def test_rename_file_updates_display_name_and_rejects_conflict(
 
     with pytest.raises(FileNameConflictError):
         service.rename_file(second.file.file_id, "risk-renamed.xlsx")
+
+
+def test_rename_file_preserves_version_sheet_summary_and_chat_links(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+    _save_summary_and_attachment(service, result)
+
+    renamed = service.rename_file(result.file.file_id, "risk-renamed.xlsx")
+
+    assert renamed.file_id == result.file.file_id
+    assert renamed.active_version_id == result.version.version_id
+    assert service.get_version(result.version.version_id).file_id == result.file.file_id
+    assert service.list_sheets(result.version.version_id)[0].version_id == (
+        result.version.version_id
+    )
+
+    summary = service._repository.get_summary(result.version.version_id)
+    assert summary is not None
+    assert summary.file_id == result.file.file_id
+    assert summary.version_id == result.version.version_id
+
+    attached = service._repository.list_attached_documents("session-risk")
+    assert len(attached) == 1
+    assert attached[0].file_id == result.file.file_id
+    assert attached[0].version_id == result.version.version_id
 
 
 def test_failed_replacement_does_not_change_active_version(
@@ -434,3 +468,93 @@ def test_delete_file_requires_confirmation_and_soft_deletes_management_record(
 
     with pytest.raises(AssetNotFoundError):
         service.get_file(result.file.file_id)
+
+
+def test_delete_file_hides_directory_record_and_preserves_historical_links(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("risk.xlsx", b"first")
+    _save_summary_and_attachment(service, result)
+    old_file_id = result.file.file_id
+    old_version_id = result.version.version_id
+    old_sheet_id = result.sheets[0].sheet_id
+
+    deleted = service.delete_file(old_file_id, confirm_delete=True)
+    replacement = service.upload_workbook("risk.xlsx", b"second")
+
+    deleted_file = service._repository.get_file_including_deleted(old_file_id)
+    assert deleted.file_id == old_file_id
+    assert deleted_file is not None
+    assert deleted_file.status == ExcelFileStatus.DELETED
+    assert deleted_file.active_version_id is None
+    assert deleted_file.display_name == f"deleted:{old_file_id}:risk.xlsx"
+    assert service.check_display_name("risk.xlsx").file_id == replacement.file.file_id
+    assert replacement.file.file_id != old_file_id
+    assert replacement.version.file_id == replacement.file.file_id
+
+    old_version = service._repository.get_version(old_version_id)
+    old_sheet = service._repository.get_sheet(old_sheet_id)
+    old_summary = service._repository.get_summary(old_version_id)
+    old_attachments = service._repository.list_attached_documents("session-risk")
+
+    assert old_version is not None
+    assert old_version.file_id == old_file_id
+    assert old_sheet is not None
+    assert old_sheet.version_id == old_version_id
+    assert old_summary is not None
+    assert old_summary.file_id == old_file_id
+    assert old_summary.version_id == old_version_id
+    assert len(old_attachments) == 1
+    assert old_attachments[0].file_id == old_file_id
+    assert old_attachments[0].version_id == old_version_id
+
+    with pytest.raises(AssetNotFoundError):
+        service.get_version(old_version_id)
+    legacy_sheets = service.list_sheets_for_legacy_chat_context(old_version_id)
+    assert [sheet.sheet_id for sheet in legacy_sheets] == [
+        sheet.sheet_id for sheet in result.sheets
+    ]
+
+
+def _save_summary_and_attachment(service: ExcelAssetService, result) -> None:
+    service._repository.save_summary(
+        DocumentSummary(
+            summary_id=f"summary-{result.file.file_id}",
+            file_id=result.file.file_id,
+            version_id=result.version.version_id,
+            summary_text="Risk workbook summary",
+            business_domain="compliance",
+            key_topics=["risk"],
+            suitable_questions=["What risks are listed?"],
+            unsuitable_questions=[],
+            sheet_summaries=[
+                SheetSummary(
+                    sheet_id=result.sheets[0].sheet_id,
+                    sheet_name=result.sheets[0].sheet_name,
+                    summary="Supplier risk data",
+                    important_columns=["Supplier", "Status"],
+                    likely_question_types=["lookup"],
+                )
+            ],
+            created_at="2026-07-01T00:00:00+00:00",
+            document_title=result.file.display_name,
+        )
+    )
+    service._repository.create_session(
+        ChatSession(
+            session_id="session-risk",
+            user_id="user-risk",
+            created_at="2026-07-01T00:00:00+00:00",
+            updated_at="2026-07-01T00:00:00+00:00",
+        )
+    )
+    service._repository.attach_document(
+        AttachedDocument(
+            session_id="session-risk",
+            file_id=result.file.file_id,
+            version_id=result.version.version_id,
+            attached_at="2026-07-01T00:00:00+00:00",
+            row_count=3,
+            context_hash="risk-hash",
+        )
+    )

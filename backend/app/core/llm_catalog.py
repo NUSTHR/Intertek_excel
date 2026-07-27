@@ -22,6 +22,7 @@ LLM_PROVIDER_LABELS: dict[str, str] = {
 SILICONFLOW_LLM_MODELS: tuple[str, ...] = (
     "inclusionAI/Ling-flash-2.0",
     "deepseek-ai/DeepSeek-V4-Pro",
+    "deepseek-ai/DeepSeek-V4-Flash",
     "Pro/deepseek-ai/DeepSeek-V3.2",
     "Qwen/Qwen3.6-27B",
     "Qwen/Qwen3.6-35B-A3B",

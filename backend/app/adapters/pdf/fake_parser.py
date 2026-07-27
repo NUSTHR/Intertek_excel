@@ -1,4 +1,10 @@
-from app.ports.pdf_parser import ParsedPdfBlock, ParsedPdfChunk, ParsedPdfDocument
+from app.domain.models import PdfParsePageStatus, PdfParseQualityStatus
+from app.ports.pdf_parser import (
+    ParsedPdfBlock,
+    ParsedPdfChunk,
+    ParsedPdfDocument,
+    ParsedPdfPage,
+)
 
 
 class FakePdfParser:
@@ -46,4 +52,16 @@ class FakePdfParser:
                 "Primary Language": "Unknown",
             },
             tags=["#pdf", "#knowledge_base", "#indexed"],
+            pages=[
+                ParsedPdfPage(
+                    page_number=page_number,
+                    page_label=f"Page {page_number}",
+                    status=PdfParsePageStatus.PARSED,
+                    text_block_count=1 if page_number == 1 else 0,
+                    char_count=len(text) if page_number == 1 else 0,
+                )
+                for page_number in range(1, page_count + 1)
+            ],
+            parser_backend="fake",
+            quality_status=PdfParseQualityStatus.GOOD,
         )

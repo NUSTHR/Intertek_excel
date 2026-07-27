@@ -65,7 +65,7 @@ class PdfUploadTaskWorker:
     def mark_stale_processing_tasks_failed(self, *, max_processing_age_minutes: int) -> int:
         now = datetime.now(UTC)
         cutoff = now - timedelta(minutes=max(1, max_processing_age_minutes))
-        return self._repository.fail_stale_processing_pdf_upload_tasks(
+        return self._pdf_knowledge.fail_stale_processing_tasks(
             cutoff_started_at=cutoff.isoformat(timespec="seconds"),
             failed_at=now.isoformat(timespec="seconds"),
         )

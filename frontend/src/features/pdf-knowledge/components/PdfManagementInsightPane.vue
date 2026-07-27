@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import type {
@@ -9,14 +9,18 @@ import type {
   PdfManagedFile,
   PdfManagementInsightTab,
   PdfModelSetting,
+  PdfSummaryTask,
 } from '../types'
 
-defineProps<{
+const props = defineProps<{
+  isAdmin: boolean
   activeTab: PdfManagementInsightTab
   contextTags: string[]
   modelSettings: PdfModelSetting[]
   selectedFile?: PdfManagedFile
+  selectedFiles: PdfManagedFile[]
   summary: PdfDocumentSummary | null
+  summaryTasks: PdfSummaryTask[]
   previewBlocks: PdfDocumentPreviewBlock[]
   schema: PdfDocumentSchemaItem[]
   isDetailLoading: boolean
@@ -27,6 +31,8 @@ defineProps<{
 const emit = defineEmits<{
   tabChange: [tab: PdfManagementInsightTab]
   generateSummary: []
+  cancelSummaryTask: [taskId: string]
+  retrySummaryTask: [taskId: string]
   modelSettingChange: [
     settingId: string,
     field: 'selectedProvider' | 'selectedModel',
@@ -36,6 +42,74 @@ const emit = defineEmits<{
 
 const isModelConfigOpen = ref(true)
 const isSummaryOpen = ref(true)
+const selectedCount = computed(() => props.selectedFiles.length)
+const selectedFolderCount = computed(
+  () => props.selectedFiles.filter((file) => file.kind === 'folder').length,
+)
+const canGenerateSummary = computed(() => selectedCount.value > 0)
+const isBatchSummarySelection = computed(
+  () => selectedCount.value > 1 || selectedFolderCount.value > 0,
+)
+const selectionSummaryLabel = computed(() => {
+  if (selectedCount.value === 0) {
+    return 'No sources selected'
+  }
+  if (selectedCount.value === 1) {
+    const selected = props.selectedFiles[0]
+    return selected.kind === 'folder'
+      ? `Selected folder: ${selected.name}`
+      : `Selected file: ${selected.name}`
+  }
+  return `${selectedCount.value} sources selected`
+})
+const generateSummaryLabel = computed(() => {
+  if (props.isSummaryGenerating) {
+    return isBatchSummarySelection.value ? 'Queueing...' : 'Generating...'
+  }
+  if (isBatchSummarySelection.value) {
+    return 'Generate Summaries'
+  }
+  return props.summary?.status === 'ready' ? 'Regenerate' : 'Generate Summary'
+})
+const generateSummaryIcon = computed(() => (props.summary?.status === 'ready' ? 'refresh' : 'bolt'))
+const summaryTaskResultLabel = computed(() => {
+  const tasks = props.summaryTasks
+  if (tasks.length === 0) {
+    return ''
+  }
+  const readyCount = tasks.filter((task) => task.status === 'ready').length
+  const skippedCount = tasks.filter((task) => task.status === 'skipped').length
+  const failedCount = tasks.filter((task) =>
+    ['failed', 'cancelled'].includes(task.status),
+  ).length
+  const completedCount = readyCount + skippedCount
+  const activeCount = tasks.length - completedCount - failedCount
+  if (activeCount > 0) {
+    return `${completedCount} of ${tasks.length} summary tasks completed.`
+  }
+  if (failedCount > 0) {
+    return `${completedCount} completed; ${failedCount} failed or cancelled.`
+  }
+  return `${completedCount} summary task${completedCount === 1 ? '' : 's'} completed.`
+})
+
+const providerLabels: Record<string, string> = {
+  deepseek: 'DeepSeek Official',
+  siliconflow: 'SiliconFlow',
+  volcengine_ark: 'Volcengine Ark',
+}
+
+function providerLabel(provider: string): string {
+  return providerLabels[provider] ?? provider
+}
+
+function canCancelSummaryTask(task: PdfSummaryTask): boolean {
+  return task.status === 'queued' || task.status === 'running'
+}
+
+function canRetrySummaryTask(task: PdfSummaryTask): boolean {
+  return task.status === 'failed' || task.status === 'cancelled'
+}
 </script>
 
 <template>
@@ -75,17 +149,6 @@ const isSummaryOpen = ref(true)
     </header>
 
     <div class="pdfmgmt-insight-scroll">
-      <section v-if="selectedFile" class="pdfmgmt-selected-source">
-        <span class="pdfmgmt-selected-source-icon" :class="selectedFile.kind">
-          <AppIcon :name="selectedFile.kind === 'folder' ? 'folder_open' : 'description'" />
-        </span>
-        <div>
-          <span>Active Source</span>
-          <strong>{{ selectedFile.name }}</strong>
-        </div>
-        <small>{{ selectedFile.statusDetail }}</small>
-      </section>
-
       <section class="pdfmgmt-panel">
         <button
           type="button"
@@ -110,6 +173,7 @@ const isSummaryOpen = ref(true)
             <select
               :value="setting.selectedProvider"
               aria-label="Provider"
+              :disabled="!isAdmin"
               @change="
                 emit(
                   'modelSettingChange',
@@ -119,13 +183,14 @@ const isSummaryOpen = ref(true)
                 )
               "
             >
-              <option v-for="provider in setting.providers" :key="provider">
-                {{ provider }}
+              <option v-for="provider in setting.providers" :key="provider" :value="provider">
+                {{ providerLabel(provider) }}
               </option>
             </select>
             <select
               :value="setting.selectedModel"
               aria-label="Model"
+              :disabled="!isAdmin"
               @change="
                 emit(
                   'modelSettingChange',
@@ -164,11 +229,11 @@ const isSummaryOpen = ref(true)
           <span class="pdfmgmt-summary-actions">
             <button
               type="button"
-              :disabled="!selectedFile || isSummaryGenerating"
+              :disabled="!canGenerateSummary || isSummaryGenerating"
               @click="emit('generateSummary')"
             >
-              <AppIcon name="refresh" />
-              {{ isSummaryGenerating ? 'Generating' : 'Regenerate' }}
+              <AppIcon :name="generateSummaryIcon" />
+              {{ generateSummaryLabel }}
             </button>
             <button type="button" aria-label="Edit summary unavailable" disabled>
               <AppIcon name="edit" />
@@ -178,8 +243,9 @@ const isSummaryOpen = ref(true)
 
         <div v-if="isSummaryOpen" class="pdfmgmt-summary-body">
           <p v-if="errorMessage" class="pdfmgmt-inline-error">{{ errorMessage }}</p>
+          <p class="pdfmgmt-selection-summary">{{ selectionSummaryLabel }}</p>
 
-          <div v-if="summary?.status === 'ready'" class="pdfmgmt-ready-summary">
+          <div v-if="!isBatchSummarySelection && summary?.status === 'ready'" class="pdfmgmt-ready-summary">
             <span>
               <AppIcon name="auto_awesome" />
             </span>
@@ -195,10 +261,55 @@ const isSummaryOpen = ref(true)
             <p>
               {{
                 isSummaryGenerating
-                  ? 'The summary engine is reading the selected source.'
-                  : 'Select a data source from the left and click generate to reveal deep AI insights and patterns.'
+                  ? isBatchSummarySelection
+                    ? 'Summary tasks are being queued for the selected sources.'
+                    : 'The summary engine is reading the selected source.'
+                  : isBatchSummarySelection
+                    ? 'Generate summaries for every PDF contained in the selected files or folders.'
+                    : 'Select a data source from the left and click generate to reveal deep AI insights and patterns.'
               }}
             </p>
+            <p v-if="summaryTasks.length > 0" class="pdfmgmt-summary-task-result">
+              {{ summaryTaskResultLabel }}
+            </p>
+            <div v-if="summaryTasks.length > 0" class="pdfmgmt-summary-task-list">
+              <div
+                v-for="task in summaryTasks"
+                :key="task.id"
+                class="pdfmgmt-task-card compact"
+              >
+                <span>
+                  <strong>{{ task.detail || `Summary ${task.status}` }}</strong>
+                  <span>{{ task.status }} · {{ task.progress }}%</span>
+                  <small v-if="task.errorMessage">{{ task.errorMessage }}</small>
+                </span>
+                <span v-if="isAdmin" class="pdfmgmt-task-actions">
+                  <button
+                    v-if="canCancelSummaryTask(task)"
+                    type="button"
+                    @click="emit('cancelSummaryTask', task.id)"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    v-if="canRetrySummaryTask(task)"
+                    type="button"
+                    @click="emit('retrySummaryTask', task.id)"
+                  >
+                    Retry
+                  </button>
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              class="pdfmgmt-summary-primary-action"
+              :disabled="!canGenerateSummary || isSummaryGenerating"
+              @click="emit('generateSummary')"
+            >
+              <AppIcon name="bolt" />
+              {{ generateSummaryLabel }}
+            </button>
           </div>
 
           <div class="pdfmgmt-tags">

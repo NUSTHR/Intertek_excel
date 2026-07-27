@@ -26,6 +26,56 @@ core/         configuration, IDs, errors, time helpers
 `application/` depends on `ports/`, not on concrete infrastructure. This keeps
 storage, database, and workbook parsing replaceable.
 
+PDF knowledge application behavior is split by use case while retaining
+`PdfKnowledgeService` as a compatibility facade for the API and background
+workers:
+
+```text
+pdf_knowledge/
+  library_service.py   file access, metadata mutation, visibility, and inspection
+  upload_service.py    upload, reparse, retry, cancellation, and batch lifecycle
+  parsing_service.py   parser execution, indexing, diagnostics, and recovery
+  summary_service.py   summary generation and durable summary-task lifecycle
+  settings_service.py  persisted PDF provider/model settings
+  parser_profiles.py   configured parser registry and active-profile selection
+  service.py           compatibility facade and application-service composition
+```
+
+The PDF HTTP surface follows the same feature boundary. The legacy
+`api/routes/pdf_knowledge.py` module remains as a compatibility import, while
+the router implementation is composed from:
+
+```text
+api/routes/pdf/
+  files.py         library files, metadata, detail, and chunks
+  uploads.py       upload tasks and upload batches
+  parsing.py       parser status, profile selection, and reparse
+  summaries.py     summary tasks and summary generation
+  retrieval.py     chunk retrieval
+  chat.py          PDF chat and chat-session lifecycle
+  settings.py      PDF model settings
+  mappers.py       domain-to-API response mapping
+  dependencies.py shared authenticated service dependencies
+```
+
+All subrouters are mounted below the existing `/api/pdf` prefix. Route paths,
+status codes, request models, response models, and permission dependencies are
+treated as compatibility contracts during refactoring.
+
+API DTOs follow the same bounded-context rule:
+
+```text
+api/schema_models/
+  common.py       cross-feature chat-session request and response models
+  pdf.py          PDF library, parsing, retrieval, summary, and chat models
+api/schemas.py    compatibility exports plus the remaining Excel/auth models
+```
+
+Feature routers import their bounded-context schema module directly. Existing
+imports from `app.api.schemas` remain valid through explicit compatibility
+exports; schema class names and generated OpenAPI components are contract
+boundaries.
+
 ## Dialogue Workflow
 
 Chat orchestration is isolated behind `ports/chat_workflow.py`. The production

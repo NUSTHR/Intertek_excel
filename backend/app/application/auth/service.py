@@ -71,7 +71,20 @@ class AuthService:
     def ensure_admin_user(self) -> UserAccount:
         existing = self._repository.get_user_by_email(self._admin_email)
         if existing is not None:
-            return existing
+            if existing.role != UserRole.ADMIN:
+                raise RuntimeError(
+                    "configured administrator email belongs to a non-admin account"
+                )
+            if verify_password(self._admin_password, existing.password_hash):
+                return existing
+            updated = self._repository.update_user_password(
+                user_id=existing.user_id,
+                password_hash=self._hash_password(self._admin_password),
+                updated_at=utc_now_iso(),
+            )
+            if updated is None:
+                raise RuntimeError("failed to synchronize administrator password")
+            return updated
         now = utc_now_iso()
         admin = UserAccount(
             user_id=new_id("user"),

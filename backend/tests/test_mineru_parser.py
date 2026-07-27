@@ -1,6 +1,7 @@
 from pathlib import Path
+from subprocess import CompletedProcess
 
-from app.adapters.pdf.mineru_parser import MinerUPdfParser
+from app.adapters.pdf.mineru_parser import MinerUPdfParser, read_mineru_output
 
 
 def test_mineru_parser_reads_markdown_output_and_metadata(tmp_path: Path) -> None:
@@ -68,3 +69,81 @@ def test_mineru_parser_splits_oversized_text_chunks(tmp_path: Path) -> None:
 
     assert parsed.chunk_count > 1
     assert all(len(chunk.text) <= 1_600 for chunk in parsed.chunks)
+
+
+def test_mineru_parser_invokes_configured_cli_backend(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(list(command))
+        return CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.adapters.pdf.mineru_parser.subprocess.run", fake_run)
+    parser = MinerUPdfParser(
+        command="mineru",
+        cli_backend="pipeline",
+        extra_args=("--lang", "ch"),
+    )
+
+    parser._run_mineru(input_path=tmp_path / "input.pdf", output_dir=tmp_path / "output")
+
+    assert commands == [
+        [
+            "mineru",
+            "-p",
+            str(tmp_path / "input.pdf"),
+            "-o",
+            str(tmp_path / "output"),
+            "-b",
+            "pipeline",
+            "--lang",
+            "ch",
+        ]
+    ]
+
+
+def test_mineru_parser_summarizes_cli_import_errors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fake_run(command, **kwargs):
+        return CompletedProcess(
+            command,
+            1,
+            stdout="Started local mineru-api",
+            stderr="Traceback...\nModuleNotFoundError: No module named 'torchvision'",
+        )
+
+    monkeypatch.setattr("app.adapters.pdf.mineru_parser.subprocess.run", fake_run)
+    parser = MinerUPdfParser(command="mineru")
+
+    try:
+        parser._run_mineru(input_path=tmp_path / "input.pdf", output_dir=tmp_path / "output")
+    except RuntimeError as exc:
+        assert str(exc) == "MinerU parsing failed: No module named 'torchvision'"
+    else:
+        raise AssertionError("MinerU parser did not raise on a failed CLI run")
+
+
+def test_read_mineru_output_accepts_custom_cloud_parser_metadata(tmp_path: Path) -> None:
+    output_dir = tmp_path / "mineru-cloud-output"
+    output_dir.mkdir()
+    (output_dir / "full.md").write_text("# Cloud Result\n\nParsed by VLM.", encoding="utf-8")
+    (output_dir / "full_middle.json").write_text('{"total_pages": 1}', encoding="utf-8")
+
+    parsed = read_mineru_output(
+        filename="cloud.pdf",
+        output_dir=output_dir,
+        parser_name="MinerU Cloud",
+        parser_backend="mineru-cloud",
+        parser_version="vlm",
+        extra_warnings=["Cloud task completed with official v4 API."],
+    )
+
+    assert parsed.parser_backend == "mineru-cloud"
+    assert parsed.parser_version == "vlm"
+    assert parsed.schema["Parser"] == "MinerU Cloud"
+    assert "Cloud task completed" in parsed.warnings[0]

@@ -2,23 +2,37 @@
 import { computed, nextTick, ref, watch } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
+import { renderMarkdown } from '../../../utils/markdown'
 import type { PdfBreadcrumbItem, PdfChatMessage } from '../types'
 
 const props = defineProps<{
   breadcrumbs: PdfBreadcrumbItem[]
+  contextLabel: string
   messages: PdfChatMessage[]
   isAnswering: boolean
+  enableDeepThinking: boolean
   errorMessage: string
 }>()
 
 const emit = defineEmits<{
   clearChat: []
   sendQuestion: [question: string]
+  toggleDeepThinking: []
 }>()
 
 const draftQuestion = ref('')
 const chatHistory = ref<HTMLElement | null>(null)
 const canSend = computed(() => draftQuestion.value.trim().length > 0 && !props.isAnswering)
+const visibleBreadcrumbs = computed<PdfBreadcrumbItem[]>(() => {
+  const items = props.breadcrumbs.filter((item) => item.id !== 'knowledge-base')
+  return items.length
+    ? items
+    : [{ id: 'current-context', label: props.contextLabel, active: true }]
+})
+const contextPathTitle = computed(() => (
+  visibleBreadcrumbs.value.map((item) => item.label).join(' / ')
+))
+const contextPathLabel = computed(() => contextPathTitle.value)
 
 watch(
   () => [props.messages.length, props.isAnswering],
@@ -55,32 +69,25 @@ function messageParagraphs(message: PdfChatMessage): string[] {
     .map((paragraph) => paragraph.trim())
     .filter(Boolean)
 }
+
 </script>
 
 <template>
   <main class="pdfkb-chat-workspace">
     <header class="pdfkb-chat-topbar">
       <div class="pdfkb-breadcrumb-context">
-        <AppIcon name="grid_view" />
-        <span>Context:</span>
+        <AppIcon name="account_tree" />
         <nav aria-label="PDF context">
-          <template v-for="(item, index) in breadcrumbs" :key="item.id">
-            <AppIcon v-if="index > 0" name="chevron_right" class="pdfkb-breadcrumb-chevron" />
-            <span
-              class="pdfkb-breadcrumb-item"
-              :class="{ active: item.active }"
-            >
-              <AppIcon v-if="item.icon" :name="item.icon" />
-              {{ item.label }}
-            </span>
-          </template>
+          <span
+            class="pdfkb-breadcrumb-item active"
+            :title="contextPathTitle"
+          >
+            {{ contextPathLabel }}
+          </span>
         </nav>
       </div>
 
       <div class="pdfkb-chat-topbar-actions">
-        <button type="button" aria-label="Export chat unavailable" disabled>
-          <AppIcon name="download" />
-        </button>
         <button type="button" aria-label="Clear chat" @click="emit('clearChat')">
           <AppIcon name="close" />
         </button>
@@ -88,12 +95,9 @@ function messageParagraphs(message: PdfChatMessage): string[] {
     </header>
 
     <section ref="chatHistory" class="pdfkb-chat-history" aria-label="Chat history">
-      <div class="pdfkb-time-marker">PDF Knowledge Chat</div>
-
       <article v-if="messages.length === 0" class="pdfkb-chat-empty">
-        <AppIcon name="auto_awesome" />
         <strong>Ask a question about indexed PDFs</strong>
-        <span>Answers will use retrieved PDF chunks and show source citations.</span>
+        <span>{{ contextLabel }}</span>
       </article>
 
       <template v-for="message in messages" :key="message.id">
@@ -115,6 +119,19 @@ function messageParagraphs(message: PdfChatMessage): string[] {
           </div>
 
           <div class="pdfkb-assistant-bubble">
+            <details
+              v-if="message.reasoning"
+              class="pdfkb-thinking-details"
+            >
+              <summary>
+                <AppIcon name="psychology" />
+                <span>Model reasoning</span>
+              </summary>
+              <div
+                class="markdown-body pdfkb-thinking-markdown"
+                v-html="renderMarkdown(message.reasoning)"
+              ></div>
+            </details>
             <p
               v-for="(paragraph, index) in messageParagraphs(message)"
               :key="`${message.id}-${index}`"
@@ -140,17 +157,6 @@ function messageParagraphs(message: PdfChatMessage): string[] {
               The available PDF evidence may be insufficient for a complete answer.
             </p>
           </div>
-
-          <div class="pdfkb-inline-actions">
-            <button type="button" disabled>
-              <AppIcon name="content_copy" />
-              <span>Copy</span>
-            </button>
-            <button type="button" disabled>
-              <AppIcon name="check" />
-              <span>Helpful</span>
-            </button>
-          </div>
         </article>
       </template>
 
@@ -174,13 +180,21 @@ function messageParagraphs(message: PdfChatMessage): string[] {
           @keydown="onTextareaKeydown"
         ></textarea>
         <div class="pdfkb-input-toolbar">
-          <div class="pdfkb-input-tools">
-            <button type="button" aria-label="Attach file unavailable" disabled>
-              <AppIcon name="attach_file" />
-            </button>
-            <button type="button" aria-label="Voice input unavailable" disabled>
+          <div class="pdfkb-chat-tools">
+            <button
+              type="button"
+              class="pdfkb-thinking-toggle"
+              :class="{ active: enableDeepThinking }"
+              :aria-pressed="enableDeepThinking"
+              :disabled="isAnswering"
+              :title="enableDeepThinking ? 'Deep thinking on' : 'Deep thinking off'"
+              :aria-label="enableDeepThinking ? 'Disable deep thinking' : 'Enable deep thinking'"
+              @click="emit('toggleDeepThinking')"
+            >
               <AppIcon name="psychology" />
+              <span>Deep Think</span>
             </button>
+            <span class="pdfkb-input-scope">{{ contextLabel }}</span>
           </div>
           <button
             type="submit"
@@ -192,7 +206,6 @@ function messageParagraphs(message: PdfChatMessage): string[] {
           </button>
         </div>
       </div>
-      <p>AI can make mistakes. Verify critical information.</p>
     </form>
   </main>
 </template>

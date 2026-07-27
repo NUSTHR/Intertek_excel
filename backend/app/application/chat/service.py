@@ -25,6 +25,7 @@ from app.domain.models import (
     ChatRouteResult,
     ChatSession,
     ChatTurn,
+    ChatWorkspace,
     DraftAnswerBlock,
     DraftChatAnswer,
     ExcelCitation,
@@ -70,6 +71,7 @@ class ChatService:
         self._sessions = sessions
         self._llm_preferences = llm_preferences
         self._workflow = workflow
+        self._workspace = ChatWorkspace.EXCEL.value
         self._citation_verifier = CitationVerifier()
         self._access_controller = ChatAccessController(excel_assets)
         self._session_locks: dict[str, _SessionOperationLock] = {}
@@ -85,18 +87,19 @@ class ChatService:
             user_id=user_id,
             created_at=now,
             updated_at=now,
+            workspace=ChatWorkspace.EXCEL,
         )
         self._sessions.create_session(session)
         return session
 
     def get_session(self, session_id: str, user_id: str | None = None) -> ChatSession | None:
-        session = self._sessions.get_session(session_id)
+        session = self._sessions.get_session(session_id, workspace=self._workspace)
         if user_id is not None and session is not None and session.user_id != user_id:
             return None
         return session
 
     def list_sessions(self, user_id: str | None = None) -> list[ChatSession]:
-        sessions = self._sessions.list_sessions()
+        sessions = self._sessions.list_sessions(workspace=self._workspace)
         if user_id is None:
             return sessions
         return [session for session in sessions if session.user_id == user_id]
@@ -115,6 +118,7 @@ class ChatService:
                 session_id=session_id,
                 title=normalized_title,
                 updated_at=utc_now_iso(),
+                workspace=self._workspace,
             )
 
     def set_session_pinned(
@@ -131,13 +135,14 @@ class ChatService:
                 session_id=session_id,
                 pinned_at=now if pinned else None,
                 updated_at=now,
+                workspace=self._workspace,
             )
 
     def delete_session(self, session_id: str, user_id: str | None = None) -> bool:
         with self._session_operation_lock(session_id):
             if self.get_session(session_id, user_id=user_id) is None:
                 return False
-            deleted = self._sessions.delete_session(session_id)
+            deleted = self._sessions.delete_session(session_id, workspace=self._workspace)
         if deleted:
             self._discard_session_operation_lock(session_id)
         return deleted
@@ -149,7 +154,7 @@ class ChatService:
     ) -> list[ChatTurn] | None:
         if self.get_session(session_id, user_id=user_id) is None:
             return None
-        return self._sessions.list_turns(session_id)
+        return self._sessions.list_turns(session_id, workspace=self._workspace)
 
     def answer_question(
         self,
@@ -768,7 +773,7 @@ class ChatService:
     def _get_or_create_session(self, session_id: str | None, *, user_id: str) -> ChatSession:
         if session_id is None:
             return self.create_session_for_user(user_id)
-        session = self._sessions.get_session(session_id)
+        session = self._sessions.get_session(session_id, workspace=self._workspace)
         if session is not None and session.user_id == user_id:
             return session
         if session is not None:
@@ -779,6 +784,7 @@ class ChatService:
             user_id=user_id,
             created_at=now,
             updated_at=now,
+            workspace=ChatWorkspace.EXCEL,
         )
         self._sessions.create_session(session)
         return session

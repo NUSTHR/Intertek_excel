@@ -1,32 +1,74 @@
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import {
+  cancelPdfUploadBatch,
+  cancelPdfUploadTask,
   createPdfUploadTask,
+  deletePdfFile,
   listPdfKnowledgeFiles,
+  listPdfUploadBatches,
   listPdfUploadTasks,
+  renamePdfFile,
+  retryPdfUploadBatch,
+  retryPdfUploadTask,
+  setPdfFileVisibility,
 } from '../../../api/pdf-knowledge-api'
-import type { PdfManagedFile, PdfUploadTask } from '../types'
+import type { PdfBreadcrumbItem, PdfManagedFile, PdfUploadBatch, PdfUploadTask } from '../types'
+import { usePdfTaskPolling } from './use-pdf-task-polling'
 
-const pdfFilePageSize = 6
-const taskPollIntervalMs = 1100
+const pdfFilePageSize = 4
 
-export function usePdfKnowledgeLibrary() {
+interface PdfKnowledgeLibraryOptions {
+  onLibraryChanged?: () => void
+}
+
+export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {}) {
+  const taskPolling = usePdfTaskPolling()
   const files = ref<PdfManagedFile[]>([])
+  const uploadBatches = ref<PdfUploadBatch[]>([])
   const uploadTasks = ref<PdfUploadTask[]>([])
   const selectedFileId = ref<string>('')
+  const selectedFileIds = ref<Set<string>>(new Set())
+  const selectedScopeId = ref<string>('')
   const searchTerm = ref<string>('')
   const filePage = ref<number>(1)
   const isLoading = ref<boolean>(false)
   const isUploading = ref<boolean>(false)
   const errorMessage = ref<string>('')
-  let taskPollTimer: number | null = null
+
+  const fileLookup = computed(() => {
+    return new Map(files.value.map((file) => [file.id, file]))
+  })
 
   const filteredFiles = computed(() => {
     const query = searchTerm.value.trim().toLowerCase()
-    const visibleFiles = query
-      ? files.value.filter((file) => file.name.toLowerCase().includes(query))
-      : files.value
-    return sortFilesForDisplay(visibleFiles)
+    const visibleFiles = query ? filesInSelectedScope() : directChildrenOfSelectedScope()
+    if (!query) {
+      return sortFilesForDisplay(visibleFiles)
+    }
+    return sortFilesForDisplay(
+      visibleFiles.filter((file) => file.name.toLowerCase().includes(query)),
+    )
+  })
+
+  const scopeBreadcrumbs = computed<PdfBreadcrumbItem[]>(() => {
+    if (!selectedScopeId.value) {
+      return [{ id: '', label: 'Knowledge Base', active: true }]
+    }
+
+    const path: PdfBreadcrumbItem[] = []
+    const visited = new Set<string>()
+    let currentFile = fileLookup.value.get(selectedScopeId.value)
+    while (currentFile && !visited.has(currentFile.id)) {
+      path.unshift({ id: currentFile.id, label: currentFile.name })
+      visited.add(currentFile.id)
+      currentFile = currentFile.parentId ? fileLookup.value.get(currentFile.parentId) : undefined
+    }
+    const crumbs = [{ id: '', label: 'Knowledge Base' }, ...path]
+    return crumbs.map((crumb, index) => ({
+      ...crumb,
+      active: index === crumbs.length - 1,
+    }))
   })
 
   const filePageCount = computed(() => {
@@ -57,8 +99,14 @@ export function usePdfKnowledgeLibrary() {
     return files.value.find((file) => file.id === selectedFileId.value)
   })
 
+  const selectedFiles = computed(() => {
+    return Array.from(selectedFileIds.value)
+      .map((fileId) => fileLookup.value.get(fileId))
+      .filter((file): file is PdfManagedFile => Boolean(file))
+  })
+
   const activeTaskCount = computed(() => {
-    return uploadTasks.value.filter((task) => task.status !== 'ready' && task.status !== 'failed').length
+    return uploadTasks.value.filter((task) => !isTerminalTask(task)).length
   })
 
   const uploadTaskSummary = computed(() => {
@@ -68,12 +116,18 @@ export function usePdfKnowledgeLibrary() {
     return `${activeTaskCount.value} active task${activeTaskCount.value === 1 ? '' : 's'}`
   })
 
-  watch(filteredFiles, (nextFiles) => {
-    if (nextFiles.length === 0) {
+  watch(filteredFiles, () => {
+    syncSelectionWithCurrentView()
+  })
+
+  watch(files, () => {
+    if (!selectedScopeId.value) {
       return
     }
-    if (!nextFiles.some((file) => file.id === selectedFileId.value)) {
-      selectedFileId.value = nextFiles[0].id
+    const selectedScope = fileLookup.value.get(selectedScopeId.value)
+    if (!selectedScope || selectedScope.kind !== 'folder') {
+      selectedScopeId.value = ''
+      filePage.value = 1
     }
   })
 
@@ -81,14 +135,17 @@ export function usePdfKnowledgeLibrary() {
     isLoading.value = true
     errorMessage.value = ''
     try {
-      const [nextFiles, nextTasks] = await Promise.all([
-        listPdfKnowledgeFiles(),
-        listPdfUploadTasks(),
-      ])
-      files.value = nextFiles
-      uploadTasks.value = nextTasks
-      selectedFileId.value =
-        selectedFileId.value || nextFiles.find((file) => file.active)?.id || nextFiles[0]?.id || ''
+      await refreshFilesAndTasks()
+      if (selectedFileIds.value.size === 0) {
+        const initialFile =
+          files.value.find((file) => file.active) ??
+          files.value.find((file) => file.kind !== 'folder') ??
+          files.value[0]
+        if (initialFile) {
+          setSingleSelection(initialFile)
+        }
+      }
+      syncSelectionWithCurrentView()
       startTaskPollingIfNeeded()
     } catch (error: unknown) {
       errorMessage.value = toErrorMessage(error)
@@ -104,10 +161,16 @@ export function usePdfKnowledgeLibrary() {
     isUploading.value = true
     errorMessage.value = ''
     try {
-      const tasks = await createPdfUploadTask(nextFiles)
-      uploadTasks.value = [...tasks, ...uploadTasks.value]
+      const result = await createPdfUploadTask(nextFiles)
+      if (result.batch) {
+        uploadBatches.value = [result.batch, ...uploadBatches.value]
+      }
+      uploadTasks.value = [...result.tasks, ...uploadTasks.value]
       await refreshFilesAndTasks()
-      selectedFileId.value = tasks[0]?.fileId ?? selectedFileId.value
+      if (result.tasks[0]?.fileId) {
+        setSingleSelectionById(result.tasks[0].fileId)
+      }
+      options.onLibraryChanged?.()
       startTaskPollingIfNeeded()
     } catch (error: unknown) {
       errorMessage.value = toErrorMessage(error)
@@ -117,7 +180,35 @@ export function usePdfKnowledgeLibrary() {
   }
 
   function selectFile(file: PdfManagedFile): void {
-    selectedFileId.value = file.id
+    const fileScopeId = scopeIdForFile(file)
+    if (fileScopeId !== selectedScopeId.value) {
+      selectedScopeId.value = fileScopeId
+      filePage.value = 1
+      setSingleSelection(file)
+      return
+    }
+    toggleSelection(file)
+  }
+
+  function openScope(scopeId: string): void {
+    selectScope(scopeId)
+  }
+
+  function selectScope(scopeId: string): void {
+    const normalizedScopeId = scopeId || ''
+    if (normalizedScopeId) {
+      const nextScope = fileLookup.value.get(normalizedScopeId)
+      if (!nextScope) {
+        return
+      }
+      if (nextScope.kind !== 'folder') {
+        selectFile(nextScope)
+        return
+      }
+    }
+    selectedScopeId.value = normalizedScopeId
+    filePage.value = 1
+    clearSelection()
   }
 
   function setSearchTerm(value: string): void {
@@ -133,54 +224,240 @@ export function usePdfKnowledgeLibrary() {
     setFilePage(normalizedFilePage.value + direction)
   }
 
-  async function refreshFilesAndTasks(): Promise<void> {
-    const [nextFiles, nextTasks] = await Promise.all([
+  async function refreshFilesAndTasks(): Promise<boolean> {
+    const [filesResult, batchesResult, tasksResult] = await Promise.allSettled([
       listPdfKnowledgeFiles(),
+      listPdfUploadBatches(),
       listPdfUploadTasks(),
     ])
-    files.value = nextFiles
-    uploadTasks.value = nextTasks
+    if (filesResult.status === 'rejected') {
+      throw filesResult.reason
+    }
+    files.value = filesResult.value
+    if (batchesResult.status === 'fulfilled') {
+      uploadBatches.value = batchesResult.value
+    }
+    if (tasksResult.status === 'fulfilled') {
+      uploadTasks.value = tasksResult.value
+    }
+    const activityErrors = [
+      batchesResult.status === 'rejected' ? batchesResult.reason : undefined,
+      tasksResult.status === 'rejected' ? tasksResult.reason : undefined,
+    ].filter((error): error is unknown => error !== undefined)
+    if (activityErrors.length > 0) {
+      errorMessage.value = `PDF files loaded, but upload activity is unavailable: ${toErrorMessage(activityErrors[0])}`
+    }
+    syncSelectionWithCurrentView()
+    return tasksResult.status === 'fulfilled'
   }
 
   function startTaskPollingIfNeeded(): void {
-    stopTaskPolling()
-    if (uploadTasks.value.every((task) => task.status === 'ready' || task.status === 'failed')) {
+    taskPolling.stopPolling()
+    if (uploadTasks.value.every(isTerminalTask)) {
       return
     }
-    taskPollTimer = window.setTimeout(() => {
-      void pollTasks()
-    }, taskPollIntervalMs)
+    taskPolling.startPolling({
+      load: async () => {
+        const tasksAreFresh = await refreshFilesAndTasks()
+        if (!tasksAreFresh) {
+          throw new Error('PDF upload task status is temporarily unavailable.')
+        }
+        return uploadTasks.value
+      },
+      isTerminal: (tasks) => tasks.every(isTerminalTask),
+      onTerminal: () => {
+        options.onLibraryChanged?.()
+      },
+      onError: (error, isFinalAttempt) => {
+        if (isFinalAttempt) {
+          errorMessage.value = toErrorMessage(error)
+        }
+      },
+    })
   }
 
-  async function pollTasks(): Promise<void> {
+  async function cancelTask(taskId: string): Promise<void> {
+    errorMessage.value = ''
     try {
+      await cancelPdfUploadTask(taskId)
       await refreshFilesAndTasks()
+      options.onLibraryChanged?.()
       startTaskPollingIfNeeded()
     } catch (error: unknown) {
       errorMessage.value = toErrorMessage(error)
     }
   }
 
-  function stopTaskPolling(): void {
-    if (taskPollTimer !== null) {
-      window.clearTimeout(taskPollTimer)
-      taskPollTimer = null
+  async function retryTask(taskId: string): Promise<void> {
+    errorMessage.value = ''
+    try {
+      await retryPdfUploadTask(taskId)
+      await refreshFilesAndTasks()
+      options.onLibraryChanged?.()
+      startTaskPollingIfNeeded()
+    } catch (error: unknown) {
+      errorMessage.value = toErrorMessage(error)
     }
   }
 
-  onBeforeUnmount(() => {
-    stopTaskPolling()
-  })
+  async function cancelBatch(batchId: string): Promise<void> {
+    errorMessage.value = ''
+    try {
+      await cancelPdfUploadBatch(batchId)
+      await refreshFilesAndTasks()
+      options.onLibraryChanged?.()
+      startTaskPollingIfNeeded()
+    } catch (error: unknown) {
+      errorMessage.value = toErrorMessage(error)
+    }
+  }
+
+  async function retryBatch(batchId: string): Promise<void> {
+    errorMessage.value = ''
+    try {
+      await retryPdfUploadBatch(batchId)
+      await refreshFilesAndTasks()
+      options.onLibraryChanged?.()
+      startTaskPollingIfNeeded()
+    } catch (error: unknown) {
+      errorMessage.value = toErrorMessage(error)
+    }
+  }
+
+  async function renameFile(file: PdfManagedFile, displayName: string): Promise<void> {
+    const normalizedName = displayName.trim()
+    if (!normalizedName || normalizedName === file.name) {
+      return
+    }
+    errorMessage.value = ''
+    try {
+      await renamePdfFile(file.id, normalizedName)
+      await refreshFilesAndTasks()
+      options.onLibraryChanged?.()
+    } catch (error: unknown) {
+      errorMessage.value = toErrorMessage(error)
+    }
+  }
+
+  async function toggleFileVisibility(file: PdfManagedFile): Promise<void> {
+    errorMessage.value = ''
+    try {
+      await setPdfFileVisibility(file.id, !file.visibleToMembers)
+      await refreshFilesAndTasks()
+      options.onLibraryChanged?.()
+    } catch (error: unknown) {
+      errorMessage.value = toErrorMessage(error)
+    }
+  }
+
+  async function deleteFile(file: PdfManagedFile): Promise<void> {
+    errorMessage.value = ''
+    try {
+      await deletePdfFile(file.id)
+      await refreshFilesAndTasks()
+      options.onLibraryChanged?.()
+      if (selectedFileIds.value.has(file.id)) {
+        const nextSelection = new Set(selectedFileIds.value)
+        nextSelection.delete(file.id)
+        selectedFileIds.value = nextSelection
+        selectedFileId.value = firstSelectedId(nextSelection)
+      }
+    } catch (error: unknown) {
+      errorMessage.value = toErrorMessage(error)
+    }
+  }
+
+  function directChildrenOfSelectedScope(): PdfManagedFile[] {
+    return files.value.filter((file) => (file.parentId ?? '') === selectedScopeId.value)
+  }
+
+  function filesInSelectedScope(): PdfManagedFile[] {
+    if (!selectedScopeId.value) {
+      return files.value
+    }
+    return files.value.filter((file) =>
+      file.id !== selectedScopeId.value &&
+      isDescendantOrSelf(file.id, selectedScopeId.value, fileLookup.value),
+    )
+  }
+
+  function syncSelectionWithCurrentView(): void {
+    if (selectedScopeId.value) {
+      const selectedScope = fileLookup.value.get(selectedScopeId.value)
+      if (!selectedScope || selectedScope.kind !== 'folder') {
+        selectedScopeId.value = ''
+      }
+    }
+
+    const currentFiles = filteredFiles.value
+    if (currentFiles.length === 0) {
+      selectedFileId.value = ''
+      selectedFileIds.value = new Set()
+      return
+    }
+    const currentIds = new Set(currentFiles.map((file) => file.id))
+    const nextSelection = new Set(
+      Array.from(selectedFileIds.value).filter((fileId) => currentIds.has(fileId)),
+    )
+    if (nextSelection.size !== selectedFileIds.value.size) {
+      selectedFileIds.value = nextSelection
+    }
+    if (!selectedFileId.value || !currentIds.has(selectedFileId.value)) {
+      selectedFileId.value = firstSelectedId(nextSelection)
+    }
+  }
+
+  function scopeIdForFile(file: PdfManagedFile): string {
+    const parentFile = file.parentId ? fileLookup.value.get(file.parentId) : undefined
+    return parentFile?.kind === 'folder' ? parentFile.id : ''
+  }
+
+  function toggleSelection(file: PdfManagedFile): void {
+    const nextSelection = new Set(selectedFileIds.value)
+    if (nextSelection.has(file.id)) {
+      nextSelection.delete(file.id)
+      selectedFileIds.value = nextSelection
+      selectedFileId.value = firstSelectedId(nextSelection)
+      return
+    }
+    nextSelection.add(file.id)
+    selectedFileIds.value = nextSelection
+    selectedFileId.value = file.id
+  }
+
+  function setSingleSelection(file: PdfManagedFile): void {
+    selectedScopeId.value = scopeIdForFile(file)
+    selectedFileIds.value = new Set([file.id])
+    selectedFileId.value = file.id
+  }
+
+  function setSingleSelectionById(fileId: string): void {
+    const file = fileLookup.value.get(fileId)
+    if (!file) {
+      return
+    }
+    setSingleSelection(file)
+  }
+
+  function clearSelection(): void {
+    selectedFileIds.value = new Set()
+    selectedFileId.value = ''
+  }
 
   return {
     files,
+    uploadBatches,
     uploadTasks,
     selectedFileId,
+    selectedFileIds,
+    selectedScopeId,
     selectedFile,
+    selectedFiles,
     searchTerm,
     filePage,
     filteredFiles,
     paginatedFiles,
+    scopeBreadcrumbs,
     filePageCount,
     normalizedFilePage,
     visibleFilePages,
@@ -191,11 +468,24 @@ export function usePdfKnowledgeLibrary() {
     errorMessage,
     loadLibrary,
     uploadFiles,
+    cancelTask,
+    retryTask,
+    cancelBatch,
+    retryBatch,
+    renameFile,
+    toggleFileVisibility,
+    deleteFile,
     selectFile,
+    selectScope,
+    openScope,
     setSearchTerm,
     setFilePage,
     stepFilePage,
   }
+}
+
+function isTerminalTask(task: PdfUploadTask): boolean {
+  return task.status === 'ready' || task.status === 'failed' || task.status === 'cancelled'
 }
 
 function sortFilesForDisplay(files: PdfManagedFile[]): PdfManagedFile[] {
@@ -204,9 +494,11 @@ function sortFilesForDisplay(files: PdfManagedFile[]): PdfManagedFile[] {
     queued: 1,
     parsing: 2,
     indexing: 3,
-    failed: 4,
-    ready: 5,
-    indexed: 6,
+    partial: 4,
+    failed: 5,
+    cancelled: 6,
+    ready: 7,
+    indexed: 8,
   }
   return [...files].sort((left, right) => {
     const statusDelta = statusWeight[left.status] - statusWeight[right.status]
@@ -215,6 +507,27 @@ function sortFilesForDisplay(files: PdfManagedFile[]): PdfManagedFile[] {
     }
     return left.name.localeCompare(right.name)
   })
+}
+
+function firstSelectedId(selectedIds: Set<string>): string {
+  return selectedIds.values().next().value ?? ''
+}
+
+function isDescendantOrSelf(
+  fileId: string,
+  ancestorId: string,
+  fileLookup: Map<string, PdfManagedFile>,
+): boolean {
+  let currentFile = fileLookup.get(fileId)
+  const visited = new Set<string>()
+  while (currentFile && !visited.has(currentFile.id)) {
+    if (currentFile.id === ancestorId) {
+      return true
+    }
+    visited.add(currentFile.id)
+    currentFile = currentFile.parentId ? fileLookup.get(currentFile.parentId) : undefined
+  }
+  return false
 }
 
 function clamp(value: number, min: number, max: number): number {

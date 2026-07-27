@@ -30,6 +30,8 @@ def test_stage_defaults_match_business_model_policy() -> None:
 def test_siliconflow_provider_still_lists_ling_flash_first() -> None:
     assert SILICONFLOW_LLM_MODELS[0] == "inclusionAI/Ling-flash-2.0"
     assert list_supported_llm_provider_options()[0]["models"][0] == "inclusionAI/Ling-flash-2.0"
+    assert "deepseek-ai/DeepSeek-V4-Pro" in SILICONFLOW_LLM_MODELS
+    assert "deepseek-ai/DeepSeek-V4-Flash" in SILICONFLOW_LLM_MODELS
 
 
 def test_volcengine_ark_provider_exposes_mainstream_models() -> None:

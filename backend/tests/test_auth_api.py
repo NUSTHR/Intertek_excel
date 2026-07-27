@@ -57,8 +57,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     )
     auth = AuthService(
         repository=repository,
-        admin_email="969348539@qq.com",
-        admin_password="Intertek_AI",
+        admin_email="admin@qq.com",
+        admin_password="admin",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
@@ -83,7 +83,7 @@ def test_admin_can_login_and_member_cannot_manage_files(
     client: TestClient,
     tmp_path: Path,
 ) -> None:
-    admin_auth = _login(client, "969348539@qq.com", "Intertek_AI")
+    admin_auth = _login(client, "admin@qq.com", "admin")
     member_auth = _register(client, "analyst@example.com", "member-pass-123")
 
     workbook_path = tmp_path / "standards.xlsx"
@@ -126,7 +126,7 @@ def test_admin_can_hide_files_from_members(
     client: TestClient,
     tmp_path: Path,
 ) -> None:
-    admin_auth = _login(client, "969348539@qq.com", "Intertek_AI")
+    admin_auth = _login(client, "admin@qq.com", "admin")
     member_auth = _register(client, "visibility@example.com", "member-pass-123")
 
     workbook_path = tmp_path / "restricted.xlsx"
@@ -168,7 +168,7 @@ def test_admin_can_hide_files_from_members(
 
 
 def test_llm_preferences_are_global_and_admin_managed(client: TestClient) -> None:
-    admin_auth = _login(client, "969348539@qq.com", "Intertek_AI")
+    admin_auth = _login(client, "admin@qq.com", "admin")
     member_auth = _register(client, "model-user@example.com", "member-pass-123")
 
     save_response = client.patch(
@@ -248,7 +248,7 @@ def test_register_login_me_logout_and_password_reset(client: TestClient) -> None
 def test_browser_session_uses_http_only_cookie_and_csrf(client: TestClient) -> None:
     login_response = client.post(
         "/api/auth/login",
-        json={"email": "969348539@qq.com", "password": "Intertek_AI"},
+        json={"email": "admin@qq.com", "password": "admin"},
     )
     assert login_response.status_code == 200
 
@@ -260,7 +260,7 @@ def test_browser_session_uses_http_only_cookie_and_csrf(client: TestClient) -> N
 
     me_response = client.get("/api/auth/me")
     assert me_response.status_code == 200
-    assert me_response.json()["email"] == "969348539@qq.com"
+    assert me_response.json()["email"] == "admin@qq.com"
 
     rejected_logout_response = client.post("/api/auth/logout")
     assert rejected_logout_response.status_code == 401
@@ -278,20 +278,20 @@ def test_login_rate_limit_blocks_repeated_failures(client: TestClient) -> None:
     for attempt in range(2):
         response = client.post(
             "/api/auth/login",
-            json={"email": "969348539@qq.com", "password": f"wrong-pass-{attempt}"},
+            json={"email": "admin@qq.com", "password": f"wrong-pass-{attempt}"},
         )
         assert response.status_code == 401
 
     limited_response = client.post(
         "/api/auth/login",
-        json={"email": "969348539@qq.com", "password": "wrong-pass-final"},
+        json={"email": "admin@qq.com", "password": "wrong-pass-final"},
     )
     assert limited_response.status_code == 429
     assert limited_response.json()["retry_after_seconds"] > 0
 
     still_limited_response = client.post(
         "/api/auth/login",
-        json={"email": "969348539@qq.com", "password": "Intertek_AI"},
+        json={"email": "admin@qq.com", "password": "admin"},
     )
     assert still_limited_response.status_code == 429
 
@@ -300,23 +300,50 @@ def test_login_success_resets_failed_attempt_counter(client: TestClient) -> None
     for attempt in range(2):
         response = client.post(
             "/api/auth/login",
-            json={"email": "969348539@qq.com", "password": f"wrong-pass-{attempt}"},
+            json={"email": "admin@qq.com", "password": f"wrong-pass-{attempt}"},
         )
         assert response.status_code == 401
 
     successful_response = client.post(
         "/api/auth/login",
-        json={"email": "969348539@qq.com", "password": "Intertek_AI"},
+        json={"email": "admin@qq.com", "password": "admin"},
     )
     assert successful_response.status_code == 200
+
+
+def test_initialize_synchronizes_configured_admin_password(tmp_path: Path) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    initial_service = AuthService(
+        repository=repository,
+        admin_email="admin@qq.com",
+        admin_password="temporary-admin-password",
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+    )
+    initial_service.initialize()
+
+    synchronized_service = AuthService(
+        repository=repository,
+        admin_email="admin@qq.com",
+        admin_password="admin",
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+    )
+    synchronized_service.initialize()
+
+    with pytest.raises(AuthenticationError, match="invalid email or password"):
+        synchronized_service.login("admin@qq.com", "temporary-admin-password")
+    assert synchronized_service.login("admin@qq.com", "admin").user.role.value == "admin"
 
 
 def test_login_rate_limit_is_shared_through_repository(tmp_path: Path) -> None:
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
     first_service = AuthService(
         repository=repository,
-        admin_email="969348539@qq.com",
-        admin_password="Intertek_AI",
+        admin_email="admin@qq.com",
+        admin_password="admin",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
@@ -328,8 +355,8 @@ def test_login_rate_limit_is_shared_through_repository(tmp_path: Path) -> None:
     )
     second_service = AuthService(
         repository=repository,
-        admin_email="969348539@qq.com",
-        admin_password="Intertek_AI",
+        admin_email="admin@qq.com",
+        admin_password="admin",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
@@ -343,15 +370,15 @@ def test_login_rate_limit_is_shared_through_repository(tmp_path: Path) -> None:
     second_service.initialize()
 
     with pytest.raises(AuthenticationError, match="invalid email or password"):
-        first_service.login("969348539@qq.com", "wrong-pass-1")
+        first_service.login("admin@qq.com", "wrong-pass-1")
     with pytest.raises(RateLimitError, match="too many failed login attempts"):
-        second_service.login("969348539@qq.com", "wrong-pass-2")
+        second_service.login("admin@qq.com", "wrong-pass-2")
     with pytest.raises(RateLimitError, match="too many failed login attempts"):
-        first_service.login("969348539@qq.com", "Intertek_AI")
+        first_service.login("admin@qq.com", "admin")
 
-    repository.clear_login_rate_limit(normalize_email("969348539@qq.com"))
-    assert second_service.login("969348539@qq.com", "Intertek_AI").user.email == (
-        "969348539@qq.com"
+    repository.clear_login_rate_limit(normalize_email("admin@qq.com"))
+    assert second_service.login("admin@qq.com", "admin").user.email == (
+        "admin@qq.com"
     )
 
 

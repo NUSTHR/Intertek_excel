@@ -1,5 +1,60 @@
 from pydantic import BaseModel, Field
 
+from app.api.schema_models.common import (  # noqa: F401
+    ChatSessionListResponse,
+    ChatSessionResponse,
+    PinChatSessionRequest,
+    RenameChatSessionRequest,
+)
+from app.api.schema_models.pdf import (  # noqa: F401
+    CreatePdfSummaryTasksRequest,
+    CreatePdfSummaryTasksResponse,
+    CreatePdfUploadTasksResponse,
+    DeletePdfFileResponse,
+    GeneratePdfSummaryResponse,
+    ListPdfDocumentChunksResponse,
+    ListPdfFilesResponse,
+    ListPdfModelSettingsResponse,
+    ListPdfParserProfilesResponse,
+    ListPdfSummaryTasksResponse,
+    ListPdfUploadBatchesResponse,
+    ListPdfUploadTasksResponse,
+    PdfAttachedDocumentResponse,
+    PdfChatAnswerBlockResponse,
+    PdfChatAnswerRequest,
+    PdfChatAnswerResponse,
+    PdfChatRequest,
+    PdfChatRouteRequest,
+    PdfChatRouteResponse,
+    PdfChatTurnListResponse,
+    PdfChatTurnResponse,
+    PdfChunkSearchMatchResponse,
+    PdfCitationResponse,
+    PdfDocumentChunkResponse,
+    PdfDocumentDetailResponse,
+    PdfDocumentSummaryResponse,
+    PdfFileResponse,
+    PdfModelSettingResponse,
+    PdfParseArtifactResponse,
+    PdfParsePageResponse,
+    PdfParseReportResponse,
+    PdfParserProfileResponse,
+    PdfParserStatusResponse,
+    PdfPreviewBlockResponse,
+    PdfSchemaItemResponse,
+    PdfSelectedDocumentResponse,
+    PdfSummaryTaskResponse,
+    PdfUploadBatchDetailResponse,
+    PdfUploadBatchResponse,
+    PdfUploadTaskResponse,
+    RenamePdfFileRequest,
+    SearchPdfChunksRequest,
+    SearchPdfChunksResponse,
+    SetPdfFileVisibilityRequest,
+    UpdatePdfModelSettingRequest,
+    UpdatePdfParserProfileRequest,
+)
+
 
 class ErrorResponse(BaseModel):
     detail: str
@@ -25,8 +80,9 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=255)
 
 
-class LoginRequest(RegisterRequest):
-    pass
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    password: str = Field(min_length=1, max_length=255)
 
 
 class PasswordResetRequest(BaseModel):
@@ -219,191 +275,6 @@ class UploadTaskResponse(BaseModel):
     result: UploadExcelResponse | None = None
 
 
-class PdfFileResponse(BaseModel):
-    file_id: str
-    parent_id: str | None = None
-    kind: str
-    display_name: str
-    original_filename: str
-    size_bytes: int
-    status: str
-    processing_status: str
-    progress: int
-    status_detail: str
-    error_message: str | None = None
-    page_count: int | None = None
-    chunk_count: int | None = None
-    created_at: str
-    updated_at: str
-    visible_to_members: bool = True
-
-
-class ListPdfFilesResponse(BaseModel):
-    files: list[PdfFileResponse] = Field(default_factory=list)
-
-
-class PdfParserStatusResponse(BaseModel):
-    backend: str
-    available: bool
-    command: str | None = None
-    version: str | None = None
-    detail: str
-
-
-class PdfUploadTaskResponse(BaseModel):
-    task_id: str
-    file_id: str | None = None
-    original_filename: str
-    status: str
-    stage: str
-    progress: int
-    detail: str
-    error_message: str | None = None
-    error_code: str | None = None
-    parser_backend: str = "unknown"
-    retry_count: int = 0
-    result: dict[str, object] = Field(default_factory=dict)
-    created_at: str
-    updated_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    last_retry_at: str | None = None
-
-
-class CreatePdfUploadTasksResponse(BaseModel):
-    tasks: list[PdfUploadTaskResponse] = Field(default_factory=list)
-
-
-class ListPdfUploadTasksResponse(BaseModel):
-    tasks: list[PdfUploadTaskResponse] = Field(default_factory=list)
-
-
-class PdfDocumentSummaryResponse(BaseModel):
-    file_id: str
-    status: str
-    content: str
-    updated_at: str | None = None
-    error_message: str | None = None
-
-
-class PdfPreviewBlockResponse(BaseModel):
-    block_id: str
-    page_label: str
-    title: str
-    content: str
-
-
-class PdfSchemaItemResponse(BaseModel):
-    item_id: str
-    label: str
-    value: str
-
-
-class PdfDocumentDetailResponse(BaseModel):
-    file_id: str
-    summary: PdfDocumentSummaryResponse
-    preview_blocks: list[PdfPreviewBlockResponse] = Field(default_factory=list)
-    schema_items: list[PdfSchemaItemResponse] = Field(
-        default_factory=list,
-        alias="schema",
-    )
-    tags: list[str] = Field(default_factory=list)
-
-
-class PdfDocumentChunkResponse(BaseModel):
-    chunk_id: str
-    chunk_index: int
-    text: str
-    page_label: str | None = None
-    title: str
-    token_count: int
-    content_hash: str
-    metadata: dict[str, str] = Field(default_factory=dict)
-
-
-class ListPdfDocumentChunksResponse(BaseModel):
-    chunks: list[PdfDocumentChunkResponse] = Field(default_factory=list)
-
-
-class SearchPdfChunksRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=4000)
-    file_ids: list[str] = Field(default_factory=list)
-    limit: int = Field(default=12, ge=1, le=50)
-
-
-class PdfChunkSearchMatchResponse(BaseModel):
-    file: PdfFileResponse
-    chunk: PdfDocumentChunkResponse
-    score: float
-    excerpt: str
-    matched_terms: list[str] = Field(default_factory=list)
-
-
-class SearchPdfChunksResponse(BaseModel):
-    query: str
-    matches: list[PdfChunkSearchMatchResponse] = Field(default_factory=list)
-    total_matches: int
-    limit: int
-
-
-class PdfChatRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=4000)
-    file_ids: list[str] = Field(default_factory=list)
-    retrieval_limit: int = Field(default=8, ge=1, le=20)
-    enable_deep_thinking: bool = False
-
-
-class PdfChatAnswerBlockResponse(BaseModel):
-    text: str
-    citation_ids: list[str] = Field(default_factory=list)
-    reasoning: str = ""
-
-
-class PdfCitationResponse(BaseModel):
-    citation_id: str
-    evidence_id: str
-    file_id: str
-    file_name: str
-    chunk_id: str
-    chunk_index: int
-    page_label: str | None = None
-    title: str
-    quote: str
-
-
-class PdfChatAnswerResponse(BaseModel):
-    question: str
-    answer_blocks: list[PdfChatAnswerBlockResponse] = Field(default_factory=list)
-    citations: list[PdfCitationResponse] = Field(default_factory=list)
-    retrieval_matches: list[PdfChunkSearchMatchResponse] = Field(default_factory=list)
-    insufficient_evidence: bool = False
-    follow_up_suggestions: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-    created_at: str
-
-
-class GeneratePdfSummaryResponse(BaseModel):
-    summary: PdfDocumentSummaryResponse
-
-
-class UpdatePdfModelSettingRequest(BaseModel):
-    selected_provider: str = Field(min_length=1, max_length=80)
-    selected_model: str = Field(min_length=1, max_length=160)
-
-
-class PdfModelSettingResponse(BaseModel):
-    id: str
-    label: str
-    providers: list[str] = Field(default_factory=list)
-    models: list[str] = Field(default_factory=list)
-    selected_provider: str
-    selected_model: str
-
-
-class ListPdfModelSettingsResponse(BaseModel):
-    settings: list[PdfModelSettingResponse] = Field(default_factory=list)
-
-
 class ListExcelFilesResponse(BaseModel):
     files: list[ExcelFileResponse] = Field(default_factory=list)
 
@@ -520,28 +391,6 @@ class CancelChatRequest(BaseModel):
 class CancelChatResponse(BaseModel):
     request_id: str
     cancelled: bool
-
-
-class ChatSessionResponse(BaseModel):
-    session_id: str
-    user_id: str
-    created_at: str
-    updated_at: str
-    title: str
-    pinned_at: str | None = None
-    status: str
-
-
-class ChatSessionListResponse(BaseModel):
-    sessions: list[ChatSessionResponse] = Field(default_factory=list)
-
-
-class RenameChatSessionRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
-
-
-class PinChatSessionRequest(BaseModel):
-    pinned: bool
 
 
 class AttachedDocumentResponse(BaseModel):

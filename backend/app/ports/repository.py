@@ -18,13 +18,21 @@ from app.domain.models import (
     ExcelVersionStatus,
     LlmPreference,
     PasswordResetToken,
+    PdfAttachedDocument,
     PdfDocumentChunk,
     PdfDocumentDetail,
     PdfDocumentSummary,
     PdfFile,
+    PdfFileStatus,
     PdfFileVisibility,
     PdfModelSetting,
+    PdfParseArtifact,
+    PdfParsePage,
+    PdfParseReport,
     PdfProcessingStatus,
+    PdfSummaryTask,
+    PdfUploadBatch,
+    PdfUploadBatchStatus,
     PdfUploadTask,
     PdfUploadTaskStage,
     UserAccount,
@@ -223,10 +231,15 @@ class ChatSessionRepository(Protocol):
     def create_session(self, session: ChatSession) -> None:
         ...
 
-    def list_sessions(self) -> list[ChatSession]:
+    def list_sessions(self, *, workspace: str = "excel") -> list[ChatSession]:
         ...
 
-    def get_session(self, session_id: str) -> ChatSession | None:
+    def get_session(
+        self,
+        session_id: str,
+        *,
+        workspace: str = "excel",
+    ) -> ChatSession | None:
         ...
 
     def touch_session(self, session_id: str, updated_at: str) -> None:
@@ -237,6 +250,8 @@ class ChatSessionRepository(Protocol):
         session_id: str,
         title: str,
         updated_at: str,
+        *,
+        workspace: str = "excel",
     ) -> ChatSession | None:
         ...
 
@@ -245,10 +260,12 @@ class ChatSessionRepository(Protocol):
         session_id: str,
         pinned_at: str | None,
         updated_at: str,
+        *,
+        workspace: str = "excel",
     ) -> ChatSession | None:
         ...
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, *, workspace: str = "excel") -> bool:
         ...
 
     def attach_document(self, document: AttachedDocument) -> bool:
@@ -266,7 +283,38 @@ class ChatSessionRepository(Protocol):
     def delete_turn(self, session_id: str, turn_id: str) -> None:
         ...
 
-    def list_turns(self, session_id: str) -> list[ChatTurn]:
+    def list_turns(
+        self,
+        session_id: str,
+        *,
+        workspace: str = "excel",
+    ) -> list[ChatTurn]:
+        ...
+
+
+class PdfChatRepository(ChatSessionRepository, Protocol):
+    def get_pdf_file(self, file_id: str) -> PdfFile | None:
+        ...
+
+    def list_pdf_files(self) -> list[PdfFile]:
+        ...
+
+    def list_pdf_document_chunks(self, file_id: str) -> list[PdfDocumentChunk]:
+        ...
+
+    def list_pdf_document_summaries(self) -> list[PdfDocumentSummary]:
+        ...
+
+    def list_pdf_model_settings(self) -> list[PdfModelSetting]:
+        ...
+
+    def attach_pdf_document(self, document: PdfAttachedDocument) -> bool:
+        ...
+
+    def detach_pdf_documents(self, session_id: str, file_ids: list[str]) -> None:
+        ...
+
+    def list_pdf_attached_documents(self, session_id: str) -> list[PdfAttachedDocument]:
         ...
 
 
@@ -358,6 +406,38 @@ class PdfKnowledgeRepository(Protocol):
     def get_pdf_file(self, file_id: str) -> PdfFile | None:
         ...
 
+    def get_pdf_file_including_deleted(self, file_id: str) -> PdfFile | None:
+        ...
+
+    def find_pdf_file_by_parent_and_name(
+        self,
+        *,
+        user_id: str,
+        parent_id: str | None,
+        display_name: str,
+        status: PdfFileStatus = PdfFileStatus.ACTIVE,
+    ) -> PdfFile | None:
+        ...
+
+    def get_pdf_folder_by_parent_and_name(
+        self,
+        *,
+        user_id: str,
+        parent_id: str | None,
+        display_name: str,
+    ) -> PdfFile | None:
+        ...
+
+    def get_or_create_pdf_folder(
+        self,
+        *,
+        user_id: str,
+        parent_id: str | None,
+        display_name: str,
+        created_at: str,
+    ) -> PdfFile:
+        ...
+
     def list_pdf_files(self) -> list[PdfFile]:
         ...
 
@@ -383,6 +463,40 @@ class PdfKnowledgeRepository(Protocol):
     ) -> PdfFile | None:
         ...
 
+    def update_pdf_file_display_name(
+        self,
+        file_id: str,
+        display_name: str,
+        updated_at: str,
+    ) -> PdfFile | None:
+        ...
+
+    def delete_pdf_file_tree(self, file_id: str) -> dict[str, int]:
+        ...
+
+    def create_pdf_upload_batch(self, batch: PdfUploadBatch) -> None:
+        ...
+
+    def get_pdf_upload_batch(self, batch_id: str) -> PdfUploadBatch | None:
+        ...
+
+    def list_pdf_upload_batches(self, user_id: str) -> list[PdfUploadBatch]:
+        ...
+
+    def update_pdf_upload_batch_status(
+        self,
+        *,
+        batch_id: str,
+        status: PdfUploadBatchStatus,
+        progress: int,
+        detail: str,
+        updated_at: str,
+        completed_at: str | None = None,
+        error_message: str | None = None,
+        result: dict[str, object] | None = None,
+    ) -> PdfUploadBatch | None:
+        ...
+
     def create_pdf_upload_task(self, task: PdfUploadTask) -> None:
         ...
 
@@ -390,6 +504,9 @@ class PdfKnowledgeRepository(Protocol):
         ...
 
     def list_pdf_upload_tasks(self, user_id: str) -> list[PdfUploadTask]:
+        ...
+
+    def list_pdf_upload_tasks_by_batch(self, batch_id: str) -> list[PdfUploadTask]:
         ...
 
     def claim_next_pdf_upload_task(
@@ -416,6 +533,7 @@ class PdfKnowledgeRepository(Protocol):
         *,
         task_id: str,
         result: dict[str, object],
+        detail: str,
         finished_at: str,
     ) -> PdfUploadTask | None:
         ...
@@ -430,7 +548,97 @@ class PdfKnowledgeRepository(Protocol):
     ) -> PdfUploadTask | None:
         ...
 
+    def cancel_pdf_upload_task(
+        self,
+        *,
+        task_id: str,
+        cancelled_at: str,
+        detail: str,
+    ) -> PdfUploadTask | None:
+        ...
+
+    def list_stale_processing_pdf_upload_tasks(
+        self,
+        *,
+        cutoff_started_at: str,
+    ) -> list[PdfUploadTask]:
+        ...
+
     def fail_stale_processing_pdf_upload_tasks(
+        self,
+        *,
+        cutoff_started_at: str,
+        failed_at: str,
+    ) -> int:
+        ...
+
+    def create_pdf_summary_task(self, task: PdfSummaryTask) -> None:
+        ...
+
+    def get_pdf_summary_task(self, task_id: str) -> PdfSummaryTask | None:
+        ...
+
+    def find_active_pdf_summary_task(self, file_id: str) -> PdfSummaryTask | None:
+        ...
+
+    def list_pdf_summary_tasks(self, user_id: str) -> list[PdfSummaryTask]:
+        ...
+
+    def claim_next_pdf_summary_task(
+        self,
+        *,
+        worker_id: str,
+        started_at: str,
+    ) -> PdfSummaryTask | None:
+        ...
+
+    def complete_pdf_summary_task(
+        self,
+        *,
+        task_id: str,
+        result: dict[str, object],
+        detail: str,
+        finished_at: str,
+    ) -> PdfSummaryTask | None:
+        ...
+
+    def fail_pdf_summary_task(
+        self,
+        *,
+        task_id: str,
+        error_message: str,
+        failed_at: str,
+    ) -> PdfSummaryTask | None:
+        ...
+
+    def skip_pdf_summary_task(
+        self,
+        *,
+        task_id: str,
+        detail: str,
+        result: dict[str, object],
+        skipped_at: str,
+    ) -> PdfSummaryTask | None:
+        ...
+
+    def cancel_pdf_summary_task(
+        self,
+        *,
+        task_id: str,
+        cancelled_at: str,
+        detail: str,
+    ) -> PdfSummaryTask | None:
+        ...
+
+    def retry_pdf_summary_task(
+        self,
+        *,
+        task_id: str,
+        retried_at: str,
+    ) -> PdfSummaryTask | None:
+        ...
+
+    def fail_stale_running_pdf_summary_tasks(
         self,
         *,
         cutoff_started_at: str,
@@ -447,6 +655,35 @@ class PdfKnowledgeRepository(Protocol):
     def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> None:
         ...
 
+    def list_pdf_document_summaries(self) -> list[PdfDocumentSummary]:
+        ...
+
+    def save_pdf_parse_report(self, report: PdfParseReport) -> None:
+        ...
+
+    def get_pdf_parse_report(self, file_id: str) -> PdfParseReport | None:
+        ...
+
+    def replace_pdf_parse_pages(
+        self,
+        file_id: str,
+        pages: list[PdfParsePage],
+    ) -> None:
+        ...
+
+    def list_pdf_parse_pages(self, file_id: str) -> list[PdfParsePage]:
+        ...
+
+    def replace_pdf_parse_artifacts(
+        self,
+        file_id: str,
+        artifacts: list[PdfParseArtifact],
+    ) -> None:
+        ...
+
+    def list_pdf_parse_artifacts(self, file_id: str) -> list[PdfParseArtifact]:
+        ...
+
     def replace_pdf_document_chunks(
         self,
         file_id: str,
@@ -461,4 +698,13 @@ class PdfKnowledgeRepository(Protocol):
         ...
 
     def save_pdf_model_setting(self, setting: PdfModelSetting) -> PdfModelSetting:
+        ...
+
+    def attach_pdf_document(self, document: PdfAttachedDocument) -> bool:
+        ...
+
+    def detach_pdf_documents(self, session_id: str, file_ids: list[str]) -> None:
+        ...
+
+    def list_pdf_attached_documents(self, session_id: str) -> list[PdfAttachedDocument]:
         ...

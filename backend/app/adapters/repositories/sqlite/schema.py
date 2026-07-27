@@ -701,4 +701,234 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=18,
+        name="add_pdf_parse_quality_reports",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_parse_reports (
+              file_id TEXT PRIMARY KEY,
+              parser_backend TEXT NOT NULL,
+              parser_version TEXT,
+              quality_status TEXT NOT NULL,
+              total_pages INTEGER NOT NULL,
+              parsed_pages INTEGER NOT NULL,
+              failed_pages INTEGER NOT NULL,
+              empty_pages INTEGER NOT NULL,
+              text_block_count INTEGER NOT NULL,
+              table_block_count INTEGER NOT NULL,
+              image_block_count INTEGER NOT NULL,
+              chunk_count INTEGER NOT NULL,
+              coverage_ratio REAL NOT NULL,
+              warning_count INTEGER NOT NULL,
+              error_count INTEGER NOT NULL,
+              warnings_json TEXT NOT NULL DEFAULT '[]',
+              started_at TEXT,
+              finished_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_parse_pages (
+              page_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              page_number INTEGER NOT NULL,
+              page_label TEXT NOT NULL,
+              status TEXT NOT NULL,
+              text_block_count INTEGER NOT NULL,
+              table_block_count INTEGER NOT NULL,
+              image_block_count INTEGER NOT NULL,
+              char_count INTEGER NOT NULL,
+              warning_message TEXT,
+              error_message TEXT,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id),
+              UNIQUE(file_id, page_number)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_parse_pages_file_page
+              ON pdf_parse_pages(file_id, page_number)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_parse_pages_file_status
+              ON pdf_parse_pages(file_id, status)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_parse_artifacts (
+              artifact_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              artifact_type TEXT NOT NULL,
+              name TEXT NOT NULL,
+              path TEXT,
+              size_bytes INTEGER NOT NULL,
+              content_hash TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_parse_artifacts_file
+              ON pdf_parse_artifacts(file_id, artifact_type)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_files_processing_status
+              ON pdf_files(processing_status, updated_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=19,
+        name="add_pdf_upload_batches",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_upload_batches (
+              batch_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              source_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              total_files INTEGER NOT NULL,
+              accepted_files INTEGER NOT NULL,
+              skipped_files INTEGER NOT NULL,
+              total_bytes INTEGER NOT NULL,
+              progress INTEGER NOT NULL,
+              detail TEXT NOT NULL,
+              error_message TEXT,
+              parser_backend TEXT NOT NULL,
+              result_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              completed_at TEXT
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_upload_batches_user_updated
+              ON pdf_upload_batches(user_id, updated_at)
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks
+              ADD COLUMN batch_id TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_upload_tasks_batch
+              ON pdf_upload_tasks(batch_id, created_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=20,
+        name="add_chat_workspace_scope",
+        statements=(
+            """
+            ALTER TABLE chat_sessions
+            ADD COLUMN workspace TEXT NOT NULL DEFAULT 'excel'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_workspace_status_updated
+              ON chat_sessions(workspace, status, updated_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=21,
+        name="add_pdf_summary_routing_and_session_documents",
+        statements=(
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN document_title TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN document_type TEXT NOT NULL DEFAULT 'pdf_document'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN business_domain TEXT NOT NULL DEFAULT 'pdf knowledge'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN key_topics_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN positive_routing_terms_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN negative_routing_terms_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN exact_identifiers_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN suitable_questions_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN unsuitable_questions_json TEXT NOT NULL DEFAULT '[]'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN routing_notes TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_chat_session_documents (
+              session_id TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              attached_at TEXT NOT NULL,
+              chunk_count INTEGER NOT NULL,
+              context_hash TEXT NOT NULL,
+              status TEXT NOT NULL,
+              PRIMARY KEY(session_id, file_id),
+              FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id),
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_chat_session_documents_session
+              ON pdf_chat_session_documents(session_id, attached_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=22,
+        name="add_pdf_summary_tasks",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_summary_tasks (
+              task_id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              progress INTEGER NOT NULL,
+              detail TEXT NOT NULL,
+              error_message TEXT,
+              result_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT,
+              worker_id TEXT,
+              retry_count INTEGER NOT NULL DEFAULT 0,
+              last_retry_at TEXT,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_summary_tasks_status_created
+              ON pdf_summary_tasks(status, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_summary_tasks_user_updated
+              ON pdf_summary_tasks(user_id, updated_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_summary_tasks_file_status
+              ON pdf_summary_tasks(file_id, status)
+            """,
+        ),
+    ),
 )

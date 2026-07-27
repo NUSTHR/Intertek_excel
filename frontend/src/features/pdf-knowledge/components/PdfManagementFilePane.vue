@@ -1,21 +1,27 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+
 import AppIcon from '../../../components/AppIcon.vue'
 import type {
+  PdfBreadcrumbItem,
   PdfManagedFile,
   PdfManagedFileKind,
   PdfManagedFileStatus,
-  PdfUploadTask,
 } from '../types'
+import PdfManagementDirectoryTree from './PdfManagementDirectoryTree.vue'
 
-defineProps<{
+const props = defineProps<{
+  isAdmin: boolean
   files: PdfManagedFile[]
+  directoryFiles: PdfManagedFile[]
   selectedFileId: string
+  selectedFileIds: Set<string>
+  selectedScopeId: string
+  scopeBreadcrumbs: PdfBreadcrumbItem[]
   totalFileCount: number
   currentPage: number
   pageCount: number
   visiblePages: number[]
-  uploadTasks: PdfUploadTask[]
-  uploadTaskSummary: string
   isUploading: boolean
   isLoading: boolean
   errorMessage: string
@@ -23,14 +29,22 @@ defineProps<{
 
 const emit = defineEmits<{
   selectFile: [file: PdfManagedFile]
+  selectScope: [scopeId: string]
+  openScope: [scopeId: string]
   requestUpload: []
+  renameFile: [file: PdfManagedFile]
+  toggleVisibility: [file: PdfManagedFile]
+  deleteFile: [file: PdfManagedFile]
   pageChange: [page: number]
   pageStep: [direction: -1 | 1]
 }>()
 
+const isDirectoryTreeOpen = ref(false)
+const openActionMenuId = ref('')
+
 function iconForFileKind(kind: PdfManagedFileKind): string {
   if (kind === 'folder') {
-    return 'folder_open'
+    return 'folder'
   }
   if (kind === 'csv') {
     return 'table_chart'
@@ -38,7 +52,7 @@ function iconForFileKind(kind: PdfManagedFileKind): string {
   if (kind === 'xlsx') {
     return 'table_rows'
   }
-  return 'description'
+  return 'picture_as_pdf'
 }
 
 function statusLabel(status: PdfManagedFileStatus): string {
@@ -54,32 +68,186 @@ function statusLabel(status: PdfManagedFileStatus): string {
   if (status === 'indexing') {
     return 'Indexing'
   }
+  if (status === 'partial') {
+    return 'Partial'
+  }
   if (status === 'queued') {
     return 'Queued'
   }
   if (status === 'failed') {
     return 'Failed'
   }
+  if (status === 'cancelled') {
+    return 'Cancelled'
+  }
   return 'Ready'
+}
+
+function qualityLabel(file: PdfManagedFile): string {
+  if (!file.qualityStatus) {
+    return ''
+  }
+  if (file.qualityStatus === 'good') {
+    return 'Good'
+  }
+  if (file.qualityStatus === 'warning') {
+    return 'Warning'
+  }
+  if (file.qualityStatus === 'partial') {
+    return 'Partial'
+  }
+  if (file.qualityStatus === 'failed') {
+    return 'Failed'
+  }
+  return 'Unknown'
+}
+
+function qualitySummary(file: PdfManagedFile): string {
+  const label = qualityLabel(file)
+  if (!label) {
+    return ''
+  }
+  const details: string[] = []
+  if (typeof file.coverageRatio === 'number') {
+    details.push(`${Math.round(file.coverageRatio * 100)}%`)
+  }
+  if (file.failedPageCount) {
+    details.push(`${file.failedPageCount} failed`)
+  } else if (file.warningCount) {
+    details.push(`${file.warningCount} warning${file.warningCount > 1 ? 's' : ''}`)
+  }
+  return details.length ? `${label} / ${details.join(' / ')}` : label
 }
 
 function progressForFile(file: PdfManagedFile): number {
   return file.progress ?? (file.status === 'parsing' || file.status === 'indexing' ? 48 : 100)
 }
 
+function isFileRowSelected(file: PdfManagedFile): boolean {
+  return props.selectedFileIds.has(file.id)
+}
+
+function fileMetaLabel(file: PdfManagedFile): string {
+  const details = [file.sizeLabel, file.modifiedLabel].filter(Boolean)
+  if (file.status !== 'ready' && file.status !== 'indexed') {
+    details.push(statusLabel(file.status))
+  }
+  const quality = qualitySummary(file)
+  if (quality) {
+    details.push(quality)
+  }
+  return details.join(' / ')
+}
+
+function openDirectoryTree(): void {
+  isDirectoryTreeOpen.value = true
+}
+
+function closeDirectoryTree(): void {
+  isDirectoryTreeOpen.value = false
+}
+
+function handleDirectoryScopeSelect(scopeId: string): void {
+  emit('selectScope', scopeId)
+  closeDirectoryTree()
+}
+
+function handleDirectoryFileSelect(file: PdfManagedFile): void {
+  emit('selectFile', file)
+  closeDirectoryTree()
+}
+
+function toggleActionMenu(fileId: string): void {
+  openActionMenuId.value = openActionMenuId.value === fileId ? '' : fileId
+}
+
+function closeActionMenu(): void {
+  openActionMenuId.value = ''
+}
+
+function renameFromMenu(file: PdfManagedFile): void {
+  closeActionMenu()
+  emit('renameFile', file)
+}
+
+function toggleVisibilityFromMenu(file: PdfManagedFile): void {
+  closeActionMenu()
+  emit('toggleVisibility', file)
+}
+
+function deleteFromMenu(file: PdfManagedFile): void {
+  closeActionMenu()
+  emit('deleteFile', file)
+}
+
 </script>
 
 <template>
   <section class="pdfmgmt-file-pane">
+    <div
+      class="pdfmgmt-directory-overlay"
+      :class="{ open: isDirectoryTreeOpen }"
+      role="dialog"
+      aria-label="Directory Tree"
+      :aria-hidden="!isDirectoryTreeOpen"
+    >
+      <header class="pdfmgmt-directory-overlay-header">
+        <strong>Directory Tree</strong>
+        <button type="button" aria-label="Close directory tree" @click="closeDirectoryTree">
+          <AppIcon name="close" />
+        </button>
+      </header>
+      <PdfManagementDirectoryTree
+        :files="directoryFiles"
+        :selected-scope-id="selectedScopeId"
+        :selected-file-id="selectedFileId"
+        @select-scope="handleDirectoryScopeSelect"
+        @select-file="handleDirectoryFileSelect"
+      />
+      <footer class="pdfmgmt-directory-overlay-footer">
+        <span>Quick Actions</span>
+        <button type="button" disabled>
+          <AppIcon name="create_new_folder" />
+          <span>New Folder</span>
+        </button>
+      </footer>
+    </div>
+
     <div class="pdfmgmt-file-scroll">
       <div class="pdfmgmt-breadcrumb-row">
-        <nav aria-label="Knowledge path">
-          <strong>Knowledge Base</strong>
-        </nav>
-        <span class="pdfmgmt-count-pill">{{ totalFileCount }} Files</span>
+        <div class="pdfmgmt-breadcrumb-group">
+          <nav aria-label="Knowledge path">
+            <template v-for="(crumb, index) in scopeBreadcrumbs" :key="`${crumb}-${index}`">
+              <button
+                type="button"
+                class="pdfmgmt-breadcrumb-button"
+                :class="{ active: crumb.active }"
+                :aria-current="crumb.active ? 'page' : undefined"
+                @click="emit('openScope', crumb.id)"
+              >
+                {{ crumb.label }}
+              </button>
+              <AppIcon
+                v-if="index < scopeBreadcrumbs.length - 1"
+                name="chevron_right"
+                class="pdfmgmt-breadcrumb-separator"
+              />
+            </template>
+          </nav>
+          <button
+            type="button"
+            class="pdfmgmt-directory-trigger"
+            aria-label="View directory tree"
+            @click="openDirectoryTree"
+          >
+            <AppIcon name="account_tree" />
+          </button>
+        </div>
+        <span class="pdfmgmt-count-pill">{{ totalFileCount }} Items Found</span>
       </div>
 
       <button
+        v-if="isAdmin"
         type="button"
         class="pdfmgmt-dropzone"
         :disabled="isUploading"
@@ -89,26 +257,15 @@ function progressForFile(file: PdfManagedFile): number {
           <AppIcon name="upload_file" />
         </span>
         <span>
-          <strong>{{ isUploading ? 'Preparing upload tasks...' : 'Click or drag files to upload' }}</strong>
-          <small>PDF folders (Max 50MB per file)</small>
+          <strong>{{ isUploading ? 'Preparing upload tasks...' : 'Choose a PDF folder to upload' }}</strong>
+          <small>Folder upload / Max 50MB per PDF</small>
         </span>
       </button>
 
-      <div v-if="uploadTaskSummary || uploadTasks.length" class="pdfmgmt-task-strip">
-        <div>
-          <AppIcon name="refresh" />
-          <strong>{{ uploadTaskSummary || 'All tasks complete' }}</strong>
-        </div>
-        <span v-for="task in uploadTasks.slice(0, 2)" :key="task.id">
-          {{ task.fileName }} - {{ task.stage }} / {{ task.parserBackend }} / {{ task.progress }}%
-          <small v-if="task.errorCode">({{ task.errorCode }})</small>
-        </span>
-      </div>
-
       <p v-if="errorMessage" class="pdfmgmt-inline-error">{{ errorMessage }}</p>
 
-      <div class="pdfmgmt-file-table" role="table" aria-label="Knowledge files">
-        <div v-if="files.length > 0" class="pdfmgmt-file-header" role="row">
+      <div class="pdfmgmt-file-table" role="list" aria-label="Knowledge files">
+        <div v-if="files.length > 0" class="pdfmgmt-file-header" aria-hidden="true">
           <span>Type</span>
           <span>Name</span>
           <span>Size</span>
@@ -127,30 +284,43 @@ function progressForFile(file: PdfManagedFile): number {
           <span>Upload a folder or adjust the search term.</span>
         </div>
 
-        <button
+        <article
           v-else
           v-for="file in files"
           :key="file.id"
-          type="button"
           class="pdfmgmt-file-row"
           :class="{
-            active: file.id === selectedFileId,
+            active: isFileRowSelected(file),
             parsing: file.status === 'parsing' || file.status === 'indexing',
+            'menu-open': openActionMenuId === file.id,
           }"
-          role="row"
-          @click="emit('selectFile', file)"
+          role="listitem"
         >
-          <span class="pdfmgmt-file-icon" :class="file.kind">
-            <AppIcon :name="iconForFileKind(file.kind)" />
-          </span>
-          <span class="pdfmgmt-file-name">
-            <strong>{{ file.name }}</strong>
-            <small>{{ file.modifiedLabel }}</small>
-          </span>
-          <span class="pdfmgmt-file-size">{{ file.sizeLabel }}</span>
-          <span class="pdfmgmt-status-wrap">
-            <span class="pdfmgmt-status" :class="file.status">
-              {{ statusLabel(file.status) }}
+          <input
+            class="pdfmgmt-file-check"
+            type="checkbox"
+            :checked="isFileRowSelected(file)"
+            :aria-label="`Select ${file.name}`"
+            @click.stop="emit('selectFile', file)"
+            @change.prevent
+          />
+          <button
+            type="button"
+            class="pdfmgmt-file-row-hitbox"
+            :aria-label="`Select ${file.name}`"
+            @click="emit('selectFile', file)"
+          ></button>
+          <button
+            type="button"
+            class="pdfmgmt-file-main"
+            @click="emit('selectFile', file)"
+          >
+            <span class="pdfmgmt-file-icon" :class="file.kind">
+              <AppIcon :name="iconForFileKind(file.kind)" />
+            </span>
+            <span class="pdfmgmt-file-name">
+              <strong>{{ file.name }}</strong>
+              <small>{{ fileMetaLabel(file) }}</small>
             </span>
             <span
               v-if="['uploading', 'queued', 'parsing', 'indexing'].includes(file.status)"
@@ -161,11 +331,46 @@ function progressForFile(file: PdfManagedFile): number {
                 :style="{ width: `${progressForFile(file)}%` }"
               ></span>
             </span>
-          </span>
-          <span class="pdfmgmt-row-menu">
-            <AppIcon name="more_vert" />
-          </span>
-        </button>
+          </button>
+          <div v-if="isAdmin" class="pdfmgmt-row-menu" @click.stop>
+            <button
+              type="button"
+              class="pdfmgmt-row-menu-trigger"
+              :class="{ active: openActionMenuId === file.id }"
+              :aria-label="`Actions for ${file.name}`"
+              :aria-expanded="openActionMenuId === file.id"
+              @click="toggleActionMenu(file.id)"
+            >
+              <AppIcon name="more_vert" />
+            </button>
+            <div v-if="openActionMenuId === file.id" class="pdfmgmt-row-menu-popover">
+              <button type="button" @click="renameFromMenu(file)">
+                <AppIcon name="edit" />
+                <span>Rename</span>
+              </button>
+              <button type="button" @click="toggleVisibilityFromMenu(file)">
+                <AppIcon :name="file.visibleToMembers ? 'visibility_off' : 'visibility'" />
+                <span>
+                  {{ file.visibleToMembers ? 'Hide from members' : 'Show to members' }}
+                </span>
+              </button>
+              <button type="button" class="danger" @click="deleteFromMenu(file)">
+                <AppIcon name="delete" />
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+          <button
+            v-if="file.kind === 'folder'"
+            type="button"
+            class="pdfmgmt-folder-open"
+            :aria-label="`Open folder ${file.name}`"
+            title="Open folder"
+            @click.stop="emit('openScope', file.id)"
+          >
+            <AppIcon name="chevron_right" />
+          </button>
+        </article>
       </div>
 
       <div class="pdfmgmt-pagination">

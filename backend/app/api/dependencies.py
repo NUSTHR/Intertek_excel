@@ -11,7 +11,13 @@ from app.adapters.llm.siliconflow_client import (
     MultiProviderLlmClient,
     SiliconFlowConfig,
 )
-from app.adapters.pdf.factory import create_pdf_parser, get_pdf_parser_status
+from app.adapters.pdf.factory import (
+    create_pdf_parser,
+    create_pdf_parser_profiles,
+    get_default_pdf_parser_profile_id,
+    get_pdf_parser_profiles,
+    get_pdf_parser_status,
+)
 from app.adapters.repositories.sqlite.policies import (
     SQLiteConnectionPolicy,
     SQLiteMaintenancePolicy,
@@ -32,6 +38,7 @@ from app.application.pdf_knowledge import (
     PdfChatService,
     PdfKnowledgeService,
     PdfRetrievalService,
+    PdfSummaryTaskWorker,
     PdfUploadTaskWorker,
 )
 from app.core.config import Settings, get_settings
@@ -106,11 +113,21 @@ def get_upload_task_worker() -> UploadTaskWorker:
 @lru_cache(maxsize=1)
 def get_pdf_knowledge_service() -> PdfKnowledgeService:
     settings = get_settings()
+    parser_profiles = get_pdf_parser_profiles(settings)
     return PdfKnowledgeService(
         repository=get_excel_repository(),
         storage_root=settings.storage_root,
         parser=create_pdf_parser(settings),
         parser_status=get_pdf_parser_status(settings),
+        parser_profiles=create_pdf_parser_profiles(settings),
+        parser_profile_statuses={
+            profile.profile_id: profile.status
+            for profile in parser_profiles
+        },
+        parser_profile_descriptors=parser_profiles,
+        default_parser_profile_id=get_default_pdf_parser_profile_id(settings),
+        llm_client=get_llm_client(),
+        llm_preferences=get_llm_preference_service(),
     )
 
 
@@ -126,11 +143,21 @@ def get_pdf_upload_task_worker() -> PdfUploadTaskWorker:
 
 
 @lru_cache(maxsize=1)
+def get_pdf_summary_task_worker() -> PdfSummaryTaskWorker:
+    settings = get_settings()
+    return PdfSummaryTaskWorker(
+        repository=get_excel_repository(),
+        pdf_knowledge=get_pdf_knowledge_service(),
+        poll_interval_seconds=settings.pdf_summary_task_worker_poll_interval_seconds,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_pdf_chat_service() -> PdfChatService:
     return PdfChatService(
         retrieval=PdfRetrievalService(repository=get_excel_repository()),
         llm_client=get_llm_client(),
-        llm_preferences=get_llm_preference_service(),
+        sessions=get_excel_repository(),
     )
 
 

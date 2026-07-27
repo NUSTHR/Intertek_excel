@@ -2,6 +2,7 @@
 import AppIcon from '../../../components/AppIcon.vue'
 
 defineProps<{
+  isAdmin: boolean
   searchTerm: string
 }>()
 
@@ -31,7 +32,9 @@ const emit = defineEmits<{
       <button type="button" aria-label="History unavailable" disabled>
         <AppIcon name="refresh" />
       </button>
-      <div class="pdfmgmt-topbar-avatar" aria-hidden="true">A</div>
+      <div class="pdfmgmt-topbar-avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+        <AppIcon :name="isAdmin ? 'verified' : 'user'" />
+      </div>
     </div>
   </header>
 </template>

@@ -90,14 +90,24 @@ class PdfRetrievalService:
         user_role: UserRole,
     ) -> list[PdfFile]:
         if file_ids:
-            files: list[PdfFile] = []
+            all_files = self._repository.list_pdf_files()
+            files_by_id = {file.file_id: file for file in all_files}
             for file_id in _dedupe_file_ids(file_ids):
-                file = self._repository.get_pdf_file(file_id)
+                file = files_by_id.get(file_id)
                 if file is None or not _is_visible_to_role(file, user_role):
                     raise AssetNotFoundError("PDF file was not found")
-                if _is_searchable_file(file):
-                    files.append(file)
-            return files
+            return _dedupe_pdf_files(
+                [
+                    candidate
+                    for file_id in _dedupe_file_ids(file_ids)
+                    for candidate in _search_scope_files(
+                        files_by_id[file_id],
+                        files_by_id=files_by_id,
+                    )
+                    if _is_visible_to_role(candidate, user_role)
+                    and _is_searchable_file(candidate)
+                ]
+            )
         return [
             file
             for file in self._repository.list_pdf_files()
@@ -208,6 +218,46 @@ def _is_searchable_file(file: PdfFile) -> bool:
         file.kind == PdfFileKind.PDF
         and file.processing_status == PdfProcessingStatus.READY
     )
+
+
+def _search_scope_files(
+    file: PdfFile,
+    *,
+    files_by_id: dict[str, PdfFile],
+) -> list[PdfFile]:
+    if file.kind == PdfFileKind.FOLDER:
+        return _descendant_pdf_files(file.file_id, files_by_id=files_by_id)
+    return [file]
+
+
+def _descendant_pdf_files(
+    parent_id: str,
+    *,
+    files_by_id: dict[str, PdfFile],
+) -> list[PdfFile]:
+    children_by_parent: dict[str | None, list[PdfFile]] = {}
+    for file in files_by_id.values():
+        children_by_parent.setdefault(file.parent_id, []).append(file)
+    descendants: list[PdfFile] = []
+    stack = list(children_by_parent.get(parent_id, []))
+    while stack:
+        file = stack.pop(0)
+        if file.kind == PdfFileKind.PDF:
+            descendants.append(file)
+        elif file.kind == PdfFileKind.FOLDER:
+            stack.extend(children_by_parent.get(file.file_id, []))
+    return descendants
+
+
+def _dedupe_pdf_files(files: list[PdfFile]) -> list[PdfFile]:
+    deduped: list[PdfFile] = []
+    seen: set[str] = set()
+    for file in files:
+        if file.file_id in seen:
+            continue
+        seen.add(file.file_id)
+        deduped.append(file)
+    return deduped
 
 
 def _first_match_index(text: str, values: list[str]) -> int:

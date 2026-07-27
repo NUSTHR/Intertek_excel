@@ -3,18 +3,24 @@ import AppIcon from '../../../components/AppIcon.vue'
 import type { PdfManagementNavItem, PdfWorkspaceMode } from '../types'
 
 defineProps<{
+  isAdmin: boolean
   navItems: PdfManagementNavItem[]
   isUploading: boolean
+  userEmail: string
+  userRoleLabel: string
 }>()
 
 const emit = defineEmits<{
   changeMode: [mode: PdfWorkspaceMode]
+  openDiagnostics: []
   requestUpload: []
 }>()
 
 function handleNavClick(itemId: string): void {
   if (itemId === 'chat') {
     emit('changeMode', 'chat')
+  } else if (itemId === 'diagnostics') {
+    emit('openDiagnostics')
   }
 }
 </script>
@@ -27,13 +33,14 @@ function handleNavClick(itemId: string): void {
     </div>
 
     <button
+      v-if="isAdmin"
       type="button"
       class="pdfmgmt-upload-primary"
       :disabled="isUploading"
       @click="emit('requestUpload')"
     >
       <AppIcon name="add" />
-      <span>Upload New</span>
+      <span>Upload Folder</span>
     </button>
 
     <nav class="pdfmgmt-nav" aria-label="Management sections">
@@ -56,10 +63,12 @@ function handleNavClick(itemId: string): void {
         <span>Support</span>
       </button>
       <div class="pdfmgmt-user-card">
-        <div class="pdfmgmt-avatar" aria-hidden="true">AI</div>
+        <div class="pdfmgmt-avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+          <AppIcon :name="isAdmin ? 'verified' : 'user'" />
+        </div>
         <div>
-          <strong>PDF Workspace</strong>
-          <span>Knowledge tools</span>
+          <strong>{{ userRoleLabel }}</strong>
+          <span>{{ userEmail }}</span>
         </div>
         <button type="button" aria-label="Logout unavailable" disabled>
           <AppIcon name="logout" />

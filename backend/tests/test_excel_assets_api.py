@@ -492,6 +492,63 @@ def test_api_delete_file_requires_confirmation_and_soft_deletes_from_management(
     assert list_response.json()["files"] == []
 
 
+def test_api_delete_file_releases_display_name_for_new_upload(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "standards.xlsx"
+    _write_xlsx_fixture(workbook_path)
+
+    with workbook_path.open("rb") as workbook_file:
+        upload_response = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "standards.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert upload_response.status_code == 200
+    original = upload_response.json()
+    original_file_id = original["file"]["file_id"]
+    original_version_id = original["version"]["version_id"]
+
+    delete_response = client.delete(
+        f"/api/excel/files/{original_file_id}?confirm_delete=true"
+    )
+    assert delete_response.status_code == 200
+
+    with workbook_path.open("rb") as workbook_file:
+        replacement_response = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "standards.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert replacement_response.status_code == 200
+    replacement = replacement_response.json()
+    assert replacement["file"]["file_id"] != original_file_id
+    assert replacement["version"]["version_id"] != original_version_id
+    assert replacement["file"]["display_name"] == "standards.xlsx"
+
+    missing_response = client.get(f"/api/excel/files/{original_file_id}")
+    list_response = client.get("/api/excel/files")
+
+    assert missing_response.status_code == 404
+    assert list_response.status_code == 200
+    assert [file["file_id"] for file in list_response.json()["files"]] == [
+        replacement["file"]["file_id"]
+    ]
+
+
 def _write_xlsx_fixture(path: Path) -> None:
     workbook = Workbook()
     worksheet = workbook.active

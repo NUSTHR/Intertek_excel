@@ -1,28 +1,27 @@
 <script setup lang="ts">
 import AppIcon from '../../../components/AppIcon.vue'
 import type { PdfKnowledgeNode, PdfRecentChat, PdfSidebarView } from '../types'
+import PdfKnowledgeTreeNode from './PdfKnowledgeTreeNode.vue'
 
 defineProps<{
   activeView: PdfSidebarView
+  errorMessage: string
+  selectedContextId: string
+  isAdmin: boolean
   tree: PdfKnowledgeNode[]
   recentChats: PdfRecentChat[]
+  userEmail: string
+  userRoleLabel: string
 }>()
 
 const emit = defineEmits<{
   changeView: [view: PdfSidebarView]
   openManagement: []
   newChat: []
+  openChat: [chatId: string]
+  selectContext: [fileId: string]
 }>()
 
-function iconForNode(node: PdfKnowledgeNode): string {
-  if (node.kind === 'pdf') {
-    return 'description'
-  }
-  if (node.kind === 'table') {
-    return 'table_chart'
-  }
-  return node.active ? 'folder_open' : 'folder_open'
-}
 </script>
 
 <template>
@@ -72,48 +71,47 @@ function iconForNode(node: PdfKnowledgeNode): string {
         </button>
       </div>
 
+      <div class="pdfkb-mobile-actions">
+        <button type="button" @click="emit('openManagement')">
+          <AppIcon name="folder_open" />
+          <span>Manage Files</span>
+        </button>
+      </div>
+
       <section v-if="activeView === 'knowledge'" class="pdfkb-sidebar-panel">
         <div class="pdfkb-section-title">
           <span>Knowledge Base</span>
-          <AppIcon name="keyboard_arrow_down" />
+          <button
+            type="button"
+            :class="{ active: !selectedContextId }"
+            aria-label="Use all PDF sources"
+            @click="emit('selectContext', '')"
+          >
+            <AppIcon name="grid_view" />
+          </button>
         </div>
 
         <div class="pdfkb-tree-list">
           <div v-if="tree.length === 0" class="pdfkb-sidebar-empty">
             <AppIcon name="folder_open" />
-            <strong>No PDF sources</strong>
-            <span>Upload files from management to build the knowledge base.</span>
+            <strong>{{ errorMessage ? 'Unable to load PDF sources' : 'No PDF sources' }}</strong>
+            <span>
+              {{
+                errorMessage ||
+                'Upload files from management to build the knowledge base.'
+              }}
+            </span>
           </div>
 
-          <article
+          <PdfKnowledgeTreeNode
             v-else
             v-for="node in tree"
             :key="node.id"
-            class="pdfkb-tree-group"
-            :class="{ active: node.active }"
-          >
-            <button
-              type="button"
-              class="pdfkb-tree-row"
-              :class="{ active: node.active }"
-            >
-              <AppIcon :name="iconForNode(node)" />
-              <span>{{ node.name }}</span>
-            </button>
-
-            <div v-if="node.children?.length" class="pdfkb-tree-children">
-              <button
-                v-for="child in node.children"
-                :key="child.id"
-                type="button"
-                class="pdfkb-tree-row child"
-                :class="{ active: child.active }"
-              >
-                <AppIcon :name="iconForNode(child)" />
-                <span>{{ child.name }}</span>
-              </button>
-            </div>
-          </article>
+            :node="node"
+            :depth="0"
+            :selected-context-id="selectedContextId"
+            @select-context="emit('selectContext', $event)"
+          />
         </div>
       </section>
 
@@ -138,6 +136,7 @@ function iconForNode(node: PdfKnowledgeNode): string {
             :key="chat.id"
             type="button"
             class="pdfkb-recent-chat"
+            @click="emit('openChat', chat.id)"
           >
             <AppIcon name="chat_bubble" />
             <span>{{ chat.title }}</span>
@@ -163,10 +162,12 @@ function iconForNode(node: PdfKnowledgeNode): string {
       </div>
 
       <div class="pdfkb-profile">
-        <div class="pdfkb-profile-avatar" aria-hidden="true">RP</div>
+        <div class="pdfkb-profile-avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+          <AppIcon :name="isAdmin ? 'verified' : 'user'" />
+        </div>
         <div class="pdfkb-profile-copy">
-          <strong>Research Pro</strong>
-          <span>Knowledge Agent</span>
+          <strong>{{ userEmail }}</strong>
+          <span>{{ userRoleLabel }}</span>
         </div>
         <button type="button" aria-label="Logout unavailable" disabled>
           <AppIcon name="logout" />

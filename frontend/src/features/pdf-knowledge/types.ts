@@ -17,6 +17,7 @@ export interface PdfKnowledgeNode {
 export interface PdfRecentChat {
   id: string
   title: string
+  pinnedAt?: string
 }
 
 export interface PdfBreadcrumbItem {
@@ -30,6 +31,7 @@ export interface PdfChatMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
+  reasoning?: string
   bullets?: PdfChatBullet[]
   quote?: string
   closing?: string
@@ -65,11 +67,43 @@ export type PdfManagedFileStatus =
   | 'queued'
   | 'parsing'
   | 'indexing'
+  | 'partial'
   | 'failed'
+  | 'cancelled'
 
-export type PdfUploadTaskStatus = 'uploading' | 'queued' | 'parsing' | 'indexing' | 'ready' | 'failed'
+export type PdfUploadTaskStatus =
+  | 'uploading'
+  | 'queued'
+  | 'parsing'
+  | 'indexing'
+  | 'ready'
+  | 'failed'
+  | 'cancelled'
 
-export type PdfUploadTaskStage = 'queued' | 'claimed' | 'parsing' | 'indexing' | 'ready' | 'failed'
+export type PdfSummaryTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'ready'
+  | 'failed'
+  | 'skipped'
+  | 'cancelled'
+
+export type PdfUploadTaskStage =
+  | 'queued'
+  | 'claimed'
+  | 'parsing'
+  | 'indexing'
+  | 'ready'
+  | 'failed'
+  | 'cancelled'
+
+export type PdfUploadBatchStatus =
+  | 'queued'
+  | 'processing'
+  | 'ready'
+  | 'partial'
+  | 'failed'
+  | 'cancelled'
 
 export interface PdfManagedFile {
   id: string
@@ -84,11 +118,28 @@ export interface PdfManagedFile {
   pageCount?: number
   chunkCount?: number
   errorMessage?: string
+  qualityStatus?: PdfParseQualityStatus
+  coverageRatio?: number
+  warningCount?: number
+  failedPageCount?: number
+  parserBackend?: string
+  visibleToMembers: boolean
   active?: boolean
+}
+
+export interface PdfChatSession {
+  sessionId: string
+  userId: string
+  title: string
+  pinnedAt?: string
+  status: string
+  createdAt: string
+  updatedAt: string
 }
 
 export interface PdfUploadTask {
   id: string
+  batchId?: string
   fileName: string
   status: PdfUploadTaskStatus
   stage: PdfUploadTaskStage
@@ -101,8 +152,54 @@ export interface PdfUploadTask {
   fileId?: string
 }
 
+export interface PdfSummaryTask {
+  id: string
+  fileId: string
+  status: PdfSummaryTaskStatus
+  progress: number
+  detail: string
+  errorMessage?: string
+  retryCount: number
+  result: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+  startedAt?: string
+  finishedAt?: string
+  lastRetryAt?: string
+}
+
+export interface PdfUploadBatch {
+  id: string
+  sourceName: string
+  status: PdfUploadBatchStatus
+  totalFiles: number
+  acceptedFiles: number
+  skippedFiles: number
+  totalBytes: number
+  progress: number
+  detail: string
+  errorMessage?: string
+  parserBackend: string
+  result: Record<string, unknown>
+  skippedFilesDetail: PdfUploadSkippedFile[]
+  createdLabel: string
+  updatedLabel: string
+}
+
+export interface PdfUploadSkippedFile {
+  filename: string
+  relativePath: string
+  sizeBytes: number
+  reason: string
+}
+
+export interface PdfUploadCreationResult {
+  batch?: PdfUploadBatch
+  tasks: PdfUploadTask[]
+}
+
 export interface PdfManagementNavItem {
-  id: PdfWorkspaceMode | 'dashboard' | 'files' | 'knowledge'
+  id: PdfWorkspaceMode | 'knowledge' | 'diagnostics'
   label: string
   icon: string
   active?: boolean
@@ -125,12 +222,41 @@ export interface PdfParserStatus {
   detail: string
 }
 
+export interface PdfParserProfile {
+  id: string
+  label: string
+  kind: 'local' | 'cloud' | string
+  backend: string
+  available: boolean
+  command?: string
+  version?: string
+  detail: string
+  description: string
+  isDefault: boolean
+  isSelected: boolean
+}
+
+export interface PdfParserProfiles {
+  selectedProfileId: string
+  profiles: PdfParserProfile[]
+}
+
 export interface PdfDocumentSummary {
   fileId: string
-  status: 'empty' | 'generating' | 'ready' | 'failed'
+  status: 'empty' | 'generating' | 'pending' | 'ready' | 'failed' | 'stale'
   content: string
   updatedLabel?: string
   errorMessage?: string
+  documentTitle?: string
+  documentType?: string
+  businessDomain?: string
+  keyTopics?: string[]
+  positiveRoutingTerms?: string[]
+  negativeRoutingTerms?: string[]
+  exactIdentifiers?: string[]
+  suitableQuestions?: string[]
+  unsuitableQuestions?: string[]
+  routingNotes?: string
 }
 
 export interface PdfDocumentPreviewBlock {
@@ -144,6 +270,58 @@ export interface PdfDocumentSchemaItem {
   id: string
   label: string
   value: string
+}
+
+export type PdfParseQualityStatus = 'unknown' | 'good' | 'warning' | 'partial' | 'failed'
+
+export type PdfParsePageStatus = 'parsed' | 'empty' | 'image_only' | 'failed' | 'skipped'
+
+export interface PdfParsePage {
+  id: string
+  pageNumber: number
+  pageLabel: string
+  status: PdfParsePageStatus
+  textBlockCount: number
+  tableBlockCount: number
+  imageBlockCount: number
+  charCount: number
+  warningMessage?: string
+  errorMessage?: string
+}
+
+export interface PdfParseArtifact {
+  id: string
+  artifactType: string
+  name: string
+  path?: string
+  sizeBytes: number
+  contentHash?: string
+  createdAt: string
+}
+
+export interface PdfParseReport {
+  fileId: string
+  parserBackend: string
+  parserVersion?: string
+  qualityStatus: PdfParseQualityStatus
+  totalPages: number
+  parsedPages: number
+  failedPages: number
+  emptyPages: number
+  textBlockCount: number
+  tableBlockCount: number
+  imageBlockCount: number
+  chunkCount: number
+  coverageRatio: number
+  warningCount: number
+  errorCount: number
+  warnings: string[]
+  startedAt?: string
+  finishedAt?: string
+  createdAt: string
+  updatedAt: string
+  pages: PdfParsePage[]
+  artifacts: PdfParseArtifact[]
 }
 
 export interface PdfDocumentChunk {
@@ -163,6 +341,7 @@ export interface PdfDocumentDetail {
   previewBlocks: PdfDocumentPreviewBlock[]
   schema: PdfDocumentSchemaItem[]
   tags: string[]
+  parseReport?: PdfParseReport
 }
 
 export interface PdfChunkSearchMatch {
@@ -199,12 +378,39 @@ export interface PdfAnswerCitation {
 }
 
 export interface PdfChatAnswer {
+  sessionId?: string
   question: string
   answerBlocks: PdfAnswerBlock[]
   citations: PdfAnswerCitation[]
   retrievalMatches: PdfChunkSearchMatch[]
+  selectedDocuments: PdfSelectedDocument[]
+  newlyAttachedDocuments: PdfSelectedDocument[]
+  attachedDocuments: PdfAttachedDocument[]
   insufficientEvidence: boolean
   followUpSuggestions: string[]
   warnings: string[]
+  createdAt: string
+}
+
+export interface PdfSelectedDocument {
+  fileId: string
+  versionId: string
+  reason: string
+  confidence?: number
+}
+
+export interface PdfAttachedDocument {
+  fileId: string
+  attachedAt: string
+  chunkCount: number
+  contextHash: string
+  status: string
+}
+
+export interface PdfChatTurn {
+  turnId: string
+  sessionId: string
+  question: string
+  answer: PdfChatAnswer
   createdAt: string
 }
