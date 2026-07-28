@@ -12,9 +12,9 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <header class="pdfmgmt-topbar">
-    <label class="pdfmgmt-search">
-      <AppIcon name="search" />
+  <header class="pdfmgmt-topbar topbar file-topbar">
+    <label class="pdfmgmt-search search-field file-search-field">
+      <span class="search-icon"><AppIcon name="search" /></span>
       <input
         type="search"
         placeholder="Search knowledge base..."
@@ -23,16 +23,30 @@ const emit = defineEmits<{
       />
     </label>
 
-    <div class="pdfmgmt-topbar-meta">
-      <strong>Knowledge Interface</strong>
-      <span></span>
-      <button type="button" aria-label="Notifications unavailable" disabled>
+    <div class="pdfmgmt-topbar-meta file-topbar-meta">
+      <strong>PDF Workspace</strong>
+      <span class="topbar-divider"></span>
+      <button
+        type="button"
+        class="topbar-icon-button"
+        aria-label="Notifications unavailable"
+        disabled
+      >
         <AppIcon name="notifications" />
       </button>
-      <button type="button" aria-label="History unavailable" disabled>
+      <button
+        type="button"
+        class="topbar-icon-button"
+        aria-label="History unavailable"
+        disabled
+      >
         <AppIcon name="refresh" />
       </button>
-      <div class="pdfmgmt-topbar-avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+      <div
+        class="pdfmgmt-topbar-avatar topbar-avatar"
+        :class="{ admin: isAdmin }"
+        aria-hidden="true"
+      >
         <AppIcon :name="isAdmin ? 'verified' : 'user'" />
       </div>
     </div>

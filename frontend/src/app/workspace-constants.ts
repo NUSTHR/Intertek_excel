@@ -16,8 +16,7 @@ export const minExcelRowHeight = 30
 export const maxExcelRowHeight = 86
 
 export const primaryNavItems: PrimaryNavItem[] = [
-  { key: 'chat', label: 'Chat', icon: 'chat_bubble' },
-  { key: 'files', label: 'Files', icon: 'folder_open' },
-  { key: 'pdf', label: 'PDF AI', icon: 'description' },
-  { key: 'settings', label: 'Settings', icon: 'settings', disabled: true },
+  { id: 'chat', label: 'Chat', icon: 'chat_bubble' },
+  { id: 'files', label: 'Files', icon: 'folder_open' },
+  { id: 'settings', label: 'Settings', icon: 'settings', disabled: true },
 ]

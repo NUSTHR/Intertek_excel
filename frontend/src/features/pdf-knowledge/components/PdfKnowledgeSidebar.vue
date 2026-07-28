@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import AppIcon from '../../../components/AppIcon.vue'
+import WorkspaceNavigation from '../../../components/WorkspaceNavigation.vue'
+import type { WorkspaceNavigationItem } from '../../../types/workspace-navigation'
 import type { PdfKnowledgeNode, PdfRecentChat, PdfSidebarView } from '../types'
 import PdfKnowledgeTreeNode from './PdfKnowledgeTreeNode.vue'
 
@@ -16,27 +18,48 @@ defineProps<{
 
 const emit = defineEmits<{
   changeView: [view: PdfSidebarView]
+  openExcelChat: []
   openManagement: []
   newChat: []
   openChat: [chatId: string]
   selectContext: [fileId: string]
+  logout: []
 }>()
+
+const pdfChatNavigationItems: WorkspaceNavigationItem[] = [
+  { id: 'pdf-files', label: 'PDF Files', icon: 'folder_open' },
+  { id: 'excel-chat', label: 'Excel Chat', icon: 'table_chart' },
+]
+
+function handleDestination(itemId: string): void {
+  if (itemId === 'pdf-files') {
+    emit('openManagement')
+  } else if (itemId === 'excel-chat') {
+    emit('openExcelChat')
+  }
+}
 
 </script>
 
 <template>
-  <nav class="pdfkb-sidebar" aria-label="PDF knowledge navigation">
-    <div class="pdfkb-brand-block">
-      <div class="pdfkb-brand-mark">
+  <nav
+    class="pdfkb-sidebar chat-session-rail excelai-side-nav"
+    aria-label="PDF knowledge navigation"
+  >
+    <div class="pdfkb-brand-block chat-rail-brand">
+      <div class="pdfkb-brand-mark rail-logo">
         <AppIcon name="description" />
       </div>
-      <span>PDF AI</span>
+      <div>
+        <h3>PDF AI</h3>
+        <p>Researcher Pro</p>
+      </div>
     </div>
 
     <div class="pdfkb-sidebar-cta">
-      <button type="button" class="pdfkb-new-chat" @click="emit('newChat')">
-        <AppIcon name="chat_bubble" />
-        <span>New Chat</span>
+      <button type="button" class="pdfkb-new-chat new-chat-button" @click="emit('newChat')">
+        <AppIcon name="add" />
+        <strong>New Chat</strong>
       </button>
     </div>
 
@@ -135,41 +158,33 @@ const emit = defineEmits<{
             v-for="chat in recentChats"
             :key="chat.id"
             type="button"
-            class="pdfkb-recent-chat"
+            class="pdfkb-recent-chat chat-session-item"
             @click="emit('openChat', chat.id)"
           >
-            <AppIcon name="chat_bubble" />
-            <span>{{ chat.title }}</span>
+            <span class="session-glyph"><AppIcon name="chat_bubble" /></span>
+            <span class="session-copy"><strong>{{ chat.title }}</strong></span>
           </button>
         </div>
       </section>
     </div>
 
     <div class="pdfkb-sidebar-footer">
-      <div class="pdfkb-footer-links">
-        <button type="button" disabled>
-          <AppIcon name="settings" />
-          <span>Settings</span>
-        </button>
-        <button type="button" @click="emit('openManagement')">
-          <AppIcon name="folder_open" />
-          <span>Manage Files</span>
-        </button>
-        <button type="button" disabled>
-          <AppIcon name="help" />
-          <span>Support Center</span>
-        </button>
-      </div>
+      <WorkspaceNavigation
+        :items="pdfChatNavigationItems"
+        variant="rail"
+        aria-label="PDF chat destinations"
+        @select="handleDestination"
+      />
 
-      <div class="pdfkb-profile">
-        <div class="pdfkb-profile-avatar" :class="{ admin: isAdmin }" aria-hidden="true">
+      <div class="pdfkb-profile chat-rail-user">
+        <div class="pdfkb-profile-avatar avatar" :class="{ admin: isAdmin }" aria-hidden="true">
           <AppIcon :name="isAdmin ? 'verified' : 'user'" />
         </div>
         <div class="pdfkb-profile-copy">
           <strong>{{ userEmail }}</strong>
           <span>{{ userRoleLabel }}</span>
         </div>
-        <button type="button" aria-label="Logout unavailable" disabled>
+        <button type="button" class="logout-button" aria-label="Logout" @click="emit('logout')">
           <AppIcon name="logout" />
         </button>
       </div>

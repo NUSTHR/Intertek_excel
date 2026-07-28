@@ -183,7 +183,7 @@ function deleteFromMenu(file: PdfManagedFile): void {
 </script>
 
 <template>
-  <section class="pdfmgmt-file-pane">
+  <section class="pdfmgmt-file-pane file-sources-pane">
     <div
       class="pdfmgmt-directory-overlay"
       :class="{ open: isDirectoryTreeOpen }"
@@ -213,8 +213,8 @@ function deleteFromMenu(file: PdfManagedFile): void {
       </footer>
     </div>
 
-    <div class="pdfmgmt-file-scroll">
-      <div class="pdfmgmt-breadcrumb-row">
+    <div class="pdfmgmt-file-scroll file-list-panel">
+      <div class="pdfmgmt-breadcrumb-row panel-heading">
         <div class="pdfmgmt-breadcrumb-group">
           <nav aria-label="Knowledge path">
             <template v-for="(crumb, index) in scopeBreadcrumbs" :key="`${crumb}-${index}`">
@@ -249,11 +249,11 @@ function deleteFromMenu(file: PdfManagedFile): void {
       <button
         v-if="isAdmin"
         type="button"
-        class="pdfmgmt-dropzone"
+        class="pdfmgmt-dropzone file-upload-zone"
         :disabled="isUploading"
         @click="emit('requestUpload')"
       >
-        <span class="pdfmgmt-dropzone-icon">
+        <span class="pdfmgmt-dropzone-icon file-upload-icon">
           <AppIcon name="upload_file" />
         </span>
         <span>
@@ -289,11 +289,15 @@ function deleteFromMenu(file: PdfManagedFile): void {
           v-for="file in files"
           :key="file.id"
           class="pdfmgmt-file-row"
-          :class="{
-            active: isFileRowSelected(file),
-            parsing: file.status === 'parsing' || file.status === 'indexing',
-            'menu-open': openActionMenuId === file.id,
-          }"
+          :class="[
+            'file-library-card',
+            {
+              selected: isFileRowSelected(file),
+              active: isFileRowSelected(file),
+              parsing: file.status === 'parsing' || file.status === 'indexing',
+              'menu-open': openActionMenuId === file.id,
+            },
+          ]"
           role="listitem"
         >
           <input
@@ -315,12 +319,12 @@ function deleteFromMenu(file: PdfManagedFile): void {
             class="pdfmgmt-file-main"
             @click="emit('selectFile', file)"
           >
-            <span class="pdfmgmt-file-icon" :class="file.kind">
+            <span class="pdfmgmt-file-icon file-badge large" :class="file.kind">
               <AppIcon :name="iconForFileKind(file.kind)" />
             </span>
-            <span class="pdfmgmt-file-name">
+            <span class="pdfmgmt-file-name file-card-main">
               <strong>{{ file.name }}</strong>
-              <small>{{ fileMetaLabel(file) }}</small>
+              <small class="file-meta-line">{{ fileMetaLabel(file) }}</small>
             </span>
             <span
               v-if="['uploading', 'queued', 'parsing', 'indexing'].includes(file.status)"
@@ -332,10 +336,10 @@ function deleteFromMenu(file: PdfManagedFile): void {
               ></span>
             </span>
           </button>
-          <div v-if="isAdmin" class="pdfmgmt-row-menu" @click.stop>
+          <div v-if="isAdmin" class="pdfmgmt-row-menu file-card-actions" @click.stop>
             <button
               type="button"
-              class="pdfmgmt-row-menu-trigger"
+              class="pdfmgmt-row-menu-trigger menu-trigger"
               :class="{ active: openActionMenuId === file.id }"
               :aria-label="`Actions for ${file.name}`"
               :aria-expanded="openActionMenuId === file.id"
@@ -343,7 +347,10 @@ function deleteFromMenu(file: PdfManagedFile): void {
             >
               <AppIcon name="more_vert" />
             </button>
-            <div v-if="openActionMenuId === file.id" class="pdfmgmt-row-menu-popover">
+            <div
+              v-if="openActionMenuId === file.id"
+              class="pdfmgmt-row-menu-popover item-action-menu file-card-menu"
+            >
               <button type="button" @click="renameFromMenu(file)">
                 <AppIcon name="edit" />
                 <span>Rename</span>
@@ -373,12 +380,17 @@ function deleteFromMenu(file: PdfManagedFile): void {
         </article>
       </div>
 
-      <div class="pdfmgmt-pagination">
-        <button type="button" :disabled="currentPage <= 1" @click="emit('pageStep', -1)">
+      <div class="pdfmgmt-pagination file-pagination">
+        <button
+          type="button"
+          class="pagination-link"
+          :disabled="currentPage <= 1"
+          @click="emit('pageStep', -1)"
+        >
           <AppIcon name="chevron_left" />
           Prev
         </button>
-        <div>
+        <div class="pagination-pages">
           <button
             v-for="page in visiblePages"
             :key="page"
@@ -389,7 +401,12 @@ function deleteFromMenu(file: PdfManagedFile): void {
             {{ page }}
           </button>
         </div>
-        <button type="button" :disabled="currentPage >= pageCount" @click="emit('pageStep', 1)">
+        <button
+          type="button"
+          class="pagination-link"
+          :disabled="currentPage >= pageCount"
+          @click="emit('pageStep', 1)"
+        >
           Next
           <AppIcon name="chevron_right" />
         </button>

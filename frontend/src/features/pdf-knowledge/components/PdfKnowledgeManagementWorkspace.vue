@@ -15,6 +15,7 @@ const emit = defineEmits<{
   changeMode: [mode: PdfWorkspaceMode]
   libraryChanged: []
   openDiagnostics: []
+  logout: []
 }>()
 
 const props = defineProps<{
@@ -80,6 +81,7 @@ function handleDeleteFile(file: PdfManagedFile): void {
       @change-mode="emit('changeMode', $event)"
       @open-diagnostics="emit('openDiagnostics')"
       @request-upload="openFolderPicker"
+      @logout="emit('logout')"
     />
 
     <PdfManagementTopbar

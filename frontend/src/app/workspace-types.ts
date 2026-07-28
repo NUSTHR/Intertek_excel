@@ -38,7 +38,7 @@ export interface SelectedCell {
 }
 
 export interface PrimaryNavItem {
-  key: PrimaryNavKey
+  id: PrimaryNavKey
   label: string
   icon: string
   disabled?: boolean

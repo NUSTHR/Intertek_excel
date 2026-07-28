@@ -5815,3 +5815,223 @@
     text-align: left;
   }
 }
+
+/* Shared Excel/PDF workspace alignment.
+   PDF keeps its domain-specific tree and citation layout while reusing the
+   Excel navigation, file-card, upload, pagination, and insight contracts. */
+.pdfmgmt {
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.pdfmgmt-sidebar.app-sidebar {
+  position: relative;
+  top: auto;
+  display: flex;
+  height: 100%;
+  padding: 24px 16px 16px;
+}
+
+.excelai-app.pdf-mode .pdfmgmt-sidebar.app-sidebar {
+  display: flex;
+}
+
+.pdfmgmt-sidebar .primary-nav {
+  gap: 4px;
+}
+
+.pdfmgmt-sidebar .nav-item {
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.pdfmgmt-sidebar .nav-item.active {
+  border-right: 0;
+  background: #eef2f7;
+  box-shadow: inset 3px 0 0 #0f172a;
+}
+
+.pdfmgmt-sidebar .sidebar-footer {
+  gap: 16px;
+  margin-top: auto;
+  padding-top: 16px;
+}
+
+.pdfmgmt-sidebar .pdfmgmt-user-card.user-mini {
+  margin: 0;
+}
+
+.pdfmgmt-upload-primary.sidebar-upload-button span {
+  font-size: 14px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.pdfmgmt-topbar.topbar.file-topbar {
+  height: 64px;
+  padding: 0 28px;
+}
+
+.pdfmgmt-topbar .file-search-field {
+  margin: 0;
+}
+
+.pdfmgmt-file-pane.file-sources-pane {
+  gap: 0;
+  padding: 24px;
+}
+
+.pdfmgmt-file-scroll.file-list-panel {
+  gap: 16px;
+  padding: 0;
+}
+
+.pdfmgmt .pdfmgmt-dropzone.file-upload-zone {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  align-content: center;
+  gap: 6px;
+  min-height: 132px;
+  margin: 0 0 16px;
+  padding: 20px 18px;
+  color: #0f172a;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.pdfmgmt .pdfmgmt-dropzone.file-upload-zone .pdfmgmt-dropzone-icon.file-upload-icon {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 4px;
+  color: #475569;
+  background: #e2e8f0;
+  font-size: 20px;
+}
+
+.pdfmgmt .pdfmgmt-dropzone.file-upload-zone strong {
+  color: #0f172a;
+  font-weight: 800;
+}
+
+.pdfmgmt .pdfmgmt-dropzone.file-upload-zone small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.pdfmgmt .pdfmgmt-file-row.file-library-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  min-height: 74px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.pdfmgmt .pdfmgmt-file-row.file-library-card:hover {
+  border-color: #cbd5e1;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgb(15 23 42 / 0.05);
+}
+
+.pdfmgmt .pdfmgmt-file-row.file-library-card.selected {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+  box-shadow: none;
+}
+
+.pdfmgmt .pdfmgmt-file-icon.file-badge.large {
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  color: #047857;
+  background: #ecfdf5;
+  font-size: 20px;
+}
+
+.pdfmgmt .file-library-card.selected .pdfmgmt-file-icon.file-badge.large {
+  color: #334155;
+  background: #e2e8f0;
+}
+
+.pdfmgmt .pdfmgmt-file-name.file-card-main strong {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.pdfmgmt .pdfmgmt-file-name .file-meta-line {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.pdfmgmt .pdfmgmt-pagination.file-pagination {
+  margin-top: auto;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 16px;
+}
+
+.pdfmgmt-insight-pane.file-insight-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.pdfmgmt-insight-pane .pdfmgmt-insight-tabs.file-insight-tabs {
+  flex: 0 0 52px;
+  gap: 2px;
+  padding: 0 22px;
+}
+
+.pdfmgmt-insight-pane .pdfmgmt-insight-scroll.file-insight-scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 20px 22px 24px;
+}
+
+.pdfkb-sidebar.excelai-side-nav {
+  min-width: 280px;
+  width: 280px;
+  min-height: 0;
+  max-height: none;
+  height: 100%;
+  padding: 24px;
+  border-right: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.pdfkb-sidebar.excelai-side-nav .pdfkb-brand-block {
+  margin: 0 0 40px;
+  padding: 0;
+}
+
+.pdfkb-sidebar.excelai-side-nav .pdfkb-sidebar-cta {
+  margin: 0 0 18px;
+  padding: 0;
+}
+
+.pdfkb-sidebar.excelai-side-nav .pdfkb-sidebar-footer {
+  display: grid;
+  flex: 0 0 auto;
+  margin-top: auto;
+  background: transparent;
+}
+
+.pdfkb-sidebar.excelai-side-nav .rail-system-links {
+  margin: 8px 0 24px;
+}
+
+.pdfkb-sidebar.excelai-side-nav .pdfkb-profile.chat-rail-user {
+  margin: 0;
+  border-top: 1px solid #e2e8f0;
+  padding: 24px 0 0;
+}
+
+.pdfkb-sidebar.excelai-side-nav .pdfkb-profile-avatar.avatar {
+  width: 36px;
+  height: 36px;
+}

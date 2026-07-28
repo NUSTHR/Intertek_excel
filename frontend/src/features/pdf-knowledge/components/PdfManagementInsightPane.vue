@@ -113,8 +113,8 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
 </script>
 
 <template>
-  <section class="pdfmgmt-insight-pane">
-    <header class="pdfmgmt-insight-tabs">
+  <section class="pdfmgmt-insight-pane file-insight-pane">
+    <header class="pdfmgmt-insight-tabs file-insight-tabs">
       <div>
         <button
           type="button"
@@ -138,17 +138,27 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
           Schema
         </button>
       </div>
-      <div class="pdfmgmt-insight-actions">
-        <button type="button" aria-label="Download unavailable" disabled>
+      <div class="pdfmgmt-insight-actions file-insight-tools">
+        <button
+          type="button"
+          class="icon-only-button"
+          aria-label="Download unavailable"
+          disabled
+        >
           <AppIcon name="download" />
         </button>
-        <button type="button" aria-label="Fullscreen unavailable" disabled>
+        <button
+          type="button"
+          class="icon-only-button"
+          aria-label="Fullscreen unavailable"
+          disabled
+        >
           <AppIcon name="fullscreen" />
         </button>
       </div>
     </header>
 
-    <div class="pdfmgmt-insight-scroll">
+    <div class="pdfmgmt-insight-scroll file-insight-scroll">
       <section class="pdfmgmt-panel">
         <button
           type="button"

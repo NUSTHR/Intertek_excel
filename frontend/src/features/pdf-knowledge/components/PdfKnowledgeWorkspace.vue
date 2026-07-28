@@ -16,17 +16,20 @@ import PdfKnowledgeManagementWorkspace from './PdfKnowledgeManagementWorkspace.v
 import PdfKnowledgeSidebar from './PdfKnowledgeSidebar.vue'
 import PdfSourceCitations from './PdfSourceCitations.vue'
 
-defineProps<{
+const props = defineProps<{
+  entryMode: PdfWorkspaceMode
   isAdmin: boolean
   userEmail: string
   userRoleLabel: string
 }>()
 
 const emit = defineEmits<{
+  openExcelChat: []
   openDiagnostics: []
+  logout: []
 }>()
 
-const workspaceMode = ref<PdfWorkspaceMode>('management')
+const workspaceMode = ref<PdfWorkspaceMode>(props.entryMode)
 const activeSidebarView = ref<PdfSidebarView>('knowledge')
 const isCitationPanelCollapsed = ref(false)
 const hasUserToggledCitationPanel = ref(false)
@@ -203,6 +206,7 @@ function toKnowledgeNode(file: PdfManagedFile, files: PdfManagedFile[]): PdfKnow
     @change-mode="changeWorkspaceMode"
     @library-changed="markKnowledgeTreeStale"
     @open-diagnostics="emit('openDiagnostics')"
+    @logout="emit('logout')"
   />
 
   <section
@@ -222,8 +226,10 @@ function toKnowledgeNode(file: PdfManagedFile, files: PdfManagedFile[]): PdfKnow
       @change-view="changeSidebarView"
       @new-chat="startNewChat"
       @open-chat="openChat"
+      @open-excel-chat="emit('openExcelChat')"
       @open-management="changeWorkspaceMode('management')"
       @select-context="selectChatContext"
+      @logout="emit('logout')"
     />
 
     <PdfChatWorkspace
