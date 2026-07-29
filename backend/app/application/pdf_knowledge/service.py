@@ -163,12 +163,14 @@ class PdfKnowledgeService:
         original_filename: str,
         content: bytes,
         relative_path: str | None = None,
+        parent_id: str | None = None,
     ) -> PdfUploadTask:
         return self._uploads.create_task(
             user_id=user_id,
             original_filename=original_filename,
             content=content,
             relative_path=relative_path,
+            parent_id=parent_id,
         )
 
     def create_upload_batch(
@@ -177,11 +179,13 @@ class PdfKnowledgeService:
         user_id: str,
         candidates: list[PdfUploadCandidate],
         source_name: str | None = None,
+        parent_id: str | None = None,
     ) -> PdfUploadBatchCreationResult:
         return self._uploads.create_batch(
             user_id=user_id,
             candidates=candidates,
             source_name=source_name,
+            parent_id=parent_id,
         )
 
     def get_upload_task(self, task_id: str, *, user_id: str) -> PdfUploadTask:

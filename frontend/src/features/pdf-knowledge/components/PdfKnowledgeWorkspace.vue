@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { listPdfKnowledgeFiles } from '../../../api/pdf-knowledge-api'
 import { usePdfChat } from '../composables/use-pdf-chat'
+import { buildPdfKnowledgeTree } from '../utils/pdf-tree'
 import type {
   PdfBreadcrumbItem,
   PdfKnowledgeNode,
@@ -40,7 +41,7 @@ const selectedContextId = ref('')
 const pdfChat = usePdfChat()
 
 const knowledgeTree = computed<PdfKnowledgeNode[]>(() => {
-  return buildKnowledgeTree(knowledgeFiles.value)
+  return buildPdfKnowledgeTree(knowledgeFiles.value)
 })
 
 const recentChats = computed<PdfRecentChat[]>(() => pdfChat.recentChats.value)
@@ -118,6 +119,9 @@ function toggleCitationPanel(): void {
 }
 
 async function changeWorkspaceMode(mode: PdfWorkspaceMode): Promise<void> {
+  if (mode === 'management') {
+    pdfChat.cancelActiveOperations()
+  }
   workspaceMode.value = mode
   if (mode === 'chat') {
     await refreshKnowledgeTreeIfNeeded()
@@ -146,6 +150,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  pdfChat.dispose()
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', syncCitationPanelWithViewport)
   }
@@ -178,23 +183,6 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'PDF sources failed to load.'
 }
 
-function buildKnowledgeTree(files: PdfManagedFile[]): PdfKnowledgeNode[] {
-  return files
-    .filter((file) => !file.parentId)
-    .map((file) => toKnowledgeNode(file, files))
-}
-
-function toKnowledgeNode(file: PdfManagedFile, files: PdfManagedFile[]): PdfKnowledgeNode {
-  const children = files
-    .filter((candidate) => candidate.parentId === file.id)
-    .map((candidate) => toKnowledgeNode(candidate, files))
-  return {
-    id: file.id,
-    name: file.name,
-    kind: file.kind === 'pdf' ? 'pdf' : file.kind === 'folder' ? 'folder' : 'table',
-    children: children.length ? children : undefined,
-  }
-}
 </script>
 
 <template>
@@ -219,6 +207,7 @@ function toKnowledgeNode(file: PdfManagedFile, files: PdfManagedFile[]): PdfKnow
       :error-message="knowledgeTreeError"
       :selected-context-id="selectedContextId"
       :is-admin="isAdmin"
+      :is-session-loading="pdfChat.isSessionLoading.value"
       :tree="knowledgeTree"
       :recent-chats="recentChats"
       :user-email="userEmail"

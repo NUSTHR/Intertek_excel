@@ -79,8 +79,6 @@ function selectFile(file: ExcelFile): void {
       <article
         v-for="file in files"
         :key="file.file_id"
-        role="button"
-        tabindex="0"
         class="file-library-card"
         :class="{
           selected: file.file_id === selectedFileId,
@@ -88,10 +86,14 @@ function selectFile(file: ExcelFile): void {
           'menu-open': openMenuFileId === file.file_id,
         }"
         :aria-disabled="disabled ? 'true' : undefined"
-        @click="selectFile(file)"
-        @keydown.enter.prevent="selectFile(file)"
-        @keydown.space.prevent="selectFile(file)"
       >
+        <button
+          type="button"
+          class="semantic-card-hitbox"
+          :disabled="disabled"
+          :aria-label="`Select ${file.display_name}`"
+          @click="selectFile(file)"
+        ></button>
         <span class="file-badge large"><AppIcon :name="fileIcon(file)" /></span>
         <span class="file-card-main">
           <strong>{{ file.display_name }}</strong>

@@ -2,7 +2,6 @@ from fastapi import APIRouter
 
 from app.api.routes.pdf.dependencies import (
     AdminDependency,
-    AuthenticatedDependency,
     PdfKnowledgeServiceDependency,
 )
 from app.api.routes.pdf.mappers import (
@@ -22,7 +21,7 @@ router = APIRouter()
 @router.get("/parser/status", response_model=PdfParserStatusResponse)
 def get_pdf_parser_status(
     service: PdfKnowledgeServiceDependency,
-    _user: AuthenticatedDependency,
+    _user: AdminDependency,
 ) -> PdfParserStatusResponse:
     status = service.get_parser_status()
     return PdfParserStatusResponse(
@@ -37,7 +36,7 @@ def get_pdf_parser_status(
 @router.get("/parser/profiles", response_model=ListPdfParserProfilesResponse)
 def list_pdf_parser_profiles(
     service: PdfKnowledgeServiceDependency,
-    _user: AuthenticatedDependency,
+    _user: AdminDependency,
 ) -> ListPdfParserProfilesResponse:
     return _parser_profiles_response(service.list_parser_profiles())
 

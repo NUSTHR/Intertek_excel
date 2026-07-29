@@ -3908,6 +3908,16 @@
   font-size: 12px;
 }
 
+.pdfmgmt-model-control {
+  min-width: 0;
+}
+
+.pdfmgmt-model-row select.pdfmgmt-field-invalid {
+  border-color: #dc2626;
+  background: #fff7f7;
+  box-shadow: 0 0 0 2px rgb(220 38 38 / 0.1);
+}
+
 .pdfmgmt-summary-body {
   gap: 16px;
   padding: 16px;
@@ -5881,6 +5891,10 @@
   padding: 24px;
 }
 
+.pdfmgmt-file-pane.file-sources-pane .pdfmgmt-file-table {
+  flex-shrink: 0;
+}
+
 .pdfmgmt-file-scroll.file-list-panel {
   gap: 16px;
   padding: 0;
@@ -5971,9 +5985,13 @@
 }
 
 .pdfmgmt .pdfmgmt-pagination.file-pagination {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
   margin-top: auto;
   border-top: 1px solid #e2e8f0;
   padding-top: 16px;
+  background: #ffffff;
 }
 
 .pdfmgmt-insight-pane.file-insight-pane {
@@ -6034,4 +6052,85 @@
 .pdfkb-sidebar.excelai-side-nav .pdfkb-profile-avatar.avatar {
   width: 36px;
   height: 36px;
+}
+
+/* Functional responsive overrides stay last so desktop alignment rules cannot
+   accidentally override the established mobile stacking behavior. */
+@media (max-width: 760px) {
+  .pdfmgmt {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .pdfmgmt .pdfmgmt-sidebar.app-sidebar {
+    grid-row: auto;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    padding: 18px;
+    border-right: 0;
+    border-bottom: 1px solid var(--pdfmgmt-border);
+  }
+
+  .pdfmgmt-topbar.topbar.file-topbar {
+    grid-row: auto;
+    height: auto;
+    padding: 14px 18px;
+  }
+
+  .pdfmgmt-main {
+    grid-row: auto;
+    min-width: 0;
+  }
+
+  .pdfmgmt .pdfmgmt-file-row.file-library-card {
+    grid-template-columns: 16px minmax(0, 1fr) 34px 30px;
+    gap: 8px;
+  }
+
+  .pdfmgmt .pdfmgmt-file-row.file-library-card .pdfmgmt-file-main {
+    display: grid;
+    grid-column: 2;
+    grid-row: 1;
+    grid-template-columns: 36px minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .pdfmgmt .pdfmgmt-file-row.file-library-card .pdfmgmt-file-check {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .pdfmgmt .pdfmgmt-file-row.file-library-card .pdfmgmt-row-menu {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .pdfmgmt .pdfmgmt-file-row.file-library-card .pdfmgmt-folder-open {
+    grid-column: 4;
+    grid-row: 1;
+  }
+}
+
+@media (max-width: 860px) {
+  .pdfkb,
+  .pdfkb.citation-panel-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+  }
+
+  .pdfkb-sidebar.excelai-side-nav {
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    max-height: 38vh;
+    padding: 18px;
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .pdfkb-sidebar.excelai-side-nav .pdfkb-brand-block {
+    margin-bottom: 16px;
+  }
 }

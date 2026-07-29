@@ -30,6 +30,7 @@ from app.application.pdf_knowledge.models import (
     PdfChunkSearchMatch,
     PdfCitation,
 )
+from app.core.llm_catalog import list_supported_llm_models
 from app.domain.models import (
     ChatSession,
     ChatTurn,
@@ -499,6 +500,10 @@ def to_pdf_model_setting_response(
         label=setting.label,
         providers=setting.providers,
         models=setting.models,
+        provider_models={
+            provider: list_supported_llm_models(provider)
+            for provider in setting.providers
+        },
         selected_provider=setting.selected_provider,
         selected_model=setting.selected_model,
     )

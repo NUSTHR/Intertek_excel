@@ -9,6 +9,7 @@ import type {
   PdfManagedFile,
   PdfManagementInsightTab,
   PdfModelSetting,
+  PdfModelSettingFieldErrors,
   PdfSummaryTask,
 } from '../types'
 
@@ -17,6 +18,7 @@ const props = defineProps<{
   activeTab: PdfManagementInsightTab
   contextTags: string[]
   modelSettings: PdfModelSetting[]
+  modelSettingErrors: Record<string, PdfModelSettingFieldErrors>
   selectedFile?: PdfManagedFile
   selectedFiles: PdfManagedFile[]
   summary: PdfDocumentSummary | null
@@ -72,6 +74,17 @@ const generateSummaryLabel = computed(() => {
   return props.summary?.status === 'ready' ? 'Regenerate' : 'Generate Summary'
 })
 const generateSummaryIcon = computed(() => (props.summary?.status === 'ready' ? 'refresh' : 'bolt'))
+const modelSettingError = (
+  settingId: string,
+  field: keyof PdfModelSettingFieldErrors,
+): string => props.modelSettingErrors[settingId]?.[field] ?? ''
+const hasModelSettingError = (settingId: string): boolean =>
+  Boolean(
+    modelSettingError(settingId, 'selectedProvider') ||
+      modelSettingError(settingId, 'selectedModel'),
+  )
+const isModelSupported = (setting: PdfModelSetting, model: string): boolean =>
+  setting.providerModels?.[setting.selectedProvider]?.includes(model) ?? false
 const summaryTaskResultLabel = computed(() => {
   const tasks = props.summaryTasks
   if (tasks.length === 0) {
@@ -180,40 +193,52 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
         <div v-if="isModelConfigOpen" class="pdfmgmt-model-grid">
           <div v-for="setting in modelSettings" :key="setting.id" class="pdfmgmt-model-row">
             <label>{{ setting.label }}</label>
-            <select
-              :value="setting.selectedProvider"
-              aria-label="Provider"
-              :disabled="!isAdmin"
-              @change="
-                emit(
-                  'modelSettingChange',
-                  setting.id,
-                  'selectedProvider',
-                  ($event.target as HTMLSelectElement).value,
-                )
-              "
-            >
-              <option v-for="provider in setting.providers" :key="provider" :value="provider">
-                {{ providerLabel(provider) }}
-              </option>
-            </select>
-            <select
-              :value="setting.selectedModel"
-              aria-label="Model"
-              :disabled="!isAdmin"
-              @change="
-                emit(
-                  'modelSettingChange',
-                  setting.id,
-                  'selectedModel',
-                  ($event.target as HTMLSelectElement).value,
-                )
-              "
-            >
-              <option v-for="model in setting.models" :key="model">
-                {{ model }}
-              </option>
-            </select>
+            <div class="pdfmgmt-model-control">
+              <select
+                :value="setting.selectedProvider"
+                aria-label="Provider"
+                :aria-invalid="hasModelSettingError(setting.id)"
+                :class="{ 'pdfmgmt-field-invalid': hasModelSettingError(setting.id) }"
+                :disabled="!isAdmin"
+                @change="
+                  emit(
+                    'modelSettingChange',
+                    setting.id,
+                    'selectedProvider',
+                    ($event.target as HTMLSelectElement).value,
+                  )
+                "
+              >
+                <option v-for="provider in setting.providers" :key="provider" :value="provider">
+                  {{ providerLabel(provider) }}
+                </option>
+              </select>
+            </div>
+            <div class="pdfmgmt-model-control">
+              <select
+                :value="setting.selectedModel"
+                aria-label="Model"
+                :aria-invalid="hasModelSettingError(setting.id)"
+                :class="{ 'pdfmgmt-field-invalid': hasModelSettingError(setting.id) }"
+                :disabled="!isAdmin"
+                @change="
+                  emit(
+                    'modelSettingChange',
+                    setting.id,
+                    'selectedModel',
+                    ($event.target as HTMLSelectElement).value,
+                  )
+                "
+              >
+                <option
+                  v-for="model in setting.models"
+                  :key="model"
+                  :disabled="!isModelSupported(setting, model)"
+                >
+                  {{ model }}
+                </option>
+              </select>
+            </div>
           </div>
         </div>
       </section>

@@ -1,4 +1,5 @@
 import { getAuthToken, getCsrfToken } from './auth-token'
+import { publishSessionExpired } from './session-events'
 
 export interface ApiErrorPayload {
   detail?: string
@@ -29,6 +30,7 @@ export interface RequestOptions {
   apiBaseUrl?: string
   abortMessage?: string
   signal?: AbortSignal
+  suppressSessionExpiredEvent?: boolean
   timeoutMs?: number
   timeoutMessage?: string
 }
@@ -82,6 +84,9 @@ async function request(
     })
     if (!response.ok) {
       const payload = await parseErrorPayload(response)
+      if (response.status === 401 && !options.suppressSessionExpiredEvent) {
+        publishSessionExpired()
+      }
       throw new ExcelWorkspaceApiError(
         payload.detail || `Request failed with status ${response.status}.`,
         response.status,
@@ -103,13 +108,13 @@ async function request(
     }
     if (error instanceof TypeError) {
       throw new ExcelWorkspaceApiError(
-        'Unable to reach the Excel backend. Check whether it is running.',
+        'Unable to reach the workspace backend. Check whether it is running.',
       )
     }
     if (error instanceof Error) {
       throw new ExcelWorkspaceApiError(error.message)
     }
-    throw new ExcelWorkspaceApiError('Network error. Check whether the Excel backend is running.')
+    throw new ExcelWorkspaceApiError('Network error. Check whether the workspace backend is running.')
   } finally {
     window.clearTimeout(timeoutId)
     externalSignal?.removeEventListener('abort', abortFromCaller)

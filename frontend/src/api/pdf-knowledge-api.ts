@@ -1,4 +1,4 @@
-import { defaultRequestOptions } from './config'
+import { chatRequestOptions, defaultRequestOptions } from './config'
 import { requestEmpty, requestJson } from './errors'
 import type {
   PdfAnswerBlock,
@@ -373,6 +373,7 @@ interface PdfModelSettingResponse {
   label: string
   providers: string[]
   models: string[]
+  provider_models?: Record<string, string[]>
   selected_provider: string
   selected_model: string
 }
@@ -419,9 +420,9 @@ export async function setPdfFileVisibility(
   return toManagedFile(response)
 }
 
-export async function deletePdfFile(fileId: string): Promise<void> {
+export async function deletePdfFile(fileId: string, confirmDelete = false): Promise<void> {
   await requestJson<unknown>(
-    `/api/pdf/files/${encodeURIComponent(fileId)}?confirm_delete=true`,
+    `/api/pdf/files/${encodeURIComponent(fileId)}?confirm_delete=${String(confirmDelete)}`,
     { method: 'DELETE' },
     defaultRequestOptions,
   )
@@ -497,8 +498,14 @@ export async function getPdfUploadBatch(batchId: string): Promise<PdfUploadCreat
   }
 }
 
-export async function createPdfUploadTask(files: File[]): Promise<PdfUploadCreationResult> {
+export async function createPdfUploadTask(
+  files: File[],
+  parentId?: string,
+): Promise<PdfUploadCreationResult> {
   const body = new FormData()
+  if (parentId?.trim()) {
+    body.append('parent_id', parentId.trim())
+  }
   files.forEach((file) => {
     body.append('files', file, uploadPathForFile(file))
   })
@@ -680,6 +687,7 @@ export async function answerPdfQuestion(options: {
   fileIds?: string[]
   retrievalLimit?: number
   enableDeepThinking?: boolean
+  signal?: AbortSignal
 }): Promise<PdfChatAnswer> {
   const path = options.sessionId
     ? `/api/pdf/chat/sessions/${encodeURIComponent(options.sessionId)}/messages`
@@ -697,37 +705,52 @@ export async function answerPdfQuestion(options: {
       }),
     },
     {
-      ...defaultRequestOptions,
-      timeoutMs: Math.max(defaultRequestOptions.timeoutMs ?? 30000, 120000),
-      timeoutMessage: 'PDF answer generation is still running. Please try again shortly.',
+      ...chatRequestOptions,
+      abortMessage: 'PDF chat request cancelled.',
+      signal: options.signal,
     },
   )
   return toPdfChatAnswer(response)
 }
 
-export async function createPdfChatSession(): Promise<PdfChatSession> {
+export async function createPdfChatSession(signal?: AbortSignal): Promise<PdfChatSession> {
   const response = await requestJson<PdfChatSessionResponse>(
     '/api/pdf/chat/sessions',
     { method: 'POST' },
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      abortMessage: 'PDF chat session request cancelled.',
+      signal,
+    },
   )
   return toPdfChatSession(response)
 }
 
-export async function listPdfChatSessions(): Promise<PdfChatSession[]> {
+export async function listPdfChatSessions(signal?: AbortSignal): Promise<PdfChatSession[]> {
   const response = await requestJson<PdfChatSessionListResponse>(
     '/api/pdf/chat/sessions',
     {},
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      abortMessage: 'PDF chat session request cancelled.',
+      signal,
+    },
   )
   return response.sessions.map(toPdfChatSession)
 }
 
-export async function listPdfChatSessionTurns(sessionId: string): Promise<PdfChatTurn[]> {
+export async function listPdfChatSessionTurns(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<PdfChatTurn[]> {
   const response = await requestJson<PdfChatTurnListResponse>(
     `/api/pdf/chat/sessions/${encodeURIComponent(sessionId)}/turns`,
     {},
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      abortMessage: 'PDF chat history request cancelled.',
+      signal,
+    },
   )
   return response.turns.map(toPdfChatTurn)
 }
@@ -815,6 +838,8 @@ function toManagedFile(file: PdfFileResponse): PdfManagedFile {
     parentId: file.parent_id ?? undefined,
     kind: file.kind,
     name: file.display_name || file.original_filename,
+    createdAt: file.created_at,
+    updatedAt: file.updated_at,
     modifiedLabel: formatDateLabel(file.updated_at),
     sizeLabel: file.kind === 'folder' ? 'Folder' : formatBytes(file.size_bytes),
     status: normalizeManagedStatus(file.processing_status),
@@ -1173,6 +1198,7 @@ function toModelSetting(setting: PdfModelSettingResponse): PdfModelSetting {
     label: setting.label,
     providers: setting.providers,
     models: setting.models,
+    providerModels: setting.provider_models ?? {},
     selectedProvider: setting.selected_provider,
     selectedModel: setting.selected_model,
   }

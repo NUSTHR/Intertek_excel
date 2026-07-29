@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import type {
@@ -41,6 +41,8 @@ const emit = defineEmits<{
 
 const isDirectoryTreeOpen = ref(false)
 const openActionMenuId = ref('')
+const directoryOverlay = ref<HTMLElement | null>(null)
+const directoryTrigger = ref<HTMLButtonElement | null>(null)
 
 function iconForFileKind(kind: PdfManagedFileKind): string {
   if (kind === 'folder') {
@@ -141,10 +143,16 @@ function fileMetaLabel(file: PdfManagedFile): string {
 
 function openDirectoryTree(): void {
   isDirectoryTreeOpen.value = true
+  void nextTick(() => {
+    focusFirstDirectoryControl()
+  })
 }
 
-function closeDirectoryTree(): void {
+function closeDirectoryTree(restoreFocus = true): void {
   isDirectoryTreeOpen.value = false
+  if (restoreFocus) {
+    void nextTick(() => directoryTrigger.value?.focus())
+  }
 }
 
 function handleDirectoryScopeSelect(scopeId: string): void {
@@ -180,20 +188,105 @@ function deleteFromMenu(file: PdfManagedFile): void {
   emit('deleteFile', file)
 }
 
+function handleDocumentPointerDown(event: PointerEvent): void {
+  if (isDirectoryTreeOpen.value) {
+    const target = event.target
+    if (
+      target instanceof Node &&
+      !directoryOverlay.value?.contains(target) &&
+      !directoryTrigger.value?.contains(target)
+    ) {
+      closeDirectoryTree(false)
+    }
+  }
+  if (!openActionMenuId.value) {
+    return
+  }
+  const target = event.target
+  if (
+    target instanceof Element &&
+    target.closest('.item-action-menu, .menu-trigger')
+  ) {
+    return
+  }
+  closeActionMenu()
+}
+
+function handleDocumentKeyDown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    if (isDirectoryTreeOpen.value) {
+      event.preventDefault()
+      closeDirectoryTree()
+      return
+    }
+    closeActionMenu()
+    return
+  }
+  if (event.key === 'Tab' && isDirectoryTreeOpen.value) {
+    trapDirectoryFocus(event)
+  }
+}
+
+function focusableDirectoryControls(): HTMLElement[] {
+  if (!directoryOverlay.value) {
+    return []
+  }
+  return Array.from(
+    directoryOverlay.value.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    ),
+  )
+}
+
+function focusFirstDirectoryControl(): void {
+  focusableDirectoryControls()[0]?.focus()
+}
+
+function trapDirectoryFocus(event: KeyboardEvent): void {
+  const controls = focusableDirectoryControls()
+  if (controls.length === 0) {
+    event.preventDefault()
+    directoryOverlay.value?.focus()
+    return
+  }
+  const first = controls[0]
+  const last = controls.at(-1)
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first?.focus()
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+  document.addEventListener('keydown', handleDocumentKeyDown)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown)
+  document.removeEventListener('keydown', handleDocumentKeyDown)
+})
+
 </script>
 
 <template>
   <section class="pdfmgmt-file-pane file-sources-pane">
     <div
+      ref="directoryOverlay"
       class="pdfmgmt-directory-overlay"
       :class="{ open: isDirectoryTreeOpen }"
       role="dialog"
       aria-label="Directory Tree"
+      aria-modal="true"
       :aria-hidden="!isDirectoryTreeOpen"
+      :tabindex="isDirectoryTreeOpen ? 0 : -1"
     >
       <header class="pdfmgmt-directory-overlay-header">
         <strong>Directory Tree</strong>
-        <button type="button" aria-label="Close directory tree" @click="closeDirectoryTree">
+        <button type="button" aria-label="Close directory tree" @click="closeDirectoryTree()">
           <AppIcon name="close" />
         </button>
       </header>
@@ -213,7 +306,10 @@ function deleteFromMenu(file: PdfManagedFile): void {
       </footer>
     </div>
 
-    <div class="pdfmgmt-file-scroll file-list-panel">
+    <div
+      class="pdfmgmt-file-scroll file-list-panel"
+      :inert="isDirectoryTreeOpen ? true : undefined"
+    >
       <div class="pdfmgmt-breadcrumb-row panel-heading">
         <div class="pdfmgmt-breadcrumb-group">
           <nav aria-label="Knowledge path">
@@ -235,6 +331,7 @@ function deleteFromMenu(file: PdfManagedFile): void {
             </template>
           </nav>
           <button
+            ref="directoryTrigger"
             type="button"
             class="pdfmgmt-directory-trigger"
             aria-label="View directory tree"
@@ -257,8 +354,8 @@ function deleteFromMenu(file: PdfManagedFile): void {
           <AppIcon name="upload_file" />
         </span>
         <span>
-          <strong>{{ isUploading ? 'Preparing upload tasks...' : 'Choose a PDF folder to upload' }}</strong>
-          <small>Folder upload / Max 50MB per PDF</small>
+          <strong>{{ isUploading ? 'Preparing upload tasks...' : 'Choose PDF files to upload' }}</strong>
+          <small>Uploads to {{ scopeBreadcrumbs.at(-1)?.label ?? 'Knowledge Base' }} / Max 50MB per PDF</small>
         </span>
       </button>
 

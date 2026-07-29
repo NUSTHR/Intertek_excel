@@ -384,6 +384,7 @@ class PdfModelSettingResponse(BaseModel):
     label: str
     providers: list[str] = Field(default_factory=list)
     models: list[str] = Field(default_factory=list)
+    provider_models: dict[str, list[str]] = Field(default_factory=dict)
     selected_provider: str
     selected_model: str
 

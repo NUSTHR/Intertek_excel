@@ -16,6 +16,7 @@ import {
 } from '../api/excel-assets-api'
 import { getCurrentUser, logout as logoutSession } from '../api/auth-api'
 import { clearAuthToken } from '../api/auth-token'
+import { subscribeToSessionExpired } from '../api/session-events'
 import {
   generateDocumentSummary,
   getDocumentSummary,
@@ -232,6 +233,7 @@ let sheetSearchRequestId = 0
 let previewAbortController: AbortController | null = null
 let sheetSearchAbortController: AbortController | null = null
 let rowLookupAbortController: AbortController | null = null
+let unsubscribeFromSessionExpired: (() => void) | null = null
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -454,7 +456,9 @@ onMounted(() => {
   }
   if (typeof document !== 'undefined') {
     document.addEventListener('pointerdown', handleDocumentPointerDown)
+    document.addEventListener('keydown', handleDocumentKeyDown)
   }
+  unsubscribeFromSessionExpired = subscribeToSessionExpired(handleSessionExpired)
   void restoreAuthentication()
 })
 
@@ -464,7 +468,10 @@ onBeforeUnmount(() => {
   }
   if (typeof document !== 'undefined') {
     document.removeEventListener('pointerdown', handleDocumentPointerDown)
+    document.removeEventListener('keydown', handleDocumentKeyDown)
   }
+  unsubscribeFromSessionExpired?.()
+  unsubscribeFromSessionExpired = null
   clearOperationFeedback()
   clearChatSessionFeedback()
   stopChatResize()
@@ -485,13 +492,23 @@ async function initializeWorkspace(): Promise<void> {
   if (!currentUser.value) {
     return
   }
-  if (!isAdmin.value && activeView.value === 'files') {
-    setActiveView('chat')
+  if (!isAdmin.value && (activeView.value === 'files' || activeView.value === 'pdf-diagnostics')) {
+    setActiveView('chat', true)
   }
-  await loadWorkspaceConfig()
-  await loadLlmModelOptions()
-  await loadChatSessions()
-  await refreshFiles()
+  await Promise.allSettled([
+    loadWorkspaceConfig(),
+    loadLlmModelOptionsSafely(),
+    loadChatSessions(),
+    refreshFiles(),
+  ])
+}
+
+async function loadLlmModelOptionsSafely(): Promise<void> {
+  try {
+    await loadLlmModelOptions()
+  } catch (error: unknown) {
+    showWorkspaceError(error)
+  }
 }
 
 async function loadWorkspaceConfig(): Promise<void> {
@@ -512,7 +529,6 @@ async function restoreAuthentication(): Promise<void> {
   isAuthChecking.value = true
   try {
     currentUser.value = await getCurrentUser()
-    await initializeWorkspace()
   } catch (error: unknown) {
     clearAuthToken()
     currentUser.value = null
@@ -522,6 +538,19 @@ async function restoreAuthentication(): Promise<void> {
   } finally {
     isAuthChecking.value = false
   }
+  if (currentUser.value) {
+    await initializeWorkspace()
+  }
+}
+
+function handleSessionExpired(): void {
+  if (!currentUser.value) {
+    return
+  }
+  clearAuthToken()
+  currentUser.value = null
+  authErrorMessage.value = 'Your session has expired. Please sign in again.'
+  void resetWorkspaceState()
 }
 
 async function handleAuthenticated(response: AuthResponse): Promise<void> {
@@ -563,9 +592,12 @@ async function resetWorkspaceState(): Promise<void> {
   closeActionMenus()
 }
 
-function setActiveView(view: ActiveView): void {
-  if (view === 'files' && !isAdmin.value) {
+function setActiveView(view: ActiveView, replaceHistory = false): void {
+  if ((view === 'files' || view === 'pdf-diagnostics') && !isAdmin.value) {
     activeView.value = 'chat'
+    if (typeof window !== 'undefined' && window.location.hash !== activeViewHash('chat')) {
+      window.history.replaceState(null, '', activeViewHash('chat'))
+    }
     return
   }
   closeActionMenus()
@@ -573,8 +605,9 @@ function setActiveView(view: ActiveView): void {
     isFileInsightFullscreen.value = false
   }
   activeView.value = view
-  if (typeof window !== 'undefined') {
-    window.history.replaceState(null, '', activeViewHash(view))
+  if (typeof window !== 'undefined' && window.location.hash !== activeViewHash(view)) {
+    const method = replaceHistory ? 'replaceState' : 'pushState'
+    window.history[method](null, '', activeViewHash(view))
   }
 }
 
@@ -604,8 +637,8 @@ function syncActiveViewFromLocation(): void {
     return
   }
   const nextView = activeViewFromHash(window.location.hash)
-  if (nextView === 'files' && !isAdmin.value) {
-    setActiveView('chat')
+  if ((nextView === 'files' || nextView === 'pdf-diagnostics') && !isAdmin.value) {
+    setActiveView('chat', true)
     return
   }
   if (activeView.value === nextView) {
@@ -654,6 +687,12 @@ function handleDocumentPointerDown(event: PointerEvent): void {
     return
   }
   closeActionMenus()
+}
+
+function handleDocumentKeyDown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    closeActionMenus()
+  }
 }
 
 function isActionMenuTarget(target: EventTarget | null): boolean {
@@ -1699,6 +1738,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
   </div>
   <AuthPanel
     v-else-if="!currentUser"
+    :external-error-message="authErrorMessage"
     @authenticated="handleAuthenticated"
   />
   <main
@@ -1750,10 +1790,15 @@ function getGridCellValue(row: string[], columnIndex: number): string {
         <template v-if="activeView === 'files'">
           <label class="search-field file-search-field">
             <span class="search-icon"><AppIcon name="search" /></span>
-            <input v-model="fileSearchTerm" type="search" placeholder="Search files..." />
+              <input
+                v-model="fileSearchTerm"
+                type="search"
+                aria-label="Search files"
+                placeholder="Search files..."
+              />
           </label>
           <div class="file-topbar-meta">
-            <strong>File Workspace</strong>
+            <strong class="workspace-topbar-title">Excel Workspace</strong>
             <span class="topbar-divider"></span>
             <button
               type="button"
@@ -1788,6 +1833,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
               <input
                 v-model="documentSearchTerm"
                 type="search"
+                aria-label="Search documents"
                 placeholder="Search documents..."
               />
             </label>
@@ -1986,17 +2032,18 @@ function getGridCellValue(row: string[], columnIndex: number): string {
             <article
               v-for="session in chatSessions"
               :key="session.session_id"
-              role="button"
-              tabindex="0"
               class="chat-session-item"
               :class="{
                 active: session.session_id === activeChatSessionId,
                 pinned: Boolean(session.pinned_at),
               }"
-              @click="selectChatSession(session)"
-              @keydown.enter.prevent="selectChatSession(session)"
-              @keydown.space.prevent="selectChatSession(session)"
             >
+              <button
+                type="button"
+                class="semantic-card-hitbox"
+                :aria-label="`Open chat ${session.title}`"
+                @click="selectChatSession(session)"
+              ></button>
               <span class="session-glyph">
                 <AppIcon name="chat_bubble" />
               </span>
@@ -2294,6 +2341,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
       role="dialog"
       aria-modal="true"
       aria-labelledby="rename-dialog-title"
+      @click.self="cancelDialog"
       @keydown.esc="cancelDialog"
     >
       <form class="app-dialog" @submit.prevent="submitRenameDialog">
@@ -2308,7 +2356,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
         </div>
         <label class="dialog-field">
           <span>Name</span>
-          <input v-model="renameDraft" type="text" autocomplete="off" />
+          <input v-model="renameDraft" type="text" autocomplete="off" autofocus />
         </label>
         <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
         <div class="dialog-actions">
@@ -2330,6 +2378,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
+      @click.self="cancelDialog"
       @keydown.esc="cancelDialog"
     >
       <div class="app-dialog">
@@ -2355,6 +2404,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
           <button
             type="button"
             class="dialog-danger"
+            autofocus
             :disabled="isWorkspaceBusy || isChatSessionLoading"
             @click="
               confirmDialog.kind === 'file'

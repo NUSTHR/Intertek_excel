@@ -9,6 +9,7 @@ import {
   renamePdfChatSession,
   setPdfChatSessionPinned,
 } from '../../../api/pdf-knowledge-api'
+import { createRequestCoordinator } from '../../../app/composables/use-request-coordinator'
 import type {
   PdfChatAnswer,
   PdfChatMessage,
@@ -28,7 +29,11 @@ export function usePdfChat() {
   const selectedContextFileIds = ref<string[]>([])
   const enableDeepThinking = ref(false)
   const isAnswering = ref(false)
+  const isSessionLoading = ref(false)
   const errorMessage = ref('')
+  const answerRequests = createRequestCoordinator()
+  const sessionNavigationRequests = createRequestCoordinator()
+  const sessionListRequests = createRequestCoordinator()
 
   const recentChats = computed<PdfRecentChat[]>(() => {
     return sessions.value.map((session) => ({
@@ -52,7 +57,12 @@ export function usePdfChat() {
   })
 
   function setContextFileIds(fileIds: string[]): void {
-    selectedContextFileIds.value = dedupeFileIds(fileIds)
+    const nextFileIds = dedupeFileIds(fileIds)
+    if (sameFileIds(nextFileIds, selectedContextFileIds.value)) {
+      return
+    }
+    cancelAnswer()
+    selectedContextFileIds.value = nextFileIds
     citations.value = []
   }
 
@@ -68,8 +78,8 @@ export function usePdfChat() {
     if (!normalizedQuestion || isAnswering.value) {
       return
     }
-    errorMessage.value = ''
-    messages.value = [
+    const request = answerRequests.begin()
+    const requestMessages: PdfChatMessage[] = [
       ...messages.value,
       {
         id: newMessageId('user'),
@@ -77,29 +87,49 @@ export function usePdfChat() {
         content: normalizedQuestion,
       },
     ]
+    const requestContextFileIds = [...selectedContextFileIds.value]
+    const requestDeepThinking = enableDeepThinking.value
+    let requestSessionId = activeSessionId.value
+    errorMessage.value = ''
+    messages.value = requestMessages
     isAnswering.value = true
     try {
-      const session = activeSessionId.value
+      const session = requestSessionId
         ? undefined
-        : await createPdfChatSession()
+        : await createPdfChatSession(request.signal)
+      if (!request.isCurrent()) {
+        return
+      }
       if (session) {
-        activeSessionId.value = session.sessionId
-        sessions.value = [session, ...sessions.value]
+        requestSessionId = session.sessionId
+        activeSessionId.value = requestSessionId
+        upsertSession(session)
       }
       const answer = await answerPdfQuestion({
         question: normalizedQuestion,
-        sessionId: activeSessionId.value || undefined,
-        fileIds: selectedContextFileIds.value,
+        sessionId: requestSessionId || undefined,
+        fileIds: requestContextFileIds,
         retrievalLimit: defaultRetrievalLimit,
-        enableDeepThinking: enableDeepThinking.value,
+        enableDeepThinking: requestDeepThinking,
+        signal: request.signal,
       })
+      if (
+        !request.isCurrent() ||
+        activeSessionId.value !== requestSessionId ||
+        !sameFileIds(selectedContextFileIds.value, requestContextFileIds)
+      ) {
+        return
+      }
       citations.value = toSourceCitations(answer)
-      messages.value = [...messages.value, toAssistantMessage(answer)]
+      messages.value = [...requestMessages, toAssistantMessage(answer)]
     } catch (error: unknown) {
+      if (!request.isCurrent()) {
+        return
+      }
       const message = toErrorMessage(error)
       errorMessage.value = message
       messages.value = [
-        ...messages.value,
+        ...requestMessages,
         {
           id: newMessageId('assistant'),
           role: 'assistant',
@@ -108,34 +138,74 @@ export function usePdfChat() {
         },
       ]
     } finally {
-      isAnswering.value = false
+      if (request.isCurrent()) {
+        isAnswering.value = false
+      }
     }
   }
 
   async function loadSessions(): Promise<void> {
+    const request = sessionListRequests.begin()
     try {
-      sessions.value = await listPdfChatSessions()
+      const nextSessions = await listPdfChatSessions(request.signal)
+      if (request.isCurrent()) {
+        sessions.value = nextSessions
+      }
     } catch (error: unknown) {
-      errorMessage.value = toErrorMessage(error)
+      if (request.isCurrent()) {
+        errorMessage.value = toErrorMessage(error)
+      }
     }
   }
 
   async function startNewChat(): Promise<void> {
-    const session = await createPdfChatSession()
-    sessions.value = [session, ...sessions.value.filter((item) => item.sessionId !== session.sessionId)]
-    activeSessionId.value = session.sessionId
-    messages.value = []
-    citations.value = []
+    cancelAnswer()
+    const request = sessionNavigationRequests.begin()
     errorMessage.value = ''
+    isSessionLoading.value = true
+    try {
+      const session = await createPdfChatSession(request.signal)
+      if (!request.isCurrent()) {
+        return
+      }
+      upsertSession(session)
+      activeSessionId.value = session.sessionId
+      messages.value = []
+      citations.value = []
+    } catch (error: unknown) {
+      if (request.isCurrent()) {
+        errorMessage.value = toErrorMessage(error)
+      }
+    } finally {
+      if (request.isCurrent()) {
+        isSessionLoading.value = false
+      }
+    }
   }
 
   async function openSession(sessionId: string): Promise<void> {
-    const turns = await listPdfChatSessionTurns(sessionId)
-    activeSessionId.value = sessionId
-    messages.value = turns.flatMap(toMessagesFromTurn)
-    const lastAnswer = turns.at(-1)?.answer
-    citations.value = lastAnswer ? toSourceCitations(lastAnswer) : []
+    cancelAnswer()
+    const request = sessionNavigationRequests.begin()
     errorMessage.value = ''
+    isSessionLoading.value = true
+    try {
+      const turns = await listPdfChatSessionTurns(sessionId, request.signal)
+      if (!request.isCurrent()) {
+        return
+      }
+      activeSessionId.value = sessionId
+      messages.value = turns.flatMap(toMessagesFromTurn)
+      const lastAnswer = turns.at(-1)?.answer
+      citations.value = lastAnswer ? toSourceCitations(lastAnswer) : []
+    } catch (error: unknown) {
+      if (request.isCurrent()) {
+        errorMessage.value = toErrorMessage(error)
+      }
+    } finally {
+      if (request.isCurrent()) {
+        isSessionLoading.value = false
+      }
+    }
   }
 
   async function renameSession(sessionId: string, title: string): Promise<void> {
@@ -165,10 +235,36 @@ export function usePdfChat() {
   }
 
   function clearChat(): void {
+    cancelAnswer()
+    sessionNavigationRequests.cancel()
+    isSessionLoading.value = false
     activeSessionId.value = ''
     messages.value = []
     citations.value = []
     errorMessage.value = ''
+  }
+
+  function cancelAnswer(): void {
+    answerRequests.cancel()
+    isAnswering.value = false
+  }
+
+  function cancelActiveOperations(): void {
+    cancelAnswer()
+    sessionNavigationRequests.cancel()
+    isSessionLoading.value = false
+  }
+
+  function dispose(): void {
+    cancelActiveOperations()
+    sessionListRequests.cancel()
+  }
+
+  function upsertSession(session: PdfChatSession): void {
+    sessions.value = [
+      session,
+      ...sessions.value.filter((item) => item.sessionId !== session.sessionId),
+    ]
   }
 
   return {
@@ -181,6 +277,7 @@ export function usePdfChat() {
     enableDeepThinking,
     breadcrumbs,
     isAnswering,
+    isSessionLoading,
     errorMessage,
     setContextFileIds,
     toggleDeepThinking,
@@ -192,6 +289,8 @@ export function usePdfChat() {
     deleteSession,
     sendQuestion,
     clearChat,
+    cancelActiveOperations,
+    dispose,
   }
 }
 
@@ -257,6 +356,10 @@ function dedupeFileIds(fileIds: string[]): string[] {
     result.push(normalized)
   }
   return result
+}
+
+function sameFileIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((fileId, index) => fileId === right[index])
 }
 
 function toErrorMessage(error: unknown): string {

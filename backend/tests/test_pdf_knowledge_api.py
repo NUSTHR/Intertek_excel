@@ -33,6 +33,7 @@ from app.application.pdf_knowledge import (
 from app.application.pdf_knowledge.chat import PdfChatService
 from app.application.pdf_knowledge.retrieval import PdfRetrievalService
 from app.core.config import Settings
+from app.core.errors import AuthorizationError
 from app.core.llm_catalog import (
     DEFAULT_ANSWER_MODEL,
     DEFAULT_ANSWER_PROVIDER,
@@ -282,6 +283,73 @@ def test_pdf_folder_upload_creates_batch_and_preserves_hierarchy(client: TestCli
     files = files_response.json()["files"]
     folders = {file["display_name"] for file in files if file["kind"] == "folder"}
     assert {"root", "a", "b"}.issubset(folders)
+
+
+def test_pdf_upload_places_single_file_in_selected_folder(client: TestClient) -> None:
+    _upload_pdf(client, filename="target/seed.pdf")
+    files = client.get("/api/pdf/files").json()["files"]
+    target_folder = _find_pdf_file(files, name="target", kind="folder")
+
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        data={"parent_id": target_folder["file_id"]},
+        files=[
+            ("files", ("test.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+
+    assert response.status_code == 202
+    uploaded_file_id = response.json()["tasks"][0]["file_id"]
+    uploaded_files = client.get("/api/pdf/files").json()["files"]
+    uploaded_file = next(
+        file for file in uploaded_files if file["file_id"] == uploaded_file_id
+    )
+    assert uploaded_file["display_name"] == "test.pdf"
+    assert uploaded_file["parent_id"] == target_folder["file_id"]
+
+
+def test_pdf_folder_upload_is_nested_under_selected_folder(client: TestClient) -> None:
+    _upload_pdf(client, filename="target/seed.pdf")
+    files = client.get("/api/pdf/files").json()["files"]
+    target_folder = _find_pdf_file(files, name="target", kind="folder")
+
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        data={"parent_id": target_folder["file_id"]},
+        files=[
+            ("files", ("test_pdf/test.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+
+    assert response.status_code == 202
+    uploaded_files = client.get("/api/pdf/files").json()["files"]
+    nested_folder = next(
+        file
+        for file in uploaded_files
+        if file["display_name"] == "test_pdf"
+        and file["kind"] == "folder"
+        and file["parent_id"] == target_folder["file_id"]
+    )
+    uploaded_file_id = response.json()["tasks"][0]["file_id"]
+    uploaded_file = next(
+        file for file in uploaded_files if file["file_id"] == uploaded_file_id
+    )
+    assert uploaded_file["parent_id"] == nested_folder["file_id"]
+
+
+def test_pdf_upload_rejects_non_folder_target(client: TestClient) -> None:
+    file_id = _upload_pdf(client, filename="not-a-folder.pdf")
+
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        data={"parent_id": file_id},
+        files=[
+            ("files", ("test.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "target PDF folder was not found"
 
 
 def test_pdf_folder_upload_reuses_existing_folder_nodes(client: TestClient) -> None:
@@ -618,6 +686,21 @@ def test_pdf_parser_status_is_exposed(client: TestClient) -> None:
         "version": None,
         "detail": "Fake parser for API tests.",
     }
+
+
+def test_pdf_parser_diagnostics_require_admin_access(client: TestClient) -> None:
+    def deny_admin_access() -> AuthenticatedUser:
+        raise AuthorizationError("administrator access is required")
+
+    app.dependency_overrides[require_admin_user] = deny_admin_access
+    try:
+        status_response = client.get("/api/pdf/parser/status")
+        profiles_response = client.get("/api/pdf/parser/profiles")
+    finally:
+        app.dependency_overrides[require_admin_user] = admin_user
+
+    assert status_response.status_code == 403
+    assert profiles_response.status_code == 403
 
 
 def test_pdf_parser_profiles_can_be_selected(
@@ -1421,6 +1504,10 @@ def test_pdf_model_settings_can_be_listed_and_updated(client: TestClient) -> Non
         for provider in list_supported_llm_provider_options()
     ]
     assert settings[0]["models"] == list_supported_llm_models()
+    assert settings[0]["provider_models"] == {
+        provider["provider"]: provider["models"]
+        for provider in list_supported_llm_provider_options()
+    }
     assert settings[0]["selected_provider"] == DEFAULT_SUMMARY_PROVIDER
     assert settings[0]["selected_model"] == DEFAULT_SUMMARY_MODEL
     assert settings[1]["selected_provider"] == DEFAULT_ROUTER_PROVIDER

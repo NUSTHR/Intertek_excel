@@ -110,6 +110,8 @@ export interface PdfManagedFile {
   parentId?: string
   kind: PdfManagedFileKind
   name: string
+  createdAt: string
+  updatedAt: string
   modifiedLabel: string
   sizeLabel: string
   status: PdfManagedFileStatus
@@ -210,8 +212,14 @@ export interface PdfModelSetting {
   label: string
   providers: string[]
   models: string[]
+  providerModels: Record<string, string[]>
   selectedProvider: string
   selectedModel: string
+}
+
+export interface PdfModelSettingFieldErrors {
+  selectedProvider?: string
+  selectedModel?: string
 }
 
 export interface PdfParserStatus {

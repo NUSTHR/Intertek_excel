@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, Form, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.api.routes.pdf.dependencies import (
@@ -34,6 +34,7 @@ async def create_pdf_upload_tasks(
     files: Annotated[list[UploadFile], File(...)],
     service: PdfKnowledgeServiceDependency,
     user: AdminDependency,
+    parent_id: Annotated[str | None, Form()] = None,
 ) -> CreatePdfUploadTasksResponse:
     candidates: list[PdfUploadCandidate] = []
     for upload in files:
@@ -52,6 +53,7 @@ async def create_pdf_upload_tasks(
         service.create_upload_batch,
         user_id=user.user_id,
         candidates=candidates,
+        parent_id=(parent_id or "").strip() or None,
     )
     return CreatePdfUploadTasksResponse(
         batch=to_pdf_upload_batch_response(result.batch),

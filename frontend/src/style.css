@@ -409,6 +409,17 @@ h3 {
   white-space: nowrap;
 }
 
+.file-topbar-meta > .workspace-topbar-title {
+  overflow: hidden;
+  max-width: 220px;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .topbar-divider {
   width: 1px;
   height: 24px;
@@ -5243,6 +5254,78 @@ label > span {
   border-color: #0f172a;
   background: #f8fafc;
   box-shadow: 0 14px 32px rgb(15 23 42 / 0.1);
+}
+
+.semantic-card-hitbox {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: inherit;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.semantic-card-hitbox:focus-visible {
+  outline: 2px solid var(--secondary);
+  outline-offset: 2px;
+}
+
+.file-card-actions,
+.item-action-menu,
+.session-actions {
+  position: relative;
+  z-index: 2;
+}
+
+/* Keep the desktop chat composition intact while making the same controls
+   operable on narrow viewports. */
+@media (max-width: 840px) {
+  .excelai-app.chat-mode,
+  .excelai-app.chat-mode .app-main,
+  .excelai-app.chat-mode .analysis-page {
+    min-width: 0;
+    width: 100%;
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .excelai-app.chat-mode .analysis-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .excelai-app.chat-mode .chat-session-rail {
+    width: 100%;
+    min-width: 0;
+    min-height: 280px;
+    max-height: 360px;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .excelai-app.chat-mode .sheet-stage {
+    width: 100%;
+    min-width: 0;
+    min-height: 640px;
+    height: 70vh;
+  }
+
+  .excelai-app.chat-mode .assistant-column {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    min-height: 560px;
+    height: 70vh;
+    border-top: 1px solid #e2e8f0;
+    border-left: 0;
+  }
 }
 
 .excelai-app.chat-mode .excel-grid-card,

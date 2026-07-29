@@ -70,6 +70,7 @@ const taskDetail = computed(() => {
     role="dialog"
     aria-modal="true"
     aria-labelledby="upload-dialog-title"
+    @click.self="canCancel ? $emit('cancel') : undefined"
     @keydown.esc="canCancel ? $emit('cancel') : undefined"
   >
     <div class="app-dialog upload-confirm-dialog">

@@ -12,6 +12,12 @@ import AppIcon from './AppIcon.vue'
 
 type AuthMode = 'login' | 'register' | 'forgot' | 'reset'
 
+const props = withDefaults(defineProps<{
+  externalErrorMessage?: string
+}>(), {
+  externalErrorMessage: '',
+})
+
 const emit = defineEmits<{
   authenticated: [response: AuthResponse]
 }>()
@@ -24,6 +30,7 @@ const resetTokenPreview = ref('')
 const errorMessage = ref('')
 const infoMessage = ref('')
 const isSubmitting = ref(false)
+const displayedErrorMessage = computed(() => errorMessage.value || props.externalErrorMessage)
 const passwordMinLength = computed(() => (mode.value === 'login' ? 1 : 8))
 const passwordPlaceholder = computed(() =>
   mode.value === 'login' ? 'Enter password' : 'At least 8 characters',
@@ -169,7 +176,9 @@ function switchMode(nextMode: AuthMode): void {
           </div>
 
           <p v-if="infoMessage" class="status-note tone-success">{{ infoMessage }}</p>
-          <p v-if="errorMessage" class="error-note tone-error">{{ errorMessage }}</p>
+          <p v-if="displayedErrorMessage" class="error-note tone-error">
+            {{ displayedErrorMessage }}
+          </p>
 
           <button type="submit" class="auth-primary-button" :disabled="isSubmitting">
             <AppIcon name="login" />

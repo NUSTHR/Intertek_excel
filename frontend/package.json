@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
     "typecheck": "vue-tsc -b",
     "build": "vue-tsc -b && vite build",
+    "check": "npm run test && npm run typecheck && npm run build",
     "preview": "vite preview"
   },
   "dependencies": {

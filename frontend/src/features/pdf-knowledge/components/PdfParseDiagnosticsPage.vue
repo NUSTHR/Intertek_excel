@@ -28,7 +28,9 @@ const emit = defineEmits<{
 }>()
 
 const reparseTaskPolling = usePdfTaskPolling()
+const diagnosticPageSize = 25
 const files = ref<PdfManagedFile[]>([])
+const filePage = ref(1)
 const selectedFileId = ref<string>('')
 const detail = ref<PdfDocumentDetail | null>(null)
 const isLoadingFiles = ref(false)
@@ -36,8 +38,12 @@ const isLoadingDetail = ref(false)
 const isLoadingProfiles = ref(false)
 const isReparsing = ref(false)
 const isUpdatingProfile = ref(false)
-const reparseTask = ref<PdfUploadTask | null>(null)
-const errorMessage = ref('')
+const reparsingFileId = ref('')
+const reparseTasksByFileId = ref<Record<string, PdfUploadTask>>({})
+const filesError = ref('')
+const detailError = ref('')
+const profilesError = ref('')
+const reparseError = ref('')
 const parserProfiles = ref<PdfParserProfile[]>([])
 const selectedParserProfileId = ref('')
 let detailRequestId = 0
@@ -46,11 +52,40 @@ const pdfFiles = computed(() => {
   return files.value.filter((file) => file.kind === 'pdf')
 })
 
+const filePageCount = computed(() => (
+  Math.max(1, Math.ceil(pdfFiles.value.length / diagnosticPageSize))
+))
+
+const paginatedPdfFiles = computed(() => {
+  const normalizedPage = Math.min(filePage.value, filePageCount.value)
+  const start = (normalizedPage - 1) * diagnosticPageSize
+  return pdfFiles.value.slice(start, start + diagnosticPageSize)
+})
+
 const selectedFile = computed(() => {
   return pdfFiles.value.find((file) => file.id === selectedFileId.value)
 })
 
+const fileLookup = computed(() => {
+  return new Map(files.value.map((file) => [file.id, file]))
+})
+
 const report = computed<PdfParseReport | undefined>(() => detail.value?.parseReport)
+
+const errorMessage = computed(() => (
+  reparseError.value ||
+  detailError.value ||
+  profilesError.value ||
+  filesError.value
+))
+
+const selectedReparseTask = computed(() => (
+  selectedFileId.value ? reparseTasksByFileId.value[selectedFileId.value] : undefined
+))
+
+const isSelectedFileReparsing = computed(() => (
+  isReparsing.value && reparsingFileId.value === selectedFileId.value
+))
 
 const selectedParserProfile = computed(() => {
   return parserProfiles.value.find((profile) => profile.id === selectedParserProfileId.value)
@@ -63,7 +98,9 @@ onMounted(() => {
 
 watch(selectedFileId, (fileId) => {
   if (!fileId) {
+    detailRequestId += 1
     detail.value = null
+    detailError.value = ''
     return
   }
   void loadDetail(fileId)
@@ -71,15 +108,16 @@ watch(selectedFileId, (fileId) => {
 
 async function loadFiles(preferredFileId = selectedFileId.value): Promise<void> {
   isLoadingFiles.value = true
-  errorMessage.value = ''
+  filesError.value = ''
   try {
     files.value = await listPdfKnowledgeFiles()
     selectedFileId.value =
       pdfFiles.value.find((file) => file.id === preferredFileId)?.id ??
       pdfFiles.value[0]?.id ??
       ''
+    filePage.value = Math.min(filePage.value, filePageCount.value)
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    filesError.value = toErrorMessage(error)
   } finally {
     isLoadingFiles.value = false
   }
@@ -87,13 +125,13 @@ async function loadFiles(preferredFileId = selectedFileId.value): Promise<void> 
 
 async function loadParserProfiles(): Promise<void> {
   isLoadingProfiles.value = true
-  errorMessage.value = ''
+  profilesError.value = ''
   try {
     const response = await listPdfParserProfiles()
     parserProfiles.value = response.profiles
     selectedParserProfileId.value = response.selectedProfileId
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    profilesError.value = toErrorMessage(error)
   } finally {
     isLoadingProfiles.value = false
   }
@@ -112,13 +150,13 @@ async function selectParserProfile(profileId: string): Promise<void> {
     return
   }
   isUpdatingProfile.value = true
-  errorMessage.value = ''
+  profilesError.value = ''
   try {
     const response = await updatePdfParserProfile(profileId)
     parserProfiles.value = response.profiles
     selectedParserProfileId.value = response.selectedProfileId
   } catch (error: unknown) {
-    errorMessage.value = toErrorMessage(error)
+    profilesError.value = toErrorMessage(error)
   } finally {
     isUpdatingProfile.value = false
   }
@@ -127,7 +165,7 @@ async function selectParserProfile(profileId: string): Promise<void> {
 async function loadDetail(fileId: string): Promise<void> {
   const requestId = ++detailRequestId
   isLoadingDetail.value = true
-  errorMessage.value = ''
+  detailError.value = ''
   try {
     const nextDetail = await getPdfDocumentDetail(fileId)
     if (requestId === detailRequestId) {
@@ -136,7 +174,7 @@ async function loadDetail(fileId: string): Promise<void> {
   } catch (error: unknown) {
     if (requestId === detailRequestId) {
       detail.value = null
-      errorMessage.value = toErrorMessage(error)
+      detailError.value = toErrorMessage(error)
     }
   } finally {
     if (requestId === detailRequestId) {
@@ -150,13 +188,16 @@ async function reparseSelectedFile(): Promise<void> {
     return
   }
   isReparsing.value = true
-  reparseTask.value = null
+  const fileId = selectedFileId.value
+  reparsingFileId.value = fileId
+  const nextTasks = { ...reparseTasksByFileId.value }
+  delete nextTasks[fileId]
+  reparseTasksByFileId.value = nextTasks
   reparseTaskPolling.stopPolling()
-  errorMessage.value = ''
+  reparseError.value = ''
   try {
-    const fileId = selectedFileId.value
     const task = await reparsePdfDocument(fileId)
-    reparseTask.value = task
+    setReparseTask(fileId, task)
     if (isTerminalUploadTask(task)) {
       await finishReparse(fileId, task)
       return
@@ -165,30 +206,55 @@ async function reparseSelectedFile(): Promise<void> {
       load: () => getPdfUploadTask(task.id),
       isTerminal: isTerminalUploadTask,
       onUpdate: (nextTask) => {
-        reparseTask.value = nextTask
+        setReparseTask(fileId, nextTask)
       },
       onTerminal: (nextTask) => finishReparse(fileId, nextTask),
       onError: (error, isFinalAttempt) => {
         if (isFinalAttempt) {
           isReparsing.value = false
-          errorMessage.value = toErrorMessage(error)
+          reparsingFileId.value = ''
+          reparseError.value = toErrorMessage(error)
         }
       },
     })
   } catch (error: unknown) {
     isReparsing.value = false
-    errorMessage.value = toErrorMessage(error)
+    reparsingFileId.value = ''
+    reparseError.value = toErrorMessage(error)
   }
 }
 
 async function finishReparse(fileId: string, task: PdfUploadTask): Promise<void> {
-  await loadFiles(fileId)
-  await loadDetail(fileId)
-  reparseTask.value = task
-  isReparsing.value = false
-  if (task.status !== 'ready') {
-    errorMessage.value = task.errorMessage || `Reparse ${task.status}.`
+  setReparseTask(fileId, task)
+  await loadFiles()
+  if (selectedFileId.value === fileId) {
+    await loadDetail(fileId)
   }
+  isReparsing.value = false
+  reparsingFileId.value = ''
+  if (task.status !== 'ready') {
+    reparseError.value = task.errorMessage || `Reparse ${task.status}.`
+  }
+}
+
+function setReparseTask(fileId: string, task: PdfUploadTask): void {
+  reparseTasksByFileId.value = {
+    ...reparseTasksByFileId.value,
+    [fileId]: task,
+  }
+}
+
+function filePath(file: PdfManagedFile): string {
+  const path = [file.name]
+  const visited = new Set([file.id])
+  let parent = file.parentId ? fileLookup.value.get(file.parentId) : undefined
+  while (parent && !visited.has(parent.id)) {
+    path.unshift(parent.name)
+    visited.add(parent.id)
+    parent = parent.parentId ? fileLookup.value.get(parent.parentId) : undefined
+  }
+  path.unshift('Knowledge Base')
+  return path.join(' / ')
 }
 
 function isTerminalUploadTask(task: PdfUploadTask): boolean {
@@ -268,7 +334,7 @@ function toErrorMessage(error: unknown): string {
         </div>
         <button
           v-else
-          v-for="file in pdfFiles"
+          v-for="file in paginatedPdfFiles"
           :key="file.id"
           type="button"
           class="pdfdiag-file"
@@ -278,12 +344,33 @@ function toErrorMessage(error: unknown): string {
           <AppIcon name="description" />
           <span>
             <strong>{{ file.name }}</strong>
-            <small>{{ file.statusDetail || file.modifiedLabel }}</small>
+            <small>
+              {{ filePath(file) }} · {{ file.statusDetail || file.modifiedLabel }}
+            </small>
           </span>
           <em :class="file.qualityStatus || file.status">
             {{ qualityLabel(file.qualityStatus || file.status) }}
           </em>
         </button>
+        <div v-if="filePageCount > 1" class="pdfmgmt-pagination file-pagination">
+          <button
+            type="button"
+            :disabled="filePage <= 1"
+            @click="filePage -= 1"
+          >
+            <AppIcon name="chevron_left" />
+            Prev
+          </button>
+          <span>{{ filePage }} / {{ filePageCount }}</span>
+          <button
+            type="button"
+            :disabled="filePage >= filePageCount"
+            @click="filePage += 1"
+          >
+            Next
+            <AppIcon name="chevron_right" />
+          </button>
+        </div>
       </aside>
 
       <section class="pdfdiag-detail">
@@ -382,8 +469,8 @@ function toErrorMessage(error: unknown): string {
                 <AppIcon name="refresh" />
                 <span>
                   {{
-                    isReparsing
-                      ? `Reparsing ${reparseTask?.progress ?? 0}%`
+                    isSelectedFileReparsing
+                      ? `Reparsing ${selectedReparseTask?.progress ?? 0}%`
                       : 'Reparse'
                   }}
                 </span>

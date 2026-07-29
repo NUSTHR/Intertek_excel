@@ -12,7 +12,10 @@ export async function register(email: string, password: string): Promise<AuthRes
       },
       body: JSON.stringify({ email, password }),
     },
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      suppressSessionExpiredEvent: true,
+    },
   )
 }
 
@@ -26,12 +29,22 @@ export async function login(email: string, password: string): Promise<AuthRespon
       },
       body: JSON.stringify({ email, password }),
     },
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      suppressSessionExpiredEvent: true,
+    },
   )
 }
 
 export async function getCurrentUser(): Promise<AuthUser> {
-  return requestJson<AuthUser>('/api/auth/me', { method: 'GET' }, defaultRequestOptions)
+  return requestJson<AuthUser>(
+    '/api/auth/me',
+    { method: 'GET' },
+    {
+      ...defaultRequestOptions,
+      suppressSessionExpiredEvent: true,
+    },
+  )
 }
 
 export async function logout(): Promise<void> {
@@ -50,7 +63,10 @@ export async function requestPasswordReset(
       },
       body: JSON.stringify({ email }),
     },
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      suppressSessionExpiredEvent: true,
+    },
   )
 }
 
@@ -67,6 +83,9 @@ export async function resetPassword(
       },
       body: JSON.stringify({ token, new_password: newPassword }),
     },
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      suppressSessionExpiredEvent: true,
+    },
   )
 }

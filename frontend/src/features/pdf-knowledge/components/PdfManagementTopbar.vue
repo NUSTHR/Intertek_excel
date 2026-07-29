@@ -17,6 +17,7 @@ const emit = defineEmits<{
       <span class="search-icon"><AppIcon name="search" /></span>
       <input
         type="search"
+        aria-label="Search PDF knowledge base"
         placeholder="Search knowledge base..."
         :value="searchTerm"
         @input="emit('searchTermChange', ($event.target as HTMLInputElement).value)"
@@ -24,7 +25,7 @@ const emit = defineEmits<{
     </label>
 
     <div class="pdfmgmt-topbar-meta file-topbar-meta">
-      <strong>PDF Workspace</strong>
+      <strong class="workspace-topbar-title">PDF Workspace</strong>
       <span class="topbar-divider"></span>
       <button
         type="button"

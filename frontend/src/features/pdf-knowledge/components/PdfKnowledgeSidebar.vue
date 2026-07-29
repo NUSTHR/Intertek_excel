@@ -10,6 +10,7 @@ defineProps<{
   errorMessage: string
   selectedContextId: string
   isAdmin: boolean
+  isSessionLoading: boolean
   tree: PdfKnowledgeNode[]
   recentChats: PdfRecentChat[]
   userEmail: string
@@ -57,7 +58,12 @@ function handleDestination(itemId: string): void {
     </div>
 
     <div class="pdfkb-sidebar-cta">
-      <button type="button" class="pdfkb-new-chat new-chat-button" @click="emit('newChat')">
+      <button
+        type="button"
+        class="pdfkb-new-chat new-chat-button"
+        :disabled="isSessionLoading"
+        @click="emit('newChat')"
+      >
         <AppIcon name="add" />
         <strong>New Chat</strong>
       </button>
@@ -159,6 +165,7 @@ function handleDestination(itemId: string): void {
             :key="chat.id"
             type="button"
             class="pdfkb-recent-chat chat-session-item"
+            :disabled="isSessionLoading"
             @click="emit('openChat', chat.id)"
           >
             <span class="session-glyph"><AppIcon name="chat_bubble" /></span>

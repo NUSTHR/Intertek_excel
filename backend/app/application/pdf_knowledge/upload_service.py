@@ -61,13 +61,19 @@ class PdfUploadService:
         original_filename: str,
         content: bytes,
         relative_path: str | None = None,
+        parent_id: str | None = None,
     ) -> PdfUploadTask:
         now = utc_now_iso()
+        target_parent_id = self._validate_target_parent(
+            user_id=user_id,
+            parent_id=parent_id,
+        )
         file, task = self._upload_records.build_upload_records(
             user_id=user_id,
             original_filename=original_filename,
             content=content,
             relative_path=relative_path,
+            parent_id=target_parent_id,
             created_at=now,
             batch_id=None,
             parser_backend=self._parser_profiles.selected_profile_id,
@@ -82,10 +88,15 @@ class PdfUploadService:
         user_id: str,
         candidates: list[PdfUploadCandidate],
         source_name: str | None = None,
+        parent_id: str | None = None,
     ) -> PdfUploadBatchCreationResult:
         if not candidates:
             raise UploadValidationError("no supported PDF knowledge files were found")
         now = utc_now_iso()
+        target_parent_id = self._validate_target_parent(
+            user_id=user_id,
+            parent_id=parent_id,
+        )
         inspection = self._upload_records.inspect_candidates(candidates)
         accepted = inspection.accepted
         if not accepted:
@@ -121,6 +132,7 @@ class PdfUploadService:
                 original_filename=candidate.original_filename,
                 content=candidate.content,
                 relative_path=candidate.relative_path or candidate.original_filename,
+                parent_id=target_parent_id,
                 created_at=now,
                 batch_id=batch_id,
                 parser_backend=self._parser_profiles.selected_profile_id,
@@ -135,6 +147,24 @@ class PdfUploadService:
             batch=batch,
             tasks=[task for _file, task in records],
         )
+
+    def _validate_target_parent(
+        self,
+        *,
+        user_id: str,
+        parent_id: str | None,
+    ) -> str | None:
+        normalized_parent_id = (parent_id or "").strip()
+        if not normalized_parent_id:
+            return None
+        parent = self._repository.get_pdf_file(normalized_parent_id)
+        if (
+            parent is None
+            or parent.user_id != user_id
+            or parent.kind != PdfFileKind.FOLDER
+        ):
+            raise UploadValidationError("target PDF folder was not found")
+        return parent.file_id
 
     def get_task(self, task_id: str, *, user_id: str) -> PdfUploadTask:
         task = self._repository.get_pdf_upload_task(task_id)

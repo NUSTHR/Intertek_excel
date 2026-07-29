@@ -14,6 +14,7 @@ import {
   setPdfFileVisibility,
 } from '../../../api/pdf-knowledge-api'
 import type { PdfBreadcrumbItem, PdfManagedFile, PdfUploadBatch, PdfUploadTask } from '../types'
+import { sortPdfFilesByNewest } from '../utils/pdf-file-order'
 import { usePdfTaskPolling } from './use-pdf-task-polling'
 
 const pdfFilePageSize = 4
@@ -35,6 +36,9 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
   const isLoading = ref<boolean>(false)
   const isUploading = ref<boolean>(false)
   const errorMessage = ref<string>('')
+  let focusedUploadFileId = ''
+  let navigationRevision = 0
+  let focusedUploadNavigationRevision = 0
 
   const fileLookup = computed(() => {
     return new Map(files.value.map((file) => [file.id, file]))
@@ -44,9 +48,9 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
     const query = searchTerm.value.trim().toLowerCase()
     const visibleFiles = query ? filesInSelectedScope() : directChildrenOfSelectedScope()
     if (!query) {
-      return sortFilesForDisplay(visibleFiles)
+      return sortPdfFilesByNewest(visibleFiles)
     }
-    return sortFilesForDisplay(
+    return sortPdfFilesByNewest(
       visibleFiles.filter((file) => file.name.toLowerCase().includes(query)),
     )
   })
@@ -158,17 +162,20 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
     if (nextFiles.length === 0) {
       return
     }
+    const targetScopeId = selectedScopeId.value
     isUploading.value = true
     errorMessage.value = ''
     try {
-      const result = await createPdfUploadTask(nextFiles)
+      const result = await createPdfUploadTask(nextFiles, targetScopeId || undefined)
       if (result.batch) {
         uploadBatches.value = [result.batch, ...uploadBatches.value]
       }
       uploadTasks.value = [...result.tasks, ...uploadTasks.value]
       await refreshFilesAndTasks()
       if (result.tasks[0]?.fileId) {
-        setSingleSelectionById(result.tasks[0].fileId)
+        focusedUploadFileId = result.tasks[0].fileId
+        focusedUploadNavigationRevision = navigationRevision
+        revealFocusedUpload(true)
       }
       options.onLibraryChanged?.()
       startTaskPollingIfNeeded()
@@ -180,6 +187,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
   }
 
   function selectFile(file: PdfManagedFile): void {
+    markUserNavigation()
     const fileScopeId = scopeIdForFile(file)
     if (fileScopeId !== selectedScopeId.value) {
       selectedScopeId.value = fileScopeId
@@ -195,6 +203,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
   }
 
   function selectScope(scopeId: string): void {
+    markUserNavigation()
     const normalizedScopeId = scopeId || ''
     if (normalizedScopeId) {
       const nextScope = fileLookup.value.get(normalizedScopeId)
@@ -212,11 +221,13 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
   }
 
   function setSearchTerm(value: string): void {
+    markUserNavigation()
     searchTerm.value = value
     filePage.value = 1
   }
 
   function setFilePage(page: number): void {
+    markUserNavigation()
     filePage.value = clamp(page, 1, filePageCount.value)
   }
 
@@ -248,6 +259,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
       errorMessage.value = `PDF files loaded, but upload activity is unavailable: ${toErrorMessage(activityErrors[0])}`
     }
     syncSelectionWithCurrentView()
+    revealFocusedUpload()
     return tasksResult.status === 'fulfilled'
   }
 
@@ -350,10 +362,10 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
     }
   }
 
-  async function deleteFile(file: PdfManagedFile): Promise<void> {
+  async function deleteFile(file: PdfManagedFile, confirmDelete = false): Promise<boolean> {
     errorMessage.value = ''
     try {
-      await deletePdfFile(file.id)
+      await deletePdfFile(file.id, confirmDelete)
       await refreshFilesAndTasks()
       options.onLibraryChanged?.()
       if (selectedFileIds.value.has(file.id)) {
@@ -362,8 +374,10 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
         selectedFileIds.value = nextSelection
         selectedFileId.value = firstSelectedId(nextSelection)
       }
+      return true
     } catch (error: unknown) {
       errorMessage.value = toErrorMessage(error)
+      return false
     }
   }
 
@@ -436,12 +450,48 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
     if (!file) {
       return
     }
+    searchTerm.value = ''
     setSingleSelection(file)
+    const fileIndex = filteredFiles.value.findIndex((candidate) => candidate.id === file.id)
+    filePage.value =
+      fileIndex >= 0 ? Math.floor(fileIndex / pdfFilePageSize) + 1 : 1
+  }
+
+  function revealFocusedUpload(force = false): void {
+    if (!focusedUploadFileId) {
+      return
+    }
+    if (!force && focusedUploadNavigationRevision !== navigationRevision) {
+      focusedUploadFileId = ''
+      return
+    }
+    if (
+      !force &&
+      selectedFileId.value &&
+      selectedFileId.value !== focusedUploadFileId
+    ) {
+      focusedUploadFileId = ''
+      return
+    }
+    setSingleSelectionById(focusedUploadFileId)
+    const task = uploadTasks.value.find(
+      (candidate) => candidate.fileId === focusedUploadFileId,
+    )
+    if (task && isTerminalTask(task)) {
+      focusedUploadFileId = ''
+    }
   }
 
   function clearSelection(): void {
     selectedFileIds.value = new Set()
     selectedFileId.value = ''
+  }
+
+  function markUserNavigation(): void {
+    navigationRevision += 1
+    if (focusedUploadFileId) {
+      focusedUploadFileId = ''
+    }
   }
 
   return {
@@ -486,27 +536,6 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
 
 function isTerminalTask(task: PdfUploadTask): boolean {
   return task.status === 'ready' || task.status === 'failed' || task.status === 'cancelled'
-}
-
-function sortFilesForDisplay(files: PdfManagedFile[]): PdfManagedFile[] {
-  const statusWeight: Record<PdfManagedFile['status'], number> = {
-    uploading: 0,
-    queued: 1,
-    parsing: 2,
-    indexing: 3,
-    partial: 4,
-    failed: 5,
-    cancelled: 6,
-    ready: 7,
-    indexed: 8,
-  }
-  return [...files].sort((left, right) => {
-    const statusDelta = statusWeight[left.status] - statusWeight[right.status]
-    if (statusDelta !== 0) {
-      return statusDelta
-    }
-    return left.name.localeCompare(right.name)
-  })
 }
 
 function firstSelectedId(selectedIds: Set<string>): string {

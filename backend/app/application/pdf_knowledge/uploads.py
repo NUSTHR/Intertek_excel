@@ -57,6 +57,7 @@ class PdfUploadRecordBuilder:
         original_filename: str,
         content: bytes,
         relative_path: str | None,
+        parent_id: str | None,
         created_at: str,
         batch_id: str | None,
         parser_backend: str,
@@ -65,9 +66,10 @@ class PdfUploadRecordBuilder:
         file_id = new_id("pdf")
         task_id = new_id("pdfupload")
         sanitized_path = self._sanitize_relative_path(relative_path or original_filename)
-        parent_id = self._ensure_folder_hierarchy(
+        resolved_parent_id = self._ensure_folder_hierarchy(
             user_id=user_id,
             path_parts=sanitized_path.parts[:-1],
+            parent_id=parent_id,
             created_at=created_at,
         )
         staging_path = self.write_staging_file(task_id, original_filename, content)
@@ -75,7 +77,7 @@ class PdfUploadRecordBuilder:
         file = PdfFile(
             file_id=file_id,
             user_id=user_id,
-            parent_id=parent_id,
+            parent_id=resolved_parent_id,
             display_name=sanitized_path.name,
             original_filename=Path(original_filename).name,
             kind=PdfFileKind.PDF,
@@ -171,18 +173,19 @@ class PdfUploadRecordBuilder:
         *,
         user_id: str,
         path_parts: tuple[str, ...],
+        parent_id: str | None,
         created_at: str,
     ) -> str | None:
-        parent_id: str | None = None
+        resolved_parent_id = parent_id
         for part in path_parts:
             folder = self._repository.get_or_create_pdf_folder(
                 user_id=user_id,
-                parent_id=parent_id,
+                parent_id=resolved_parent_id,
                 display_name=part,
                 created_at=created_at,
             )
-            parent_id = folder.file_id
-        return parent_id
+            resolved_parent_id = folder.file_id
+        return resolved_parent_id
 
     def _sanitize_relative_path(self, value: str) -> Path:
         normalized = value.replace("\\", "/")

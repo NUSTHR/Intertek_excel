@@ -63,13 +63,6 @@ function onTextareaKeydown(event: KeyboardEvent): void {
   submitQuestion()
 }
 
-function messageParagraphs(message: PdfChatMessage): string[] {
-  return message.content
-    .split(/\n{2,}/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean)
-}
-
 </script>
 
 <template>
@@ -132,12 +125,10 @@ function messageParagraphs(message: PdfChatMessage): string[] {
                 v-html="renderMarkdown(message.reasoning)"
               ></div>
             </details>
-            <p
-              v-for="(paragraph, index) in messageParagraphs(message)"
-              :key="`${message.id}-${index}`"
-            >
-              {{ paragraph }}
-            </p>
+            <div
+              class="markdown-body pdfkb-answer-markdown"
+              v-html="renderMarkdown(message.content)"
+            ></div>
             <ul v-if="message.bullets?.length">
               <li v-for="bullet in message.bullets" :key="bullet.title">
                 <strong>{{ bullet.title }}</strong>
