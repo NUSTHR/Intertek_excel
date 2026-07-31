@@ -243,6 +243,7 @@ class PdfFile:
     warning_count: int | None = None
     failed_page_count: int | None = None
     parser_backend: str | None = None
+    content_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -498,6 +499,9 @@ class ChatSession:
     pinned_at: str | None = None
     status: str = "active"
     workspace: ChatWorkspace = ChatWorkspace.EXCEL
+    context_file_ids: list[str] = field(default_factory=list)
+    revision: int = 0
+    conversation_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -537,6 +541,9 @@ class PdfChatRouteResult:
     newly_attached_documents: list[SelectedDocument]
     attached_documents: list[PdfAttachedDocument]
     created_at: str
+    request_id: str | None = None
+    context_file_ids: list[str] = field(default_factory=list)
+    session_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -555,6 +562,7 @@ class ChatTurn:
     insufficient_evidence: bool = False
     follow_up_suggestions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -624,6 +632,8 @@ class ChatRouteResult:
     newly_attached_documents: list[SelectedDocument]
     attached_documents: list[AttachedDocument]
     created_at: str
+    request_id: str | None = None
+    session_revision: int = 0
 
 
 @dataclass(frozen=True)

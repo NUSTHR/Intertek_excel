@@ -804,7 +804,8 @@
   margin-top: 14px;
 }
 
-.pdfkb-message-citations span {
+.pdfkb-message-citations span,
+.pdfkb-message-citations button {
   padding: 3px 8px;
   color: var(--pdfkb-on-secondary-container);
   border: 1px solid rgb(0 106 97 / 0.18);
@@ -813,6 +814,61 @@
   font-size: 11px;
   line-height: 16px;
   font-weight: 900;
+}
+
+.pdfkb-message-citations button {
+  cursor: pointer;
+}
+
+.pdfkb-message-citations button.active {
+  color: var(--pdfkb-on-secondary-container);
+  border-color: rgb(0 106 97 / 0.34);
+  background: #ccefe9;
+}
+
+.pdfkb-message-citations button:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--pdfkb-secondary);
+}
+
+.pdfkb-message-citations button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pdfkb .chat-data-source-row,
+.pdfkb .chat-data-source-empty {
+  border: 1px solid #e2e8f0;
+}
+
+.pdfkb-source-document-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pdfkb-answer-block + .pdfkb-answer-block {
+  margin-top: 18px;
+}
+
+.pdfkb-answer-warnings {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  color: #991b1b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.pdfkb-answer-warnings p {
+  margin: 0;
 }
 
 .pdfkb-inline-actions {
@@ -1113,6 +1169,7 @@
 .pdfkb-citation-card {
   position: relative;
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: 11px;
   overflow: hidden;
@@ -1130,6 +1187,20 @@
 .pdfkb-citation-card:hover {
   border-color: var(--pdfkb-border-strong);
   box-shadow: 0 10px 28px rgb(15 23 42 / 0.08);
+}
+
+.pdfkb-citation-card.active {
+  border-color: rgb(0 106 97 / 0.34);
+  background: #f7fffd;
+}
+
+.pdfkb-citation-card.active .pdfkb-citation-accent {
+  background: var(--pdfkb-secondary);
+}
+
+.pdfkb-citation-card:focus-visible {
+  outline: 2px solid rgb(0 106 97 / 0.14);
+  outline-offset: 1px;
 }
 
 .pdfkb-citation-card:active {
@@ -1208,6 +1279,10 @@
   text-transform: uppercase;
 }
 
+.pdfkb-citation-match:empty {
+  display: none;
+}
+
 .pdfkb-citation-card.crossReference .pdfkb-citation-match {
   color: var(--pdfkb-on-surface-variant);
 }
@@ -1267,6 +1342,106 @@
 
 .pdfkb-citation-card:hover .pdfkb-citation-location > .app-icon {
   color: var(--pdfkb-primary);
+}
+
+.pdfkb-evidence-dialog-backdrop {
+  z-index: 100;
+}
+
+.pdfkb .pdfkb-evidence-dialog {
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: min(720px, calc(100vw - 48px));
+  height: min(400px, calc(100vh - 48px));
+  overflow: hidden;
+}
+
+.pdfkb-evidence-dialog-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  border: 1px solid var(--pdfkb-border-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--pdfkb-on-surface-variant);
+  background: var(--pdfkb-surface-container-low);
+}
+
+.pdfkb-evidence-dialog-source strong,
+.pdfkb-evidence-dialog-source span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdfkb-evidence-dialog-source strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--pdfkb-primary);
+}
+
+.pdfkb-evidence-dialog-source strong .app-icon {
+  flex: 0 0 auto;
+}
+
+.pdfkb-evidence-dialog-source span {
+  flex: 0 0 auto;
+  max-width: 45%;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pdfkb-evidence-dialog-state {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 32px;
+  color: var(--pdfkb-on-surface-variant);
+  text-align: center;
+}
+
+.pdfkb-evidence-dialog-state > .app-icon {
+  color: var(--pdfkb-secondary);
+  font-size: 28px;
+}
+
+.pdfkb-evidence-dialog-state > span {
+  max-width: 420px;
+}
+
+.pdfkb-evidence-dialog-state.error > .app-icon {
+  color: #991b1b;
+}
+
+.pdfkb-evidence-dialog-state .dialog-secondary {
+  margin-top: 8px;
+  border: 1px solid var(--pdfkb-border-soft);
+  border-radius: 8px;
+}
+
+.pdfkb-evidence-dialog-content {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--pdfkb-border-soft);
+  border-radius: 8px;
+  background: var(--pdfkb-surface-container-low);
+}
+
+.pdfkb-evidence-dialog-content p {
+  margin: 0;
+  padding: 16px;
+  color: var(--pdfkb-on-surface);
+  font-size: 14px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 @keyframes pdfkb-bounce {
@@ -1378,6 +1553,26 @@
 }
 
 @media (max-width: 560px) {
+  .pdfkb-evidence-dialog-backdrop {
+    padding: 12px;
+  }
+
+  .pdfkb .pdfkb-evidence-dialog {
+    width: 100%;
+    height: min(440px, calc(100vh - 24px));
+    padding: 16px;
+  }
+
+  .pdfkb-evidence-dialog-source {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .pdfkb-evidence-dialog-source span {
+    max-width: 100%;
+  }
+
   .pdfkb-breadcrumb-context nav {
     display: none;
   }
@@ -4432,7 +4627,8 @@
 }
 
 .pdfkb-match-count,
-.pdfkb-message-citations span {
+.pdfkb-message-citations span,
+.pdfkb-message-citations button {
   color: #047857;
   border-color: #bbf7d0;
   background: #ecfdf5;
@@ -6133,4 +6329,220 @@
   .pdfkb-sidebar.excelai-side-nav .pdfkb-brand-block {
     margin-bottom: 16px;
   }
+}
+
+/* PDF chat session management */
+.pdfkb .pdfkb-section-title button.active {
+  color: #0f172a;
+  background: #eef2f7;
+  box-shadow: inset 0 0 0 1px #d8dee8;
+}
+
+.pdfkb-chat-section-title {
+  position: relative;
+  z-index: 3;
+}
+
+.pdfkb-section-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.pdfkb-section-actions button:not(:disabled):hover {
+  color: #0f172a;
+  background: #eef2f7;
+}
+
+.pdfkb-session-batch-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: #f8fafc;
+}
+
+.pdfkb-session-batch-toolbar button {
+  display: inline-flex;
+  min-width: 28px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 7px;
+  padding: 4px 6px;
+  color: #64748b;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pdfkb-session-batch-toolbar button:not(:disabled):hover {
+  color: #0f172a;
+  background: #ffffff;
+}
+
+.pdfkb-session-batch-toolbar button.danger:not(:disabled):hover {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.pdfkb-session-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pdfkb .pdfkb-recent-chat-list.has-open-menu {
+  padding-bottom: 180px;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 26px;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  overflow: visible;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 8px 9px 12px;
+  color: #64748b;
+  background: transparent;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item:hover,
+.pdfkb .pdfkb-recent-chat.chat-session-item:focus-within,
+.pdfkb .pdfkb-recent-chat.chat-session-item.menu-open {
+  color: #0f172a;
+  background: #f8fafc;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item.active {
+  color: #0f172a;
+  border-color: #e2e8f0;
+  background: #f1f5f9;
+  box-shadow: inset 3px 0 0 #0f172a;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item.selected {
+  color: #065f46;
+  border-color: #a7d9cf;
+  background: #effcf8;
+  box-shadow: none;
+}
+
+.pdfkb-session-hitbox {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  min-height: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pdfkb-session-hitbox:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.pdfkb-session-select,
+.pdfkb .pdfkb-recent-chat .session-glyph,
+.pdfkb .pdfkb-recent-chat .session-copy,
+.pdfkb .pdfkb-recent-chat .session-actions {
+  position: relative;
+  z-index: 2;
+}
+
+.pdfkb-session-select {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: inherit;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.pdfkb .pdfkb-recent-chat .session-glyph {
+  width: 18px;
+  height: 18px;
+  color: inherit;
+}
+
+.pdfkb .pdfkb-recent-chat.pinned .session-glyph {
+  color: #047857;
+  background: transparent;
+}
+
+.pdfkb .pdfkb-recent-chat .session-copy strong {
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.pdfkb .pdfkb-recent-chat .session-actions {
+  opacity: 0;
+}
+
+.pdfkb .pdfkb-recent-chat:hover .session-actions,
+.pdfkb .pdfkb-recent-chat:focus-within .session-actions,
+.pdfkb .pdfkb-recent-chat.active .session-actions,
+.pdfkb .pdfkb-recent-chat.menu-open .session-actions {
+  opacity: 1;
+}
+
+.pdfkb .pdfkb-session-menu-trigger {
+  width: 26px;
+  height: 26px;
+  min-height: 0;
+}
+
+.pdfkb .pdfkb-session-action-menu {
+  position: absolute;
+  top: calc(100% - 3px);
+  right: 6px;
+  z-index: 50;
+  width: 156px;
+  border-color: #e2e8f0;
+  background: #ffffff;
+}
+
+.pdfkb .pdfkb-session-action-menu button {
+  border: 0;
+  background: transparent;
+}
+
+.pdfkb-session-action-error {
+  flex: 0 0 auto;
+  margin: 8px 0 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #991b1b;
+  background: #fef2f2;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.pdfkb .pdfkb-session-dialog {
+  width: min(440px, calc(100vw - 40px));
+}
+
+.pdfkb .pdfkb-session-dialog .dialog-field input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  padding: 9px 11px;
+  color: #0f172a;
+  background: #ffffff;
 }

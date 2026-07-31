@@ -18,6 +18,20 @@ export interface PdfRecentChat {
   id: string
   title: string
   pinnedAt?: string
+  updatedAt: string
+  revision: number
+}
+
+export type PdfChatSessionBatchAction = 'pin' | 'unpin' | 'delete'
+
+export interface PdfChatSessionBatchItem {
+  sessionId: string
+  expectedRevision: number
+}
+
+export interface PdfChatSessionBatchResult {
+  updatedSessions: PdfChatSession[]
+  deletedSessionIds: string[]
 }
 
 export interface PdfBreadcrumbItem {
@@ -27,35 +41,86 @@ export interface PdfBreadcrumbItem {
   active?: boolean
 }
 
-export interface PdfChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  reasoning?: string
-  bullets?: PdfChatBullet[]
-  quote?: string
-  closing?: string
-  citationIds?: string[]
-  insufficientEvidence?: boolean
-  error?: boolean
-}
-
-export interface PdfChatBullet {
-  title: string
-  text: string
-}
-
 export type PdfCitationTone = 'primary' | 'supporting' | 'crossReference'
 
 export interface PdfCitation {
-  id: string
+  key: string
+  turnId: string
+  citationId: string
+  evidenceId: string
+  fileId: string
+  chunkId: string
+  chunkIndex: number
+  pageLabel?: string
+  title: string
+  quote: string
   sourceLabel: string
   fileName: string
   fileKind: PdfKnowledgeNodeKind
   matchLabel: string
   excerpt: string
   location: string
-  tone: PdfCitationTone
+  visualTone: PdfCitationTone
+}
+
+export interface PdfAnswerBlockView {
+  id: string
+  text: string
+  reasoning: string
+  citations: PdfCitation[]
+  unresolvedCitationIds: string[]
+}
+
+export interface PdfChatAnswerView {
+  blocks: PdfAnswerBlockView[]
+  citations: PdfCitation[]
+  selectedDocuments: PdfSelectedDocument[]
+  warnings: string[]
+  insufficientEvidence: boolean
+}
+
+export type PdfChatTurnStatus = 'pending' | 'complete' | 'failed'
+
+export interface PdfChatTurnView {
+  turnId: string
+  sessionId: string
+  question: string
+  createdAt: string
+  status: PdfChatTurnStatus
+  answer?: PdfChatAnswerView
+  errorMessage?: string
+}
+
+export interface PdfCitationEvidence {
+  citationKey: string
+  chunkId: string
+  fileId: string
+  text: string
+  title: string
+  pageLabel?: string
+}
+
+export type PdfCitationEvidenceStatus = 'loading' | 'ready' | 'failed'
+
+export interface PdfCitationEvidenceDialogState {
+  citation: PdfCitation
+  status: PdfCitationEvidenceStatus
+  evidence?: PdfCitationEvidence
+  errorMessage?: string
+}
+
+export interface PdfChatSourceDocument {
+  key: string
+  fileId: string
+  versionId: string
+  title: string
+  reason: string
+  confidence?: number
+}
+
+export interface PdfManagementFocusTarget {
+  requestId: number
+  fileId: string
 }
 
 export type PdfManagedFileKind = 'folder' | 'pdf' | 'csv' | 'xlsx'
@@ -137,6 +202,8 @@ export interface PdfChatSession {
   status: string
   createdAt: string
   updatedAt: string
+  contextFileIds: string[]
+  revision: number
 }
 
 export interface PdfUploadTask {
@@ -352,21 +419,6 @@ export interface PdfDocumentDetail {
   parseReport?: PdfParseReport
 }
 
-export interface PdfChunkSearchMatch {
-  file: PdfManagedFile
-  chunk: PdfDocumentChunk
-  score: number
-  excerpt: string
-  matchedTerms: string[]
-}
-
-export interface PdfChunkSearchResult {
-  query: string
-  matches: PdfChunkSearchMatch[]
-  totalMatches: number
-  limit: number
-}
-
 export interface PdfAnswerBlock {
   text: string
   citationIds: string[]
@@ -390,7 +442,6 @@ export interface PdfChatAnswer {
   question: string
   answerBlocks: PdfAnswerBlock[]
   citations: PdfAnswerCitation[]
-  retrievalMatches: PdfChunkSearchMatch[]
   selectedDocuments: PdfSelectedDocument[]
   newlyAttachedDocuments: PdfSelectedDocument[]
   attachedDocuments: PdfAttachedDocument[]
@@ -398,6 +449,19 @@ export interface PdfChatAnswer {
   followUpSuggestions: string[]
   warnings: string[]
   createdAt: string
+  requestId?: string
+}
+
+export interface PdfChatRouteResult {
+  sessionId: string
+  question: string
+  selectedDocuments: PdfSelectedDocument[]
+  newlyAttachedDocuments: PdfSelectedDocument[]
+  attachedDocuments: PdfAttachedDocument[]
+  contextFileIds: string[]
+  sessionRevision: number
+  createdAt: string
+  requestId?: string
 }
 
 export interface PdfSelectedDocument {

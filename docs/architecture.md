@@ -51,7 +51,6 @@ api/routes/pdf/
   uploads.py       upload tasks and upload batches
   parsing.py       parser status, profile selection, and reparse
   summaries.py     summary tasks and summary generation
-  retrieval.py     chunk retrieval
   chat.py          PDF chat and chat-session lifecycle
   settings.py      PDF model settings
   mappers.py       domain-to-API response mapping
@@ -61,6 +60,12 @@ api/routes/pdf/
 All subrouters are mounted below the existing `/api/pdf` prefix. Route paths,
 status codes, request models, response models, and permission dependencies are
 treated as compatibility contracts during refactoring.
+
+PDF document selection follows
+[`ADR 0001`](adr/0001-pdf-document-routing-authority.md). Multi-document
+candidates are selected only by the PDF document router. Application code owns
+the hard visible/READY scope and validates router output, while answer-context
+allocation is limited to documents already selected by the router.
 
 API DTOs follow the same bounded-context rule:
 

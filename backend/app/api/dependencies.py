@@ -37,7 +37,6 @@ from app.application.llm_preferences import WorkspaceLlmPreferenceService
 from app.application.pdf_knowledge import (
     PdfChatService,
     PdfKnowledgeService,
-    PdfRetrievalService,
     PdfSummaryTaskWorker,
     PdfUploadTaskWorker,
 )
@@ -155,7 +154,6 @@ def get_pdf_summary_task_worker() -> PdfSummaryTaskWorker:
 @lru_cache(maxsize=1)
 def get_pdf_chat_service() -> PdfChatService:
     return PdfChatService(
-        retrieval=PdfRetrievalService(repository=get_excel_repository()),
         llm_client=get_llm_client(),
         sessions=get_excel_repository(),
     )

@@ -125,6 +125,7 @@ export async function cancelChatRequest(requestId: string): Promise<void> {
 export async function routeExcelQuestion(
   question: string,
   sessionId: string,
+  requestId: string | null = null,
 ): Promise<ChatRouteResult> {
   return requestJson<ChatRouteResult>(
     `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/route`,
@@ -136,6 +137,7 @@ export async function routeExcelQuestion(
       body: JSON.stringify({
         question,
         session_id: sessionId,
+        request_id: requestId,
       }),
     },
     chatRequestOptions,
@@ -147,6 +149,11 @@ export async function answerRoutedExcelQuestion(
   sessionId: string,
   selectedVersionIds: string[] = [],
   enableDeepThinking = false,
+  requestOptions: {
+    requestId?: string
+    sessionRevision?: number
+    signal?: AbortSignal
+  } = {},
 ): Promise<ChatAnswer> {
   return requestJson<ChatAnswer>(
     `/api/excel/chat/sessions/${encodeURIComponent(sessionId)}/answer`,
@@ -158,9 +165,15 @@ export async function answerRoutedExcelQuestion(
       body: JSON.stringify({
         question,
         selected_version_ids: selectedVersionIds,
+        session_revision: requestOptions.sessionRevision ?? null,
         enable_deep_thinking: enableDeepThinking,
+        request_id: requestOptions.requestId ?? null,
       }),
     },
-    chatRequestOptions,
+    {
+      ...chatRequestOptions,
+      abortMessage: 'Chat request cancelled.',
+      signal: requestOptions.signal,
+    },
   )
 }

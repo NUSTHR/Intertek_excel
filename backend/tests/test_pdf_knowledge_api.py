@@ -11,6 +11,7 @@ from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetReposito
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
 from app.api.dependencies import (
+    get_chat_cancellation_registry,
     get_chat_service,
     get_current_user,
     get_document_summary_service,
@@ -21,6 +22,7 @@ from app.api.dependencies import (
     get_pdf_upload_task_worker,
     require_admin_user,
 )
+from app.application.chat.cancellation import ChatCancellationRegistry
 from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
@@ -31,9 +33,8 @@ from app.application.pdf_knowledge import (
     PdfUploadTaskWorker,
 )
 from app.application.pdf_knowledge.chat import PdfChatService
-from app.application.pdf_knowledge.retrieval import PdfRetrievalService
 from app.core.config import Settings
-from app.core.errors import AuthorizationError
+from app.core.errors import AuthorizationError, LlmRequestError, PdfRoutingError
 from app.core.llm_catalog import (
     DEFAULT_ANSWER_MODEL,
     DEFAULT_ANSWER_PROVIDER,
@@ -53,6 +54,7 @@ from app.domain.models import (
     PdfParseQualityStatus,
     PdfProcessingStatus,
     PdfUploadTaskStatus,
+    SelectedDocument,
     UserRole,
 )
 from app.main import app
@@ -106,7 +108,6 @@ def client(
         poll_interval_seconds=0.1,
     )
     chat_service = PdfChatService(
-        retrieval=PdfRetrievalService(repository=pdf_repository),
         llm_client=FakeLlmClient(),
         sessions=pdf_repository,
     )
@@ -138,6 +139,9 @@ def client(
     app.dependency_overrides[get_pdf_upload_task_worker] = lambda: worker
     app.dependency_overrides[get_pdf_summary_task_worker] = lambda: summary_worker
     app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    app.dependency_overrides[get_chat_cancellation_registry] = lambda: (
+        ChatCancellationRegistry(repository=pdf_repository)
+    )
     app.dependency_overrides[get_excel_asset_service] = lambda: excel_assets
     app.dependency_overrides[get_document_summary_service] = lambda: summaries
     app.dependency_overrides[get_chat_service] = lambda: excel_chat_service
@@ -456,10 +460,10 @@ def test_pdf_file_rename_conflict_is_scoped_to_parent(client: TestClient) -> Non
     assert unchanged_response.status_code == 200
 
 
-def test_pdf_folder_delete_hides_descendants_from_directory_and_search(
+def test_pdf_folder_delete_hides_descendants_from_directory(
     client: TestClient,
 ) -> None:
-    file_id = _upload_pdf(client, filename="root/a/safety-standard.pdf")
+    _upload_pdf(client, filename="root/a/safety-standard.pdf")
     worker = app.dependency_overrides[get_pdf_upload_task_worker]()
     assert worker.run_once() is True
 
@@ -473,14 +477,8 @@ def test_pdf_folder_delete_hides_descendants_from_directory_and_search(
     assert delete_response.json()["deleted_files"] == 3
 
     list_response = client.get("/api/pdf/files")
-    search_response = client.post(
-        "/api/pdf/retrieval/search",
-        json={"query": "compliance", "file_ids": [file_id], "limit": 5},
-    )
-
     assert list_response.status_code == 200
     assert list_response.json()["files"] == []
-    assert search_response.status_code == 404
 
 
 def test_pdf_repository_get_or_create_folder_is_idempotent(tmp_path: Path) -> None:
@@ -1133,7 +1131,7 @@ def test_pdf_summary_task_creation_reuses_active_task(client: TestClient) -> Non
     assert cancel_response.json()["status"] == "cancelled"
 
 
-def test_pdf_route_uses_only_ready_summary_after_summary_task_worker(
+def test_pdf_route_single_candidate_does_not_require_summary(
     client: TestClient,
 ) -> None:
     file_id = _upload_pdf(client, filename="route-summary-standard.pdf")
@@ -1148,65 +1146,7 @@ def test_pdf_route_uses_only_ready_summary_after_summary_task_worker(
         json={"question": "route-summary-standard compliance evidence"},
     )
     assert route_without_summary.status_code == 200
-    assert route_without_summary.json()["selected_documents"] == []
-
-    create_response = client.post(
-        "/api/pdf/summary-tasks",
-        json={"file_ids": [file_id]},
-    )
-    assert create_response.status_code == 202
-    summary_worker = app.dependency_overrides[get_pdf_summary_task_worker]()
-    assert summary_worker.run_once() is True
-
-    route_with_summary = client.post(
-        f"/api/pdf/chat/sessions/{session_id}/route",
-        json={"question": "route-summary-standard compliance evidence"},
-    )
-    assert route_with_summary.status_code == 200
-    assert route_with_summary.json()["selected_documents"][0]["file_id"] == file_id
-
-
-def test_pdf_chunk_search_returns_ranked_matches(client: TestClient) -> None:
-    file_id = _upload_pdf(client)
-    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
-    assert worker.run_once() is True
-
-    search_response = client.post(
-        "/api/pdf/retrieval/search",
-        json={"query": "compliance evidence", "file_ids": [file_id], "limit": 5},
-    )
-
-    assert search_response.status_code == 200
-    result = search_response.json()
-    assert result["query"] == "compliance evidence"
-    assert result["total_matches"] >= 1
-    assert result["limit"] == 5
-    match = result["matches"][0]
-    assert match["file"]["file_id"] == file_id
-    assert match["chunk"]["text"]
-    assert match["score"] > 0
-    assert "compliance" in match["matched_terms"]
-    assert match["excerpt"]
-
-
-def test_pdf_chunk_search_can_scan_visible_ready_documents(client: TestClient) -> None:
-    first_file_id = _upload_pdf(client, filename="safety-standard.pdf")
-    second_file_id = _upload_pdf(client, filename="evidence-guide.pdf")
-    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
-    assert worker.run_once() is True
-    assert worker.run_once() is True
-
-    search_response = client.post(
-        "/api/pdf/retrieval/search",
-        json={"query": "Knowledge Index", "limit": 10},
-    )
-
-    assert search_response.status_code == 200
-    file_ids = {
-        match["file"]["file_id"]
-        for match in search_response.json()["matches"]
-    }
-    assert {first_file_id, second_file_id}.issubset(file_ids)
+    assert route_without_summary.json()["selected_documents"][0]["file_id"] == file_id
 
 
 def test_pdf_chat_answers_with_citations(client: TestClient) -> None:
@@ -1220,7 +1160,6 @@ def test_pdf_chat_answers_with_citations(client: TestClient) -> None:
         json={
             "question": "What does the PDF say about compliance evidence?",
             "file_ids": [file_id],
-            "retrieval_limit": 5,
         },
     )
 
@@ -1232,12 +1171,205 @@ def test_pdf_chat_answers_with_citations(client: TestClient) -> None:
     assert answer["citations"]
     assert answer["citations"][0]["citation_id"] == "P1"
     assert answer["citations"][0]["file_id"] == file_id
-    assert answer["retrieval_matches"]
     assert answer["selected_documents"][0]["file_id"] == file_id
     assert answer["insufficient_evidence"] is False
 
 
-def test_pdf_summary_route_and_answer_follow_excel_style_flow(
+def test_pdf_chat_request_id_is_idempotent_within_session(
+    client: TestClient,
+) -> None:
+    file_id = _upload_pdf(client, filename="idempotent-chat.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+    request_id = "pdfreq_idempotent_0001"
+    payload = {
+        "question": "What evidence is in this PDF?",
+        "file_ids": [file_id],
+        "request_id": request_id,
+    }
+
+    first = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/messages",
+        json=payload,
+    )
+    second = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/messages",
+        json=payload,
+    )
+    turns = client.get(f"/api/pdf/chat/sessions/{session_id}/turns")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    assert first.json()["request_id"] == request_id
+    assert turns.status_code == 200
+    assert len(turns.json()["turns"]) == 1
+    assert turns.json()["turns"][0]["answer"]["request_id"] == request_id
+
+    conflict = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/messages",
+        json={
+            "question": "A different question must not reuse the request ID.",
+            "file_ids": [file_id],
+            "request_id": request_id,
+        },
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "CHAT_IDEMPOTENCY_CONFLICT"
+
+
+def test_failed_pdf_chat_request_releases_idempotency_claim_for_retry(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_id = _upload_pdf(client, filename="retryable-chat.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+
+    class FailOnceAnswerLlmClient(FakeLlmClient):
+        def __init__(self) -> None:
+            self.failed = False
+
+        def answer_with_pdf_chunks(self, *args, **kwargs):
+            if not self.failed:
+                self.failed = True
+                raise LlmRequestError(
+                    stage="pdf_answer",
+                    model="test-answer",
+                    provider="test-provider",
+                    duration_seconds=0.1,
+                    cause=RuntimeError("injected transient failure"),
+                )
+            return super().answer_with_pdf_chunks(*args, **kwargs)
+
+    chat_service = PdfChatService(
+        llm_client=FailOnceAnswerLlmClient(),
+        sessions=pdf_repository,
+    )
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+        path = f"/api/pdf/chat/sessions/{session_id}/messages"
+        payload = {
+            "question": "Retry this PDF request safely.",
+            "file_ids": [file_id],
+            "request_id": "pdf-retry-after-failure",
+        }
+        failed = client.post(path, json=payload)
+        retried = client.post(path, json=payload)
+        turns = client.get(f"/api/pdf/chat/sessions/{session_id}/turns")
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert failed.status_code == 502
+    assert retried.status_code == 200
+    assert [turn["question"] for turn in turns.json()["turns"]] == [
+        payload["question"]
+    ]
+
+
+def test_pdf_chat_server_cancellation_prevents_turn_persistence(
+    client: TestClient,
+) -> None:
+    file_id = _upload_pdf(client, filename="cancelled-chat.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+    request_id = "pdfreq_cancelled_0001"
+
+    cancel_response = client.post(
+        "/api/pdf/chat/cancel",
+        json={"request_id": request_id},
+    )
+    answer_response = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/messages",
+        json={
+            "question": "This request must not be persisted.",
+            "file_ids": [file_id],
+            "request_id": request_id,
+        },
+    )
+    turns = client.get(f"/api/pdf/chat/sessions/{session_id}/turns")
+
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["cancelled"] is True
+    assert answer_response.status_code == 499
+    assert answer_response.json()["code"] == "CHAT_REQUEST_CANCELLED"
+    assert turns.status_code == 200
+    assert turns.json()["turns"] == []
+
+
+def test_pdf_chat_single_candidate_skips_router(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_id = _upload_pdf(client, filename="direct-scope.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+
+    llm_client = RecordingPdfLlmClient()
+    chat_service = PdfChatService(
+        llm_client=llm_client,
+        sessions=pdf_repository,
+    )
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_response = client.post("/api/pdf/chat/sessions")
+        assert session_response.status_code == 200
+        answer_response = client.post(
+            f"/api/pdf/chat/sessions/{session_response.json()['session_id']}/messages",
+            json={
+                "question": "PDF",
+                "file_ids": [file_id],
+            },
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert answer_response.status_code == 200
+    answer = answer_response.json()
+    assert {document["file_id"] for document in answer["selected_documents"]} == {file_id}
+    assert llm_client.route_calls == []
+
+
+def test_pdf_chat_persists_scope_and_uses_first_question_as_session_title(
+    client: TestClient,
+) -> None:
+    file_id = _upload_pdf(client, filename="persistent-scope.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+
+    session_response = client.post("/api/pdf/chat/sessions")
+    assert session_response.status_code == 200
+    session_id = session_response.json()["session_id"]
+    question = "What compliance evidence does this PDF contain?"
+
+    answer_response = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/messages",
+        json={
+            "question": question,
+            "file_ids": [file_id],
+        },
+    )
+    assert answer_response.status_code == 200
+
+    detail_response = client.get(f"/api/pdf/chat/sessions/{session_id}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["context_file_ids"] == [file_id]
+    assert detail_response.json()["title"] == question
+
+    listed_sessions = client.get("/api/pdf/chat/sessions").json()["sessions"]
+    listed_session = next(
+        session for session in listed_sessions if session["session_id"] == session_id
+    )
+    assert listed_session["context_file_ids"] == [file_id]
+    assert listed_session["title"] == question
+
+
+def test_pdf_summary_route_preview_and_integrated_answer_flow(
     client: TestClient,
 ) -> None:
     file_id = _upload_pdf(client, filename="safety-standard.pdf")
@@ -1266,10 +1398,10 @@ def test_pdf_summary_route_and_answer_follow_excel_style_flow(
     assert route["attached_documents"][0]["chunk_count"] >= 1
 
     answer_response = client.post(
-        f"/api/pdf/chat/sessions/{session_id}/answer",
+        f"/api/pdf/chat/sessions/{session_id}/messages",
         json={
             "question": "Which compliance evidence does safety-standard.pdf mention?",
-            "selected_file_ids": [file_id],
+            "file_ids": [file_id],
         },
     )
 
@@ -1287,7 +1419,7 @@ def test_pdf_summary_route_and_answer_follow_excel_style_flow(
     assert turn_answer["citations"][0]["file_id"] == file_id
 
 
-def test_pdf_chat_folder_scope_limits_route_search_and_answer(
+def test_pdf_chat_folder_scope_limits_route_and_answer(
     client: TestClient,
 ) -> None:
     upload_response = client.post(
@@ -1308,24 +1440,6 @@ def test_pdf_chat_folder_scope_limits_route_search_and_answer(
     folder_b = _find_pdf_file(files, name="b", kind="folder", parent_id=root_folder["file_id"])
     file_a = _find_pdf_file(files, name="standard-a.pdf", kind="pdf", parent_id=folder_a["file_id"])
     file_b = _find_pdf_file(files, name="standard-b.pdf", kind="pdf", parent_id=folder_b["file_id"])
-
-    assert client.post(f"/api/pdf/files/{file_a['file_id']}/summary/generate").status_code == 200
-    assert client.post(f"/api/pdf/files/{file_b['file_id']}/summary/generate").status_code == 200
-
-    search_response = client.post(
-        "/api/pdf/retrieval/search",
-        json={
-            "query": "Knowledge Index",
-            "file_ids": [folder_a["file_id"]],
-            "limit": 10,
-        },
-    )
-    assert search_response.status_code == 200
-    search_file_ids = {
-        match["file"]["file_id"]
-        for match in search_response.json()["matches"]
-    }
-    assert search_file_ids == {file_a["file_id"]}
 
     session_response = client.post("/api/pdf/chat/sessions")
     assert session_response.status_code == 200
@@ -1352,7 +1466,6 @@ def test_pdf_chat_folder_scope_limits_route_search_and_answer(
         json={
             "question": "Which Knowledge Index evidence is available?",
             "file_ids": [folder_a["file_id"]],
-            "retrieval_limit": 5,
         },
     )
     assert answer_response.status_code == 200
@@ -1366,6 +1479,319 @@ def test_pdf_chat_folder_scope_limits_route_search_and_answer(
     assert file_b["file_id"] not in {
         citation["file_id"] for citation in answer["citations"]
     }
+
+
+def test_pdf_folder_router_is_scope_bound_and_capped_at_nine_documents(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    scoped_paths = [f"root/scoped/document-{index}.pdf" for index in range(10)]
+    upload_response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[
+            *[
+                ("files", (path, _pdf_bytes(), "application/pdf"))
+                for path in scoped_paths
+            ],
+            (
+                "files",
+                ("root/outside/outside.pdf", _pdf_bytes(), "application/pdf"),
+            ),
+        ],
+    )
+    assert upload_response.status_code == 202
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    for _ in upload_response.json()["tasks"]:
+        assert worker.run_once() is True
+    pending_response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[
+            (
+                "files",
+                ("root/scoped/pending.pdf", _pdf_bytes(), "application/pdf"),
+            )
+        ],
+    )
+    assert pending_response.status_code == 202
+    pending_file_id = pending_response.json()["tasks"][0]["file_id"]
+
+    files = client.get("/api/pdf/files").json()["files"]
+    root_folder = _find_pdf_file(files, name="root", kind="folder")
+    scoped_folder = _find_pdf_file(
+        files,
+        name="scoped",
+        kind="folder",
+        parent_id=root_folder["file_id"],
+    )
+    outside_folder = _find_pdf_file(
+        files,
+        name="outside",
+        kind="folder",
+        parent_id=root_folder["file_id"],
+    )
+    scoped_file_ids = [
+        str(file["file_id"])
+        for file in files
+        if file["kind"] == "pdf"
+        and file["parent_id"] == scoped_folder["file_id"]
+        and file["processing_status"] == "ready"
+    ]
+    outside_file = _find_pdf_file(
+        files,
+        name="outside.pdf",
+        kind="pdf",
+        parent_id=outside_folder["file_id"],
+    )
+
+    question = "Select the relevant scoped documents."
+    llm_client = RoutingProbePdfLlmClient(
+        {
+            question: [
+                *scoped_file_ids,
+                str(pending_file_id),
+                str(outside_file["file_id"]),
+            ]
+        }
+    )
+    chat_service = PdfChatService(llm_client=llm_client, sessions=pdf_repository)
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_response = client.post("/api/pdf/chat/sessions")
+        route_response = client.post(
+            f"/api/pdf/chat/sessions/{session_response.json()['session_id']}/route",
+            json={"question": question, "file_ids": [scoped_folder["file_id"]]},
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert route_response.status_code == 200
+    request = llm_client.route_requests[0]
+    assert set(request["candidate_file_ids"]) == set(scoped_file_ids)
+    assert pending_file_id not in request["candidate_file_ids"]
+    assert outside_file["file_id"] not in request["candidate_file_ids"]
+    assert request["max_documents"] == 9
+    duplicate_groups = request["duplicate_content_groups"]
+    assert all(duplicate_groups)
+    assert len(set(duplicate_groups)) == 1
+    selected_file_ids = {
+        document["file_id"] for document in route_response.json()["selected_documents"]
+    }
+    assert len(selected_file_ids) == 9
+    assert selected_file_ids.issubset(set(scoped_file_ids))
+
+
+def test_pdf_all_sources_passes_every_visible_ready_candidate_to_router(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_file_id = _upload_pdf(client, filename="all-sources-first.pdf")
+    second_file_id = _upload_pdf(client, filename="all-sources-second.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    first_file = pdf_repository.get_pdf_file(first_file_id)
+    second_file = pdf_repository.get_pdf_file(second_file_id)
+    assert first_file is not None
+    assert second_file is not None
+    assert first_file.content_fingerprint
+    assert first_file.content_fingerprint == second_file.content_fingerprint
+
+    def fail_individual_chunk_query(_file_id: str):
+        raise AssertionError("routing must use the batch PDF chunk query")
+
+    monkeypatch.setattr(
+        pdf_repository,
+        "list_pdf_document_chunks",
+        fail_individual_chunk_query,
+    )
+
+    question = "Select the matching document from all PDF sources."
+    llm_client = RoutingProbePdfLlmClient({question: [second_file_id]})
+    chat_service = PdfChatService(llm_client=llm_client, sessions=pdf_repository)
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_response = client.post("/api/pdf/chat/sessions")
+        route_response = client.post(
+            f"/api/pdf/chat/sessions/{session_response.json()['session_id']}/route",
+            json={"question": question, "file_ids": []},
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert route_response.status_code == 200
+    assert len(llm_client.route_requests) == 1
+    assert set(llm_client.route_requests[0]["candidate_file_ids"]) == {
+        first_file_id,
+        second_file_id,
+    }
+    assert {
+        document["file_id"]
+        for document in route_response.json()["selected_documents"]
+    } == {second_file_id}
+
+
+def test_pdf_chat_gives_each_of_nine_selected_documents_grounding_context(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_ids = [
+        _upload_pdf(client, filename=f"coverage-{index}.pdf")
+        for index in range(9)
+    ]
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    for _file_id in file_ids:
+        assert worker.run_once() is True
+
+    question = "Compare the evidence across all nine documents."
+    llm_client = ContextRecordingPdfLlmClient({question: file_ids})
+    chat_service = PdfChatService(llm_client=llm_client, sessions=pdf_repository)
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+        answer_response = client.post(
+            f"/api/pdf/chat/sessions/{session_id}/messages",
+            json={"question": question, "file_ids": []},
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert answer_response.status_code == 200
+    assert len(answer_response.json()["selected_documents"]) == 9
+    assert set(llm_client.answer_chunk_file_ids) == set(file_ids)
+
+
+def test_pdf_router_format_failure_returns_typed_retryable_error(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    _upload_pdf(client, filename="router-error-first.pdf")
+    _upload_pdf(client, filename="router-error-second.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+
+    class InvalidRouterResponseLlmClient(FakeLlmClient):
+        def route_pdf_documents(self, *args, **kwargs):
+            _ = args, kwargs
+            raise PdfRoutingError()
+
+    chat_service = PdfChatService(
+        llm_client=InvalidRouterResponseLlmClient(),
+        sessions=pdf_repository,
+    )
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_response = client.post("/api/pdf/chat/sessions")
+        route_response = client.post(
+            f"/api/pdf/chat/sessions/{session_response.json()['session_id']}/route",
+            json={"question": "Trigger typed router failure.", "file_ids": []},
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert route_response.status_code == 502
+    assert route_response.json() == {
+        "code": "PDF_ROUTER_INVALID_RESPONSE",
+        "detail": "PDF document routing failed. Please retry.",
+        "retryable": True,
+    }
+
+
+def test_pdf_multiturn_reroutes_within_current_scope_without_attachment_fallback(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    upload_response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[
+            ("files", ("root/a/a-one.pdf", _pdf_bytes(), "application/pdf")),
+            ("files", ("root/a/a-two.pdf", _pdf_bytes(), "application/pdf")),
+            ("files", ("root/b/b-one.pdf", _pdf_bytes(), "application/pdf")),
+            ("files", ("root/b/b-two.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+    assert upload_response.status_code == 202
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    for _ in upload_response.json()["tasks"]:
+        assert worker.run_once() is True
+
+    files = client.get("/api/pdf/files").json()["files"]
+    root_folder = _find_pdf_file(files, name="root", kind="folder")
+    folder_a = _find_pdf_file(files, name="a", kind="folder", parent_id=root_folder["file_id"])
+    folder_b = _find_pdf_file(files, name="b", kind="folder", parent_id=root_folder["file_id"])
+    file_a = _find_pdf_file(
+        files,
+        name="a-one.pdf",
+        kind="pdf",
+        parent_id=folder_a["file_id"],
+    )
+    file_b = _find_pdf_file(
+        files,
+        name="b-one.pdf",
+        kind="pdf",
+        parent_id=folder_b["file_id"],
+    )
+
+    first_question = "Use the first folder."
+    second_question = "Now use the second folder."
+    no_match_question = "No document matches this follow-up."
+    llm_client = RoutingProbePdfLlmClient(
+        {
+            first_question: [str(file_a["file_id"])],
+            second_question: [str(file_b["file_id"])],
+            no_match_question: [],
+        }
+    )
+    chat_service = PdfChatService(llm_client=llm_client, sessions=pdf_repository)
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_response = client.post("/api/pdf/chat/sessions")
+        session_id = session_response.json()["session_id"]
+        first_answer = client.post(
+            f"/api/pdf/chat/sessions/{session_id}/messages",
+            json={"question": first_question, "file_ids": [folder_a["file_id"]]},
+        )
+        second_answer = client.post(
+            f"/api/pdf/chat/sessions/{session_id}/messages",
+            json={"question": second_question, "file_ids": [folder_b["file_id"]]},
+        )
+        no_match_answer = client.post(
+            f"/api/pdf/chat/sessions/{session_id}/messages",
+            json={"question": no_match_question, "file_ids": [folder_b["file_id"]]},
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert first_answer.status_code == 200
+    assert {citation["file_id"] for citation in first_answer.json()["citations"]} == {
+        file_a["file_id"]
+    }
+    assert second_answer.status_code == 200
+    assert {citation["file_id"] for citation in second_answer.json()["citations"]} == {
+        file_b["file_id"]
+    }
+    assert llm_client.route_requests[1]["previous_questions"] == [first_question]
+    assert llm_client.answer_requests[1]["previous_questions"] == [first_question]
+    assert llm_client.answer_requests[1]["previous_answers"]
+    assert llm_client.answer_requests[1]["previous_citation_ids"]
+    assert llm_client.answer_requests[1]["previous_selected_file_ids"] == [
+        [file_a["file_id"]]
+    ]
+    assert no_match_answer.status_code == 200
+    no_match = no_match_answer.json()
+    assert no_match["selected_documents"] == []
+    assert no_match["citations"] == []
+    assert no_match["insufficient_evidence"] is True
+    assert llm_client.route_requests[2]["previous_questions"] == [
+        first_question,
+        second_question,
+    ]
 
 
 def test_pdf_route_excludes_hidden_and_deleted_documents_for_member(
@@ -1421,6 +1847,44 @@ def test_pdf_route_excludes_hidden_and_deleted_documents_for_member(
     assert explicit_hidden_response.status_code == 404
 
 
+def test_pdf_chat_revalidates_visibility_after_model_answer(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_id = _upload_pdf(client, filename="visibility-race.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    llm_client = VisibilityHidingPdfLlmClient(
+        repository=pdf_repository,
+        file_id=file_id,
+    )
+    chat_service = PdfChatService(llm_client=llm_client, sessions=pdf_repository)
+    original_chat_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    app.dependency_overrides[get_current_user] = member_user
+    try:
+        session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+        answer_response = client.post(
+            f"/api/pdf/chat/sessions/{session_id}/messages",
+            json={
+                "question": "Use the temporarily visible PDF.",
+                "file_ids": [file_id],
+            },
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_chat_override
+        app.dependency_overrides[get_current_user] = admin_user
+
+    assert answer_response.status_code == 200
+    answer = answer_response.json()
+    assert llm_client.answer_calls == 1
+    assert answer["insufficient_evidence"] is True
+    assert answer["selected_documents"] == []
+    assert answer["citations"] == []
+    assert answer["answer_blocks"][0]["citation_ids"] == []
+    assert answer["warnings"]
+
+
 def test_pdf_chat_session_can_be_listed_renamed_pinned_and_deleted(
     client: TestClient,
 ) -> None:
@@ -1441,7 +1905,6 @@ def test_pdf_chat_session_can_be_listed_renamed_pinned_and_deleted(
         json={
             "question": "What does the PDF say about compliance evidence?",
             "file_ids": [file_id],
-            "retrieval_limit": 5,
         },
     )
     assert answer_response.status_code == 200
@@ -1475,6 +1938,142 @@ def test_pdf_chat_session_can_be_listed_renamed_pinned_and_deleted(
     delete_response = client.delete(f"/api/pdf/chat/sessions/{first_session_id}")
     assert delete_response.status_code == 204
     assert client.get(f"/api/pdf/chat/sessions/{first_session_id}").status_code == 404
+
+
+def test_pdf_chat_session_mutations_reject_stale_revisions(
+    client: TestClient,
+) -> None:
+    session = client.post("/api/pdf/chat/sessions").json()
+    session_id = session["session_id"]
+
+    renamed = client.patch(
+        f"/api/pdf/chat/sessions/{session_id}",
+        json={
+            "title": "Revision protected",
+            "expected_revision": session["revision"],
+        },
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["revision"] == session["revision"] + 1
+
+    stale_pin = client.patch(
+        f"/api/pdf/chat/sessions/{session_id}/pin",
+        json={
+            "pinned": True,
+            "expected_revision": session["revision"],
+        },
+    )
+    assert stale_pin.status_code == 409
+    assert stale_pin.json()["code"] == "CHAT_SESSION_REVISION_CONFLICT"
+
+    stale_delete = client.delete(
+        f"/api/pdf/chat/sessions/{session_id}",
+        params={"expected_revision": session["revision"]},
+    )
+    assert stale_delete.status_code == 409
+    assert client.get(f"/api/pdf/chat/sessions/{session_id}").status_code == 200
+
+
+def test_pdf_chat_session_batch_mutations_are_atomic_and_workspace_scoped(
+    client: TestClient,
+) -> None:
+    first = client.post("/api/pdf/chat/sessions").json()
+    second = client.post("/api/pdf/chat/sessions").json()
+    excel = client.post("/api/excel/chat/sessions").json()
+
+    renamed_second = client.patch(
+        f"/api/pdf/chat/sessions/{second['session_id']}",
+        json={
+            "title": "Updated second",
+            "expected_revision": second["revision"],
+        },
+    ).json()
+
+    stale_batch = client.post(
+        "/api/pdf/chat/sessions/batch",
+        json={
+            "action": "pin",
+            "items": [
+                {
+                    "session_id": first["session_id"],
+                    "expected_revision": first["revision"],
+                },
+                {
+                    "session_id": second["session_id"],
+                    "expected_revision": second["revision"],
+                },
+            ],
+        },
+    )
+    assert stale_batch.status_code == 409
+    assert client.get(
+        f"/api/pdf/chat/sessions/{first['session_id']}"
+    ).json()["pinned_at"] is None
+
+    cross_workspace = client.post(
+        "/api/pdf/chat/sessions/batch",
+        json={
+            "action": "delete",
+            "items": [
+                {
+                    "session_id": first["session_id"],
+                    "expected_revision": first["revision"],
+                },
+                {
+                    "session_id": excel["session_id"],
+                    "expected_revision": excel["revision"],
+                },
+            ],
+        },
+    )
+    assert cross_workspace.status_code == 404
+    assert client.get(f"/api/pdf/chat/sessions/{first['session_id']}").status_code == 200
+
+    pin_batch = client.post(
+        "/api/pdf/chat/sessions/batch",
+        json={
+            "action": "pin",
+            "items": [
+                {
+                    "session_id": first["session_id"],
+                    "expected_revision": first["revision"],
+                },
+                {
+                    "session_id": second["session_id"],
+                    "expected_revision": renamed_second["revision"],
+                },
+            ],
+        },
+    )
+    assert pin_batch.status_code == 200
+    updated = {
+        session["session_id"]: session
+        for session in pin_batch.json()["updated_sessions"]
+    }
+    assert set(updated) == {first["session_id"], second["session_id"]}
+    assert all(session["pinned_at"] is not None for session in updated.values())
+
+    delete_batch = client.post(
+        "/api/pdf/chat/sessions/batch",
+        json={
+            "action": "delete",
+            "items": [
+                {
+                    "session_id": session_id,
+                    "expected_revision": session["revision"],
+                }
+                for session_id, session in updated.items()
+            ],
+        },
+    )
+    assert delete_batch.status_code == 200
+    assert set(delete_batch.json()["deleted_session_ids"]) == {
+        first["session_id"],
+        second["session_id"],
+    }
+    assert client.get(f"/api/pdf/chat/sessions/{first['session_id']}").status_code == 404
+    assert client.get(f"/api/pdf/chat/sessions/{second['session_id']}").status_code == 404
+    assert client.get(f"/api/excel/chat/sessions/{excel['session_id']}").status_code == 200
 
 
 def test_pdf_and_excel_chat_sessions_are_isolated(client: TestClient) -> None:
@@ -1608,7 +2207,6 @@ def test_pdf_model_settings_are_used_by_summary_route_and_answer(
         poll_interval_seconds=0.1,
     )
     chat_service = PdfChatService(
-        retrieval=PdfRetrievalService(repository=pdf_repository),
         llm_client=llm_client,
         sessions=pdf_repository,
     )
@@ -1620,6 +2218,8 @@ def test_pdf_model_settings_are_used_by_summary_route_and_answer(
     try:
         with TestClient(app) as test_client:
             file_id = _upload_pdf(test_client, filename="configured-model.pdf")
+            other_file_id = _upload_pdf(test_client, filename="other-document.pdf")
+            assert worker.run_once() is True
             assert worker.run_once() is True
 
             expected_settings = {
@@ -1641,6 +2241,9 @@ def test_pdf_model_settings_are_used_by_summary_route_and_answer(
                 f"/api/pdf/files/{file_id}/summary/generate"
             )
             assert summary_response.status_code == 200
+            assert test_client.post(
+                f"/api/pdf/files/{other_file_id}/summary/generate"
+            ).status_code == 200
 
             session_response = test_client.post("/api/pdf/chat/sessions")
             assert session_response.status_code == 200
@@ -1650,16 +2253,16 @@ def test_pdf_model_settings_are_used_by_summary_route_and_answer(
                 f"/api/pdf/chat/sessions/{session_id}/route",
                 json={
                     "question": "Which compliance evidence is configured-model about?",
-                    "file_ids": [file_id],
+                    "file_ids": [],
                 },
             )
             assert route_response.status_code == 200
 
             answer_response = test_client.post(
-                f"/api/pdf/chat/sessions/{session_id}/answer",
+                f"/api/pdf/chat/sessions/{session_id}/messages",
                 json={
                     "question": "Which compliance evidence is configured-model about?",
-                    "selected_file_ids": [file_id],
+                    "file_ids": [],
                 },
             )
             assert answer_response.status_code == 200
@@ -1695,12 +2298,161 @@ def test_pdf_upload_rejects_empty_and_unsupported_files(client: TestClient) -> N
     assert unsupported_response.status_code == 400
     assert "supported" in unsupported_response.json()["detail"]
 
-    search_response = client.post(
+
+def test_pdf_retrieval_endpoint_is_not_registered(client: TestClient) -> None:
+    response = client.post(
         "/api/pdf/retrieval/search",
-        json={"query": "   ", "limit": 5},
+        json={"query": "compliance"},
     )
-    assert search_response.status_code == 400
-    assert "query" in search_response.json()["detail"]
+    assert response.status_code == 404
+
+
+def test_pdf_route_is_side_effect_free_and_split_answer_commits_atomically(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_id = _upload_pdf(client, filename="split-chat.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    session_response = client.post("/api/pdf/chat/sessions")
+    assert session_response.status_code == 200
+    session_id = session_response.json()["session_id"]
+
+    route_response = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/route",
+        json={
+            "question": "compliance",
+            "file_ids": [file_id],
+        },
+    )
+    route = route_response.json()
+
+    assert route_response.status_code == 200
+    assert route["context_file_ids"] == [file_id]
+    assert route["session_revision"] == 0
+    assert route["selected_documents"][0]["file_id"] == file_id
+    assert pdf_repository.list_pdf_attached_documents(session_id) == []
+    assert pdf_repository.list_turns(session_id, workspace="pdf") == []
+
+    answer_response = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/answer",
+        json={
+            "question": route["question"],
+            "selected_file_ids": [
+                document["file_id"] for document in route["selected_documents"]
+            ],
+            "file_ids": route["context_file_ids"],
+            "session_revision": route["session_revision"],
+            "request_id": "pdf-split-answer-request",
+        },
+    )
+
+    assert answer_response.status_code == 200
+    assert answer_response.json()["citations"][0]["file_id"] == file_id
+    assert len(pdf_repository.list_pdf_attached_documents(session_id)) == 1
+    assert len(pdf_repository.list_turns(session_id, workspace="pdf")) == 1
+
+
+def test_pdf_split_answer_rejects_stale_conversation_revision(
+    client: TestClient,
+) -> None:
+    file_id = _upload_pdf(client, filename="stale-route.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+    route = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/route",
+        json={"question": "Plan this answer.", "file_ids": [file_id]},
+    ).json()
+    committed = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/messages",
+        json={"question": "Commit another turn.", "file_ids": [file_id]},
+    )
+    stale = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/answer",
+        json={
+            "question": route["question"],
+            "selected_file_ids": [
+                document["file_id"] for document in route["selected_documents"]
+            ],
+            "file_ids": route["context_file_ids"],
+            "session_revision": route["session_revision"],
+            "request_id": "pdf-stale-answer-request",
+        },
+    )
+
+    assert committed.status_code == 200
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "CHAT_SESSION_REVISION_CONFLICT"
+
+
+def test_pdf_split_answer_cannot_escape_the_routed_hard_scope(
+    client: TestClient,
+) -> None:
+    scoped_file_id = _upload_pdf(client, filename="scope-a.pdf")
+    outside_file_id = _upload_pdf(client, filename="scope-b.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+    route = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/route",
+        json={"question": "Use only scope A.", "file_ids": [scoped_file_id]},
+    ).json()
+
+    answer = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/answer",
+        json={
+            "question": route["question"],
+            "selected_file_ids": [outside_file_id],
+            "file_ids": route["context_file_ids"],
+            "session_revision": route["session_revision"],
+            "request_id": "pdf-hard-scope-answer",
+        },
+    )
+
+    assert answer.status_code == 200
+    assert answer.json()["selected_documents"] == []
+    assert answer.json()["citations"] == []
+    assert answer.json()["insufficient_evidence"] is True
+
+
+def test_unknown_pdf_chat_session_is_never_created_implicitly(
+    client: TestClient,
+) -> None:
+    sessions_before = client.get("/api/pdf/chat/sessions").json()["sessions"]
+    missing_session_id = "pdfsession_missing"
+
+    message = client.post(
+        f"/api/pdf/chat/sessions/{missing_session_id}/messages",
+        json={
+            "question": "Do not create this session.",
+            "request_id": "pdf-missing-message",
+        },
+    )
+    route = client.post(
+        f"/api/pdf/chat/sessions/{missing_session_id}/route",
+        json={
+            "question": "Do not create this session.",
+            "request_id": "pdf-missing-route",
+        },
+    )
+    answer = client.post(
+        f"/api/pdf/chat/sessions/{missing_session_id}/answer",
+        json={
+            "question": "Do not create this session.",
+            "selected_file_ids": [],
+            "file_ids": [],
+            "session_revision": 0,
+            "request_id": "pdf-missing-answer",
+        },
+    )
+    sessions_after = client.get("/api/pdf/chat/sessions").json()["sessions"]
+
+    assert message.status_code == 404
+    assert route.status_code == 404
+    assert answer.status_code == 404
+    assert sessions_after == sessions_before
 
 
 def test_member_cannot_see_hidden_pdf_file(
@@ -1723,10 +2475,6 @@ def test_member_cannot_see_hidden_pdf_file(
         list_response = client.get("/api/pdf/files")
         detail_response = client.get(f"/api/pdf/files/{file_id}/detail")
         chunks_response = client.get(f"/api/pdf/files/{file_id}/chunks")
-        search_response = client.post(
-            "/api/pdf/retrieval/search",
-            json={"query": "compliance", "file_ids": [file_id], "limit": 5},
-        )
         chat_response = client.post(
             "/api/pdf/chat",
             json={"question": "compliance", "file_ids": [file_id]},
@@ -1738,7 +2486,6 @@ def test_member_cannot_see_hidden_pdf_file(
     assert list_response.json()["files"] == []
     assert detail_response.status_code == 404
     assert chunks_response.status_code == 404
-    assert search_response.status_code == 404
     assert chat_response.status_code == 404
 
 
@@ -2058,6 +2805,124 @@ class RecordingPdfLlmClient(FakeLlmClient):
             }
         )
         return super().answer_with_pdf_chunks(*args, **kwargs)
+
+
+class RoutingProbePdfLlmClient(FakeLlmClient):
+    def __init__(self, routes: dict[str, list[str]]) -> None:
+        self._routes = routes
+        self.route_requests: list[dict[str, object]] = []
+        self.answer_requests: list[dict[str, object]] = []
+
+    def route_documents(
+        self,
+        question,
+        summaries,
+        max_documents,
+        user_questions=None,
+        attached_documents=None,
+        previous_turns=None,
+        **kwargs,
+    ):
+        _ = user_questions, attached_documents, kwargs
+        self.route_requests.append(
+            {
+                "question": question,
+                "candidate_file_ids": [summary.file_id for summary in summaries],
+                "duplicate_content_groups": [
+                    next(
+                        iter(
+                            summary.coverage_scope.get(
+                                "duplicate_content_group",
+                                [],
+                            )
+                        ),
+                        None,
+                    )
+                    for summary in summaries
+                ],
+                "max_documents": max_documents,
+                "previous_questions": [turn.question for turn in previous_turns or []],
+            }
+        )
+        return [
+            SelectedDocument(
+                file_id=file_id,
+                version_id=file_id,
+                reason="selected by routing probe",
+                confidence=1.0,
+            )
+            for file_id in self._routes.get(question, [])
+        ]
+
+    def answer_with_pdf_chunks(
+        self,
+        question,
+        chunks,
+        previous_turns=None,
+        **kwargs,
+    ):
+        self.answer_requests.append(
+            {
+                "question": question,
+                "chunk_file_ids": [chunk["file_id"] for chunk in chunks],
+                "previous_questions": [
+                    turn.question for turn in previous_turns or []
+                ],
+                "previous_answers": [
+                    turn.answer_text for turn in previous_turns or []
+                ],
+                "previous_citation_ids": [
+                    turn.citation_ids for turn in previous_turns or []
+                ],
+                "previous_selected_file_ids": [
+                    [
+                        document.file_id
+                        for document in turn.selected_documents
+                    ]
+                    for turn in previous_turns or []
+                ],
+            }
+        )
+        return super().answer_with_pdf_chunks(
+            question,
+            chunks,
+            previous_turns=previous_turns,
+            **kwargs,
+        )
+
+
+class ContextRecordingPdfLlmClient(RoutingProbePdfLlmClient):
+    def __init__(self, routes: dict[str, list[str]]) -> None:
+        super().__init__(routes)
+        self.answer_chunk_file_ids: list[str] = []
+
+    def answer_with_pdf_chunks(self, question, chunks, **kwargs):
+        self.answer_chunk_file_ids = [str(chunk["file_id"]) for chunk in chunks]
+        return super().answer_with_pdf_chunks(question, chunks, **kwargs)
+
+
+class VisibilityHidingPdfLlmClient(FakeLlmClient):
+    def __init__(
+        self,
+        *,
+        repository: SQLiteExcelAssetRepository,
+        file_id: str,
+    ) -> None:
+        self._repository = repository
+        self._file_id = file_id
+        self.answer_calls = 0
+
+    def answer_with_pdf_chunks(self, *args, **kwargs):
+        answer = super().answer_with_pdf_chunks(*args, **kwargs)
+        self.answer_calls += 1
+        file = self._repository.get_pdf_file(self._file_id)
+        assert file is not None
+        self._repository.update_pdf_file_visibility(
+            file_id=self._file_id,
+            visibility=PdfFileVisibility.HIDDEN,
+            updated_at=file.updated_at,
+        )
+        return answer
 
 
 class PartialPdfParser:

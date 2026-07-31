@@ -7,7 +7,13 @@ from typing import Any
 
 import httpx2
 
-from app.core.errors import ExcelWorkspaceError, InvalidLlmModelError, LlmRequestError
+from app.core.errors import (
+    ExcelWorkspaceError,
+    InvalidLlmModelError,
+    LlmRequestError,
+    LlmResponseFormatError,
+    PdfRoutingError,
+)
 from app.core.ids import new_id
 from app.core.llm_catalog import (
     SILICONFLOW_PROVIDER,
@@ -134,6 +140,33 @@ DOCUMENT_ROUTER_SYSTEM_PROMPT = "\n".join(
     ]
 )
 
+PDF_DOCUMENT_ROUTER_SYSTEM_PROMPT = """
+You are a document router for an enterprise PDF knowledge base.
+
+The candidate catalog already contains only visible, READY PDFs inside the exact
+file, folder, or All PDF sources scope selected by the user. Choose only the PDF
+documents needed to answer the current turn.
+
+Rules:
+1. Do not answer the user's question.
+2. Select only IDs present in the candidate catalog.
+3. Use version_id as the selection ID.
+4. Use routing memory only to resolve follow-ups, pronouns, and refinements.
+5. Do not reuse a previously selected document unless it is relevant to this turn.
+6. Questions that explicitly request all, every, each, a summary of the current
+   folder/scope, or a comparison of the selected scope are range-wide intents.
+   For such intents, select the distinct candidate documents needed to cover the
+   scope, up to the supplied maximum.
+7. Candidates with the same non-empty duplicate_content_group are copies. Select at
+   most one member of each such group unless the question explicitly asks about
+   copies or versions. Also avoid obvious duplicate copies whose title and routing
+   summary are materially identical.
+8. For ordinary fact questions, select only strong semantic or identifier matches.
+9. If no candidate is likely to contain evidence, return an empty array.
+10. Return strict JSON only. Do not return Markdown, comments, rejected-document
+    lists, routing analysis, or explanatory text outside the JSON object.
+""".strip()
+
 ANSWER_SYSTEM_PROMPT = """
 You are an enterprise Excel answer assistant.
 
@@ -162,16 +195,21 @@ You answer user questions using only the provided PDF chunks.
 Rules:
 1. Use only the provided chunks as evidence.
 2. Do not use outside knowledge.
-3. Every factual claim based on PDF content must cite one or more evidence refs.
-4. Citations must reference evidence_id values from the provided chunks only.
-5. Do not invent file_id, chunk_id, page labels, titles, or document content.
-6. If the provided chunks are insufficient, say so clearly.
-7. Keep the answer concise and business-readable.
-8. Split the answer into separate answer_blocks by claim, paragraph, bullet, or table row
+3. Previous user and assistant messages are conversation memory only. Use them
+   to resolve follow-ups, pronouns, omissions, comparisons, and refinements.
+4. Never treat a previous assistant answer or its citation metadata as current
+   evidence. Every factual claim in the current answer must be supported by the
+   PDF chunks supplied in the current user message.
+5. Every factual claim based on PDF content must cite one or more evidence refs.
+6. Citations must reference evidence_id values from the provided chunks only.
+7. Do not invent file_id, chunk_id, page labels, titles, or document content.
+8. If the provided chunks are insufficient, say so clearly.
+9. Keep the answer concise and business-readable.
+10. Split the answer into separate answer_blocks by claim, paragraph, bullet, or table row
    whenever different evidence supports different parts of the answer.
-9. Each answer_block must include only the evidence_ids that support that block's text.
-10. Do not collect all citations at the end of the answer or in one final answer block.
-11. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
+11. Each answer_block must include only the evidence_ids that support that block's text.
+12. Do not collect all citations at the end of the answer or in one final answer block.
+13. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
 """.strip()
 
 
@@ -451,6 +489,112 @@ class MultiProviderLlmClient:
             unique_selected.append(document)
         return unique_selected
 
+    def route_pdf_documents(
+        self,
+        question: str,
+        summaries: list[DocumentSummary],
+        max_documents: int,
+        user_questions: list[str] | None = None,
+        attached_documents: list[AttachedDocument] | None = None,
+        previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> list[SelectedDocument]:
+        if not summaries:
+            return []
+        provider_config, resolved_model = self._resolve_request(
+            provider=provider,
+            model=model,
+            stage="router",
+        )
+        _ = user_questions
+        document_catalog_json = json.dumps(
+            self._pdf_routing_document_catalog(
+                summaries=summaries,
+                attached_documents=attached_documents or [],
+                previous_turns=previous_turns or [],
+            ),
+            ensure_ascii=False,
+        )
+        messages = [
+            {"role": "system", "content": PDF_DOCUMENT_ROUTER_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "PDF candidate catalog for the current scope:\n\n"
+                    f"{document_catalog_json}"
+                ),
+            },
+            *self._routing_memory_messages(previous_turns or []),
+            {
+                "role": "user",
+                "content": (
+                    "Route the current PDF question.\n\n"
+                    f"Maximum documents for this turn: {max_documents}\n\n"
+                    f"Current question:\n{question}\n\n"
+                    "Return JSON in exactly this compact shape:\n"
+                    "{\n"
+                    '  "document_for_this_turn": [\n'
+                    "    {\n"
+                    '      "file_id": "candidate file_id",\n'
+                    '      "version_id": "candidate version_id",\n'
+                    '      "reason": "short matched topic or range-wide reason",\n'
+                    '      "confidence": 0.0\n'
+                    "    }\n"
+                    "  ]\n"
+                    "}"
+                ),
+            },
+        ]
+        try:
+            payload = self._chat_json(
+                stage="pdf_route_model",
+                provider_config=provider_config,
+                model=resolved_model,
+                cancellation_checker=cancellation_checker,
+                messages=messages,
+                allow_embedded_json=True,
+                invalid_json_retry_prompt=(
+                    "Your previous response was not a complete JSON object. Return only "
+                    'the compact object {"document_for_this_turn": [...]} now. Do not '
+                    "include rejected documents, analysis, Markdown, or code fences."
+                ),
+            )
+        except LlmResponseFormatError as exc:
+            raise PdfRoutingError(
+                "PDF document routing returned an invalid response. Please retry."
+            ) from exc
+
+        raw_selected_items = self._object_list(
+            payload.get("document_for_this_turn", payload.get("selected_documents"))
+        )
+        selected = [
+            SelectedDocument(
+                file_id=str(item.get("file_id", "")),
+                version_id=str(item.get("version_id", "")),
+                reason=str(item.get("reason", "")),
+                confidence=self._optional_float(item.get("confidence")),
+            )
+            for item in raw_selected_items
+        ]
+        selected = self._filter_router_selection(
+            selected=selected,
+            raw_items=raw_selected_items,
+            max_documents=max_documents,
+        )
+        allowed = {summary.version_id: summary.file_id for summary in summaries}
+        unique_selected: list[SelectedDocument] = []
+        seen_version_ids: set[str] = set()
+        for document in selected:
+            if allowed.get(document.version_id) != document.file_id:
+                continue
+            if document.version_id in seen_version_ids:
+                continue
+            seen_version_ids.add(document.version_id)
+            unique_selected.append(document)
+        return unique_selected
+
     def answer_with_rows(
         self,
         question: str,
@@ -574,6 +718,7 @@ class MultiProviderLlmClient:
         self,
         question: str,
         chunks: list[dict],
+        previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
@@ -586,8 +731,9 @@ class MultiProviderLlmClient:
         )
         chunks_json = json.dumps(chunks, ensure_ascii=False)
         logger.debug(
-            "preparing PDF answer model payload chunk_count=%s",
+            "preparing PDF answer model payload chunk_count=%s previous_turn_count=%s",
             len(chunks),
+            len(previous_turns or []),
         )
         payload, reasoning_content = self._chat_json_with_reasoning(
             stage="pdf_answer_model",
@@ -597,6 +743,7 @@ class MultiProviderLlmClient:
             cancellation_checker=cancellation_checker,
             messages=[
                 {"role": "system", "content": PDF_ANSWER_SYSTEM_PROMPT},
+                *self._history_messages(previous_turns or []),
                 {
                     "role": "user",
                     "content": (
@@ -604,7 +751,8 @@ class MultiProviderLlmClient:
                         f"Question:\n{question}\n\n"
                         f"Chunks:\n{chunks_json}\n\n"
                         "Each chunk object has evidence_id, file_id, file_name, "
-                        "chunk_id, chunk_index, page_label, title, text, and excerpt.\n\n"
+                        "chunk_id, chunk_index, token_count, page_label, title, "
+                        "text, and excerpt.\n\n"
                         "Return JSON in exactly this shape:\n\n"
                         "{\n"
                         '  "answer_blocks": [\n'
@@ -627,6 +775,8 @@ class MultiProviderLlmClient:
                         "- Prefer using evidence_id everywhere citations are needed.\n"
                         "- quote should be a short snippet copied or summarized from the "
                         "cited chunk.\n"
+                        "- When evidence spans multiple selected PDFs, synthesize across "
+                        "them and preserve file-specific citations.\n"
                         "- If no provided chunk supports an answer, set insufficient_evidence "
                         "to true and return empty citations."
                     ),
@@ -693,6 +843,8 @@ class MultiProviderLlmClient:
         messages: list[dict[str, str]] | None = None,
         enable_deep_thinking: bool = False,
         cancellation_checker: CancellationChecker | None = None,
+        allow_embedded_json: bool = False,
+        invalid_json_retry_prompt: str | None = None,
     ) -> dict[str, Any]:
         content, _reasoning_content = self._chat_message_parts(
             stage=stage,
@@ -704,7 +856,31 @@ class MultiProviderLlmClient:
             enable_deep_thinking=enable_deep_thinking,
             cancellation_checker=cancellation_checker,
         )
-        return self._parse_json_object(content)
+        try:
+            return self._parse_json_object(
+                content,
+                allow_embedded=allow_embedded_json,
+            )
+        except LlmResponseFormatError:
+            if not invalid_json_retry_prompt or messages is None:
+                raise
+        retry_messages = [
+            *messages,
+            {"role": "assistant", "content": content[:8000]},
+            {"role": "user", "content": invalid_json_retry_prompt},
+        ]
+        retry_content, _retry_reasoning = self._chat_message_parts(
+            stage=stage,
+            provider_config=provider_config,
+            model=model,
+            messages=retry_messages,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=cancellation_checker,
+        )
+        return self._parse_json_object(
+            retry_content,
+            allow_embedded=allow_embedded_json,
+        )
 
     def _chat_text(
         self,
@@ -829,15 +1005,29 @@ class MultiProviderLlmClient:
         if cancellation_checker is not None:
             cancellation_checker()
         try:
-            message = payload["choices"][0]["message"]
+            choice = payload["choices"][0]
+            message = choice["message"]
+            logger.debug(
+                "llm response metadata stage=%s finish_reason=%s content_length=%s",
+                stage,
+                choice.get("finish_reason"),
+                len(str(message.get("content") or "")),
+            )
             return (
                 str(message["content"]),
                 str(message.get("reasoning_content") or "").strip(),
             )
         except (KeyError, IndexError, TypeError) as exc:
-            raise ExcelWorkspaceError("LLM response did not include message content") from exc
+            raise LlmResponseFormatError(
+                "LLM response did not include message content"
+            ) from exc
 
-    def _parse_json_object(self, content: str) -> dict[str, Any]:
+    def _parse_json_object(
+        self,
+        content: str,
+        *,
+        allow_embedded: bool = False,
+    ) -> dict[str, Any]:
         text = content.strip()
         if text.startswith("```"):
             text = text.strip("`")
@@ -845,10 +1035,18 @@ class MultiProviderLlmClient:
                 text = text[4:].strip()
         try:
             value = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ExcelWorkspaceError("LLM response was not valid JSON") from exc
+        except json.JSONDecodeError as original_exc:
+            if not allow_embedded:
+                raise LlmResponseFormatError() from original_exc
+            object_start = text.find("{")
+            if object_start < 0:
+                raise LlmResponseFormatError() from original_exc
+            try:
+                value, _end = json.JSONDecoder().raw_decode(text[object_start:])
+            except json.JSONDecodeError as exc:
+                raise LlmResponseFormatError() from exc
         if not isinstance(value, dict):
-            raise ExcelWorkspaceError("LLM response JSON must be an object")
+            raise LlmResponseFormatError("LLM response JSON must be an object")
         return value
 
     def _profile_payload(self, profile: WorkbookProfile) -> dict[str, Any]:
@@ -916,6 +1114,47 @@ class MultiProviderLlmClient:
                     "selected_in_last_turn", False
                 ),
             )
+            for summary in summaries
+        ]
+
+    def _pdf_routing_document_catalog(
+        self,
+        *,
+        summaries: list[DocumentSummary],
+        attached_documents: list[AttachedDocument],
+        previous_turns: list[ChatTurn],
+    ) -> list[dict[str, Any]]:
+        attached_version_ids = {document.version_id for document in attached_documents}
+        selected_turn_stats = self._selected_turn_stats(previous_turns)
+        return [
+            {
+                "file_id": summary.file_id,
+                "version_id": summary.version_id,
+                "document_title": summary.document_title,
+                "duplicate_content_group": next(
+                    iter(summary.coverage_scope.get("duplicate_content_group", [])),
+                    None,
+                ),
+                "attachment_state": (
+                    "attached"
+                    if summary.version_id in attached_version_ids
+                    else "candidate"
+                ),
+                "selected_turn_count": selected_turn_stats.get(
+                    summary.version_id, {}
+                ).get("selected_turn_count", 0),
+                "selected_in_last_turn": selected_turn_stats.get(
+                    summary.version_id, {}
+                ).get("selected_in_last_turn", False),
+                "summary_text": summary.summary_text,
+                "key_topics": summary.key_topics,
+                "positive_routing_terms": summary.positive_routing_terms,
+                "negative_routing_terms": summary.negative_routing_terms,
+                "exact_identifiers": summary.exact_identifiers,
+                "suitable_questions": summary.suitable_questions,
+                "unsuitable_questions": summary.unsuitable_questions,
+                "routing_notes": summary.routing_notes,
+            }
             for summary in summaries
         ]
 
@@ -1127,13 +1366,15 @@ class MultiProviderLlmClient:
         return {"thinking": {"type": "disabled"}}
 
     def _temperature_for_stage(self, stage: str) -> float:
-        if stage == "route_model":
+        if stage in {"route_model", "pdf_route_model"}:
             return 0.0
         return 0.2
 
     def _max_tokens_for_stage(self, stage: str) -> int | None:
         if stage == "route_model":
             return 1200
+        if stage == "pdf_route_model":
+            return 1600
         return None
 
     def _string_list(self, value: Any) -> list[str]:

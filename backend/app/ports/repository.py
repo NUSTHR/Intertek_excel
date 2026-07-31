@@ -245,6 +245,16 @@ class ChatSessionRepository(Protocol):
     def touch_session(self, session_id: str, updated_at: str) -> None:
         ...
 
+    def set_session_context_file_ids(
+        self,
+        session_id: str,
+        file_ids: list[str],
+        updated_at: str,
+        *,
+        workspace: str = "excel",
+    ) -> ChatSession | None:
+        ...
+
     def rename_session(
         self,
         session_id: str,
@@ -252,6 +262,7 @@ class ChatSessionRepository(Protocol):
         updated_at: str,
         *,
         workspace: str = "excel",
+        expected_revision: int | None = None,
     ) -> ChatSession | None:
         ...
 
@@ -262,10 +273,35 @@ class ChatSessionRepository(Protocol):
         updated_at: str,
         *,
         workspace: str = "excel",
+        expected_revision: int | None = None,
     ) -> ChatSession | None:
         ...
 
-    def delete_session(self, session_id: str, *, workspace: str = "excel") -> bool:
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        workspace: str = "excel",
+        expected_revision: int | None = None,
+    ) -> bool:
+        ...
+
+    def batch_set_sessions_pinned(
+        self,
+        session_revisions: dict[str, int],
+        pinned_at: str | None,
+        updated_at: str,
+        *,
+        workspace: str = "excel",
+    ) -> list[ChatSession]:
+        ...
+
+    def batch_delete_sessions(
+        self,
+        session_revisions: dict[str, int],
+        *,
+        workspace: str = "excel",
+    ) -> list[str]:
         ...
 
     def attach_document(self, document: AttachedDocument) -> bool:
@@ -278,6 +314,48 @@ class ChatSessionRepository(Protocol):
         ...
 
     def create_turn(self, turn: ChatTurn) -> None:
+        ...
+
+    def get_turn_by_request_id(
+        self,
+        session_id: str,
+        request_id: str,
+        *,
+        workspace: str = "excel",
+    ) -> ChatTurn | None:
+        ...
+
+    def claim_excel_chat_request(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        request_id: str,
+        request_fingerprint: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> ChatTurn | None:
+        ...
+
+    def release_excel_chat_request(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> None:
+        ...
+
+    def commit_excel_chat_turn(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        expected_conversation_revision: int,
+        attached_documents: list[AttachedDocument],
+        turn: ChatTurn,
+        request_fingerprint: str | None,
+    ) -> ChatTurn:
         ...
 
     def delete_turn(self, session_id: str, turn_id: str) -> None:
@@ -299,7 +377,16 @@ class PdfChatRepository(ChatSessionRepository, Protocol):
     def list_pdf_files(self) -> list[PdfFile]:
         ...
 
+    def list_pdf_files_by_ids(self, file_ids: list[str]) -> list[PdfFile]:
+        ...
+
     def list_pdf_document_chunks(self, file_id: str) -> list[PdfDocumentChunk]:
+        ...
+
+    def list_pdf_document_chunks_by_file_ids(
+        self,
+        file_ids: list[str],
+    ) -> dict[str, list[PdfDocumentChunk]]:
         ...
 
     def list_pdf_document_summaries(self) -> list[PdfDocumentSummary]:
@@ -315,6 +402,41 @@ class PdfChatRepository(ChatSessionRepository, Protocol):
         ...
 
     def list_pdf_attached_documents(self, session_id: str) -> list[PdfAttachedDocument]:
+        ...
+
+    def claim_pdf_chat_request(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        request_id: str,
+        request_fingerprint: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> ChatTurn | None:
+        ...
+
+    def release_pdf_chat_request(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> None:
+        ...
+
+    def commit_pdf_chat_turn(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        expected_conversation_revision: int,
+        context_file_ids: list[str],
+        attached_documents: list[PdfAttachedDocument],
+        turn: ChatTurn,
+        title_if_new: str | None,
+        request_fingerprint: str | None,
+    ) -> ChatTurn:
         ...
 
 

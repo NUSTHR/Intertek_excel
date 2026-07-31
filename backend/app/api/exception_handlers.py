@@ -10,18 +10,23 @@ from app.core.errors import (
     AssetNotFoundError,
     AuthenticationError,
     AuthorizationError,
+    ChatIdempotencyConflict,
     ChatRequestCancelled,
-    ExcelWorkspaceError,
+    ChatRequestInProgress,
+    ChatSessionRevisionConflict,
     FileDeleteConfirmationRequiredError,
     FileNameConflictError,
     InvalidExcelFileError,
     InvalidLlmModelError,
     LlmRequestError,
+    LlmResponseFormatError,
     PasswordResetTokenError,
+    PdfRoutingError,
     RateLimitError,
     UploadValidationError,
     UserAlreadyExistsError,
     VersionActivationError,
+    WorkspaceError,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,8 +40,16 @@ def register_exception_handlers(app: FastAPI) -> None:
     )
     app.add_exception_handler(InvalidLlmModelError, handle_invalid_llm_model)
     app.add_exception_handler(ChatRequestCancelled, handle_chat_request_cancelled)
+    app.add_exception_handler(ChatRequestInProgress, handle_chat_request_in_progress)
+    app.add_exception_handler(ChatIdempotencyConflict, handle_chat_idempotency_conflict)
+    app.add_exception_handler(
+        ChatSessionRevisionConflict,
+        handle_chat_session_revision_conflict,
+    )
     app.add_exception_handler(ChatRequestCancelledError, handle_chat_request_cancelled_error)
     app.add_exception_handler(LlmRequestError, handle_llm_request_error)
+    app.add_exception_handler(LlmResponseFormatError, handle_llm_response_format_error)
+    app.add_exception_handler(PdfRoutingError, handle_pdf_routing_error)
     app.add_exception_handler(AuthenticationError, handle_authentication_error)
     app.add_exception_handler(AuthorizationError, handle_authorization_error)
     app.add_exception_handler(UserAlreadyExistsError, handle_user_already_exists)
@@ -46,7 +59,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(InvalidExcelFileError, handle_invalid_excel_file)
     app.add_exception_handler(VersionActivationError, handle_version_activation_error)
     app.add_exception_handler(UploadValidationError, handle_upload_validation_error)
-    app.add_exception_handler(ExcelWorkspaceError, handle_excel_workspace_error)
+    app.add_exception_handler(WorkspaceError, handle_workspace_error)
     app.add_exception_handler(Exception, handle_unexpected_error)
 
 
@@ -110,6 +123,34 @@ async def handle_llm_request_error(
     return _error_response(
         HTTPStatus.BAD_GATEWAY,
         f"The {stage_label} model request failed. Check the selected model or try again shortly.",
+        code=exc.code,
+        retryable=exc.retryable,
+    )
+
+
+async def handle_llm_response_format_error(
+    _request: Request,
+    exc: LlmResponseFormatError,
+) -> JSONResponse:
+    logger.warning("llm response format invalid error=%s", exc)
+    return _error_response(
+        HTTPStatus.BAD_GATEWAY,
+        "The model returned an invalid structured response. Please retry.",
+        code=exc.code,
+        retryable=exc.retryable,
+    )
+
+
+async def handle_pdf_routing_error(
+    _request: Request,
+    exc: PdfRoutingError,
+) -> JSONResponse:
+    logger.warning("pdf document routing failed error=%s", exc)
+    return _error_response(
+        HTTPStatus.BAD_GATEWAY,
+        str(exc),
+        code=exc.code,
+        retryable=exc.retryable,
     )
 
 
@@ -121,9 +162,49 @@ async def handle_chat_request_cancelled(
         499,
         {
             "detail": "Chat request cancelled.",
+            "code": exc.code,
+            "retryable": False,
             "request_id": exc.request_id,
             "cancelled": True,
         },
+    )
+
+
+async def handle_chat_session_revision_conflict(
+    _request: Request,
+    exc: ChatSessionRevisionConflict,
+) -> JSONResponse:
+    return _error_response(
+        HTTPStatus.CONFLICT,
+        str(exc),
+        code=exc.code,
+        retryable=exc.retryable,
+    )
+
+
+async def handle_chat_request_in_progress(
+    _request: Request,
+    exc: ChatRequestInProgress,
+) -> JSONResponse:
+    return _error_response(
+        HTTPStatus.CONFLICT,
+        str(exc),
+        code=exc.code,
+        retryable=exc.retryable,
+        request_id=exc.request_id,
+    )
+
+
+async def handle_chat_idempotency_conflict(
+    _request: Request,
+    exc: ChatIdempotencyConflict,
+) -> JSONResponse:
+    return _error_response(
+        HTTPStatus.CONFLICT,
+        str(exc),
+        code=exc.code,
+        retryable=exc.retryable,
+        request_id=exc.request_id,
     )
 
 
@@ -135,6 +216,8 @@ async def handle_chat_request_cancelled_error(
         499,
         {
             "detail": "Chat request cancelled.",
+            "code": "CHAT_REQUEST_CANCELLED",
+            "retryable": False,
             "request_id": str(exc),
             "cancelled": True,
         },
@@ -210,11 +293,16 @@ async def handle_upload_validation_error(
     return _error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 
-async def handle_excel_workspace_error(
+async def handle_workspace_error(
     _request: Request,
-    exc: ExcelWorkspaceError,
+    exc: WorkspaceError,
 ) -> JSONResponse:
-    return _error_response(HTTPStatus.BAD_REQUEST, str(exc))
+    return _error_response(
+        HTTPStatus.BAD_REQUEST,
+        str(exc),
+        code=exc.code,
+        retryable=exc.retryable,
+    )
 
 
 async def handle_unexpected_error(
@@ -225,16 +313,42 @@ async def handle_unexpected_error(
     return _error_response(
         HTTPStatus.INTERNAL_SERVER_ERROR,
         "Something went wrong on the server. Please try again.",
+        code="INTERNAL_SERVER_ERROR",
+        retryable=True,
     )
 
 
-def _error_response(status_code: HTTPStatus, detail: str) -> JSONResponse:
-    return _json_response(status_code, ErrorResponse(detail=detail).model_dump())
+def _error_response(
+    status_code: HTTPStatus,
+    detail: str,
+    *,
+    code: str = "WORKSPACE_ERROR",
+    retryable: bool = False,
+    request_id: str | None = None,
+) -> JSONResponse:
+    return _json_response(
+        status_code,
+        ErrorResponse(
+            detail=detail,
+            code=code,
+            retryable=retryable,
+            request_id=request_id,
+        ).model_dump(exclude_none=True),
+    )
 
 
 def _json_response(status_code: HTTPStatus | int, content: dict[str, object]) -> JSONResponse:
     resolved_status_code = status_code.value if isinstance(status_code, HTTPStatus) else status_code
-    return JSONResponse(status_code=resolved_status_code, content=content)
+    payload = (
+        {
+            "code": "WORKSPACE_ERROR",
+            "retryable": False,
+            **content,
+        }
+        if "detail" in content
+        else content
+    )
+    return JSONResponse(status_code=resolved_status_code, content=payload)
 
 
 def _llm_stage_label(stage: str) -> str:

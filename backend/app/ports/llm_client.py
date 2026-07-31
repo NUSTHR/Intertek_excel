@@ -13,7 +13,7 @@ from app.domain.models import (
 CancellationChecker = Callable[[], None]
 
 
-class LlmClient(Protocol):
+class DocumentSummaryGenerator(Protocol):
     def generate_document_summary(
         self,
         profile: WorkbookProfile,
@@ -23,6 +23,8 @@ class LlmClient(Protocol):
     ) -> DocumentSummary:
         ...
 
+
+class ExcelDocumentRouter(Protocol):
     def route_documents(
         self,
         question: str,
@@ -37,6 +39,24 @@ class LlmClient(Protocol):
     ) -> list[SelectedDocument]:
         ...
 
+
+class PdfDocumentRouter(Protocol):
+    def route_pdf_documents(
+        self,
+        question: str,
+        summaries: list[DocumentSummary],
+        max_documents: int,
+        user_questions: list[str] | None = None,
+        attached_documents: list[AttachedDocument] | None = None,
+        previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> list[SelectedDocument]:
+        ...
+
+
+class ExcelAnswerGenerator(Protocol):
     def answer_with_rows(
         self,
         question: str,
@@ -50,13 +70,31 @@ class LlmClient(Protocol):
     ) -> DraftChatAnswer:
         ...
 
+
+class PdfAnswerGenerator(Protocol):
     def answer_with_pdf_chunks(
         self,
         question: str,
         chunks: list[dict],
+        previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
         cancellation_checker: CancellationChecker | None = None,
     ) -> DraftChatAnswer:
         ...
+
+
+class PdfChatLlmClient(PdfDocumentRouter, PdfAnswerGenerator, Protocol):
+    """The minimal LLM capabilities required by PDF chat orchestration."""
+
+
+class LlmClient(
+    DocumentSummaryGenerator,
+    ExcelDocumentRouter,
+    PdfDocumentRouter,
+    ExcelAnswerGenerator,
+    PdfAnswerGenerator,
+    Protocol,
+):
+    """Compatibility protocol for adapters that implement every LLM capability."""

@@ -3,10 +3,9 @@ from pathlib import Path
 from app.application.llm_preferences.service import WorkspaceLlmPreferenceService
 from app.application.pdf_knowledge.indexing import PdfIndexingService
 from app.application.pdf_knowledge.library_service import PdfLibraryService
-from app.application.pdf_knowledge.models import DeletePdfFileResult, PdfChunkSearchResult
+from app.application.pdf_knowledge.models import DeletePdfFileResult
 from app.application.pdf_knowledge.parser_profiles import PdfParserProfileRegistry
 from app.application.pdf_knowledge.parsing_service import PdfParsingService
-from app.application.pdf_knowledge.retrieval import PdfRetrievalService
 from app.application.pdf_knowledge.settings_service import PdfModelSettingsService
 from app.application.pdf_knowledge.summary_service import PdfSummaryService
 from app.application.pdf_knowledge.upload_service import (
@@ -52,7 +51,6 @@ class PdfKnowledgeService:
         parser_profile_descriptors: list[PdfParserProfile] | None = None,
         default_parser_profile_id: str | None = None,
         indexing: PdfIndexingService | None = None,
-        retrieval: PdfRetrievalService | None = None,
         llm_client: LlmClient | None = None,
         llm_preferences: WorkspaceLlmPreferenceService | None = None,
     ) -> None:
@@ -100,7 +98,6 @@ class PdfKnowledgeService:
         self._parser_profiles = parser_registry
         self._uploads = uploads
         self._parsing = parsing
-        self._retrieval = retrieval or PdfRetrievalService(repository=repository)
 
     def list_files(self, *, user_role: UserRole) -> list[PdfFile]:
         return self._library.list_files(user_role=user_role)
@@ -334,21 +331,6 @@ class PdfKnowledgeService:
         user_role: UserRole,
     ) -> list[PdfDocumentChunk]:
         return self._library.list_document_chunks(file_id, user_role=user_role)
-
-    def search_document_chunks(
-        self,
-        *,
-        query: str,
-        file_ids: list[str] | None,
-        limit: int | None,
-        user_role: UserRole,
-    ) -> PdfChunkSearchResult:
-        return self._retrieval.search_chunks(
-            query=query,
-            file_ids=file_ids,
-            limit=limit,
-            user_role=user_role,
-        )
 
     def generate_summary(
         self,

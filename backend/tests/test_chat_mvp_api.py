@@ -267,9 +267,11 @@ def test_llm_request_error_returns_user_safe_api_error(tmp_path: Path) -> None:
 
     assert response.status_code == 502
     assert response.json() == {
+        "code": "LLM_REQUEST_FAILED",
         "detail": (
             "The summary model request failed. Check the selected model or try again shortly."
-        )
+        ),
+        "retryable": True,
     }
 
 
@@ -628,26 +630,48 @@ def test_chat_route_returns_documents_before_answer_stage(
         version_id = upload_response.json()["version"]["version_id"]
         client.post(f"/api/excel/versions/{version_id}/summary/generate")
         session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+        session_before_route = client.get(
+            f"/api/excel/chat/sessions/{session_id}"
+        ).json()
 
         route_response = client.post(
             f"/api/excel/chat/sessions/{session_id}/route",
-            json={"question": "route first"},
+            json={
+                "question": "route first",
+                "request_id": "route-plan-request",
+            },
         )
         assert route_response.status_code == 200
         route_payload = route_response.json()
         assert route_payload["selected_documents"][0]["version_id"] == version_id
         assert route_payload["newly_attached_documents"][0]["version_id"] == version_id
         assert route_payload["attached_documents"][0]["row_count"] == 6
+        assert route_payload["request_id"] == "route-plan-request"
+        assert route_payload["session_revision"] == 0
         assert "timings" not in route_payload
         assert llm_client.answer_calls == []
+        assert client.get(
+            f"/api/excel/chat/sessions/{session_id}"
+        ).json() == session_before_route
+        assert client.get(
+            f"/api/excel/chat/sessions/{session_id}/turns"
+        ).json()["turns"] == []
 
         answer_response = client.post(
             f"/api/excel/chat/sessions/{session_id}/answer",
-            json={"question": "route first"},
+            json={
+                "question": "route first",
+                "selected_version_ids": [
+                    document["version_id"]
+                    for document in route_payload["selected_documents"]
+                ],
+                "session_revision": route_payload["session_revision"],
+                "request_id": "route-answer-request",
+            },
         )
         assert answer_response.status_code == 200
         answer_payload = answer_response.json()
-        assert answer_payload["newly_attached_documents"] == []
+        assert answer_payload["newly_attached_documents"][0]["version_id"] == version_id
         assert answer_payload["answer_blocks"][0]["citation_ids"] == ["C1"]
         assert "timings" not in answer_payload
 
@@ -685,6 +709,171 @@ def test_chat_answer_request_passes_deep_thinking_flag(
         assert response.status_code == 200
         assert response.json()["answer_blocks"][0]["reasoning"] == "Captured reasoning."
         assert llm_client.answer_calls[0]["enable_deep_thinking"] is True
+
+
+def test_chat_request_id_is_idempotent_and_payload_bound(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+        path = f"/api/excel/chat/sessions/{session_id}/messages"
+        request_payload = {
+            "question": "No documents are available.",
+            "request_id": "excel-idempotency-request",
+        }
+
+        first_response = client.post(path, json=request_payload)
+        second_response = client.post(path, json=request_payload)
+
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert second_response.json() == first_response.json()
+        assert len(llm_client.route_calls) == 1
+        turns = client.get(
+            f"/api/excel/chat/sessions/{session_id}/turns"
+        ).json()["turns"]
+        assert len(turns) == 1
+
+        conflict_response = client.post(
+            path,
+            json={
+                "question": "A different payload must not reuse the request ID.",
+                "request_id": "excel-idempotency-request",
+            },
+        )
+        assert conflict_response.status_code == 409
+        assert conflict_response.json()["code"] == "CHAT_IDEMPOTENCY_CONFLICT"
+        assert len(llm_client.route_calls) == 1
+
+
+def test_failed_chat_request_releases_idempotency_claim_for_retry(
+    tmp_path: Path,
+) -> None:
+    class FailOnceRouteLlmClient(CapturingLlmClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        def route_documents(self, *args, **kwargs) -> list[SelectedDocument]:
+            if not self.failed:
+                self.failed = True
+                raise LlmRequestError(
+                    stage="router",
+                    model="test-router",
+                    provider="test-provider",
+                    duration_seconds=0.1,
+                    cause=RuntimeError("injected transient failure"),
+                )
+            return super().route_documents(*args, **kwargs)
+
+    llm_client = FailOnceRouteLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+        path = f"/api/excel/chat/sessions/{session_id}/messages"
+        payload = {
+            "question": "Retry this request safely.",
+            "request_id": "retry-after-failure-request",
+        }
+
+        failed_response = client.post(path, json=payload)
+        retried_response = client.post(path, json=payload)
+
+        assert failed_response.status_code == 502
+        assert retried_response.status_code == 200
+        turns = client.get(
+            f"/api/excel/chat/sessions/{session_id}/turns"
+        ).json()["turns"]
+        assert [turn["question"] for turn in turns] == [payload["question"]]
+
+
+def test_unknown_excel_chat_session_is_never_created_implicitly(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        sessions_before = client.get("/api/excel/chat/sessions").json()["sessions"]
+        missing_session_id = "session_missing_excel_chat"
+
+        message_response = client.post(
+            f"/api/excel/chat/sessions/{missing_session_id}/messages",
+            json={
+                "question": "Do not create this session.",
+                "request_id": "missing-message-request",
+            },
+        )
+        route_response = client.post(
+            f"/api/excel/chat/sessions/{missing_session_id}/route",
+            json={"question": "Do not create this session."},
+        )
+        answer_response = client.post(
+            f"/api/excel/chat/sessions/{missing_session_id}/answer",
+            json={
+                "question": "Do not create this session.",
+                "request_id": "missing-answer-request",
+            },
+        )
+
+        assert message_response.status_code == 404
+        assert route_response.status_code == 404
+        assert answer_response.status_code == 404
+        assert client.get("/api/excel/chat/sessions").json()["sessions"] == sessions_before
+        assert llm_client.route_calls == []
+        assert llm_client.answer_calls == []
+
+
+def test_stale_route_revision_cannot_commit_excel_chat_turn(
+    tmp_path: Path,
+) -> None:
+    llm_client = CapturingLlmClient()
+    with _client_with_llm(tmp_path, llm_client) as client:
+        workbook_path = tmp_path / "revision.xlsx"
+        _write_large_xlsx_fixture(workbook_path, rows=3)
+        with workbook_path.open("rb") as workbook_file:
+            upload_response = client.post(
+                "/api/excel/files",
+                files={
+                    "file": (
+                        "revision.xlsx",
+                        workbook_file,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
+            )
+        version_id = upload_response.json()["version"]["version_id"]
+        client.post(f"/api/excel/versions/{version_id}/summary/generate")
+        session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+
+        route_payload = client.post(
+            f"/api/excel/chat/sessions/{session_id}/route",
+            json={"question": "Prepare a stale route."},
+        ).json()
+        committed_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/messages",
+            json={
+                "question": "Commit a newer turn first.",
+                "request_id": "newer-turn-request",
+            },
+        )
+        assert committed_response.status_code == 200
+
+        stale_response = client.post(
+            f"/api/excel/chat/sessions/{session_id}/answer",
+            json={
+                "question": "Prepare a stale route.",
+                "selected_version_ids": [version_id],
+                "session_revision": route_payload["session_revision"],
+                "request_id": "stale-route-answer-request",
+            },
+        )
+
+        assert stale_response.status_code == 409
+        assert stale_response.json()["code"] == "CHAT_SESSION_REVISION_CONFLICT"
+        assert len(llm_client.answer_calls) == 1
+        turns = client.get(
+            f"/api/excel/chat/sessions/{session_id}/turns"
+        ).json()["turns"]
+        assert [turn["question"] for turn in turns] == ["Commit a newer turn first."]
 
 
 def test_langgraph_workflow_runs_full_chat_chain(

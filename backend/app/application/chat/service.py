@@ -1,7 +1,9 @@
 import hashlib
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from threading import Lock, RLock
 
 from app.application.chat.access_control import ChatAccessController
@@ -15,7 +17,7 @@ from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.access import FileAccessContext
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.llm_preferences.service import WorkspaceLlmPreferenceService
-from app.core.errors import AssetNotFoundError
+from app.core.errors import AssetNotFoundError, ChatSessionRevisionConflict
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
@@ -165,25 +167,21 @@ class ChatService:
         enable_deep_thinking: bool = False,
         cancellation_token: ChatCancellationToken | None = None,
         user_role: UserRole = UserRole.MEMBER,
+        request_id: str | None = None,
     ) -> ChatAnswer:
-        if session_id is not None:
-            with self._session_operation_lock(session_id):
-                return self._answer_question_locked(
-                    question,
-                    session_id=session_id,
-                    user_id=user_id,
-                    enable_deep_thinking=enable_deep_thinking,
-                    cancellation_token=cancellation_token,
-                    user_role=user_role,
-                )
-        return self._answer_question_locked(
-            question,
-            session_id=session_id,
-            user_id=user_id,
-            enable_deep_thinking=enable_deep_thinking,
-            cancellation_token=cancellation_token,
-            user_role=user_role,
-        )
+        resolved_session_id = session_id
+        if resolved_session_id is None:
+            resolved_session_id = self.create_session_for_user(user_id).session_id
+        with self._session_operation_lock(resolved_session_id):
+            return self._answer_question_locked(
+                question,
+                session_id=resolved_session_id,
+                user_id=user_id,
+                enable_deep_thinking=enable_deep_thinking,
+                cancellation_token=cancellation_token,
+                user_role=user_role,
+                request_id=request_id,
+            )
 
     def _answer_question_locked(
         self,
@@ -194,41 +192,127 @@ class ChatService:
         enable_deep_thinking: bool = False,
         cancellation_token: ChatCancellationToken | None = None,
         user_role: UserRole = UserRole.MEMBER,
+        request_id: str | None = None,
     ) -> ChatAnswer:
+        if session_id is None:
+            raise AssetNotFoundError("chat session was not found")
+        session = self._require_session(session_id, user_id=user_id)
+        request_fingerprint = self._request_fingerprint(
+            session_id=session.session_id,
+            user_id=user_id,
+            question=question,
+            enable_deep_thinking=enable_deep_thinking,
+        )
+        existing_answer = self._claim_request(
+            session=session,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if existing_answer is not None:
+            return existing_answer
         preference = self._llm_preferences.get_preference()
         access = FileAccessContext(user_id=user_id, role=user_role)
-        self._raise_if_cancelled(cancellation_token)
-        if self._workflow is not None:
-            return self._workflow.answer_question(
-                ChatWorkflowRequest(
+        try:
+            self._raise_if_cancelled(cancellation_token)
+            if self._workflow is not None:
+                return self._workflow.answer_question(
+                    ChatWorkflowRequest(
+                        question=question,
+                        session_id=session.session_id,
+                        user_id=user_id,
+                        enable_deep_thinking=enable_deep_thinking,
+                        llm_preference=preference,
+                        cancellation_token=cancellation_token,
+                        file_access=access,
+                        request_id=request_id,
+                    ),
+                    actions=self,
+                )
+            route_result = self.route_question(
+                question,
+                session_id=session.session_id,
+                user_id=user_id,
+                llm_preference=preference,
+                cancellation_token=cancellation_token,
+                file_access=access,
+                request_id=request_id,
+            )
+            return self.answer_routed_question(
+                question=question,
+                session_id=route_result.session_id,
+                user_id=user_id,
+                route_result=route_result,
+                enable_deep_thinking=enable_deep_thinking,
+                llm_preference=preference,
+                cancellation_token=cancellation_token,
+                file_access=access,
+                request_id=request_id,
+            )
+        except Exception:
+            self._release_request(
+                session_id=session.session_id,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+            raise
+
+    def answer_selected_question(
+        self,
+        *,
+        question: str,
+        session_id: str,
+        user_id: str,
+        selected_version_ids: list[str],
+        expected_session_revision: int | None = None,
+        enable_deep_thinking: bool = False,
+        cancellation_token: ChatCancellationToken | None = None,
+        user_role: UserRole = UserRole.MEMBER,
+        request_id: str | None = None,
+    ) -> ChatAnswer:
+        with self._session_operation_lock(session_id):
+            session = self._require_session(session_id, user_id=user_id)
+            request_fingerprint = self._request_fingerprint(
+                session_id=session.session_id,
+                user_id=user_id,
+                question=question,
+                enable_deep_thinking=enable_deep_thinking,
+                selected_version_ids=selected_version_ids,
+            )
+            existing_answer = self._claim_request(
+                session=session,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+            if existing_answer is not None:
+                return existing_answer
+            access = FileAccessContext(user_id=user_id, role=user_role)
+            try:
+                route_result = self._plan_selected_version_route(
                     question=question,
-                    session_id=session_id,
+                    session=session,
+                    selected_version_ids=selected_version_ids,
+                    access=access,
+                    request_id=request_id,
+                    expected_session_revision=expected_session_revision,
+                )
+                return self._answer_routed_question_locked(
+                    question=question,
+                    session_id=session.session_id,
                     user_id=user_id,
+                    route_result=route_result,
+                    selected_version_ids=selected_version_ids,
                     enable_deep_thinking=enable_deep_thinking,
-                    llm_preference=preference,
                     cancellation_token=cancellation_token,
                     file_access=access,
-                ),
-                actions=self,
-            )
-        route_result = self.route_question(
-            question,
-            session_id=session_id,
-            user_id=user_id,
-            llm_preference=preference,
-            cancellation_token=cancellation_token,
-            file_access=access,
-        )
-        return self.answer_routed_question(
-            question=question,
-            session_id=route_result.session_id,
-            user_id=user_id,
-            route_result=route_result,
-            enable_deep_thinking=enable_deep_thinking,
-            llm_preference=preference,
-            cancellation_token=cancellation_token,
-            file_access=access,
-        )
+                    request_id=request_id,
+                )
+            except Exception:
+                self._release_request(
+                    session_id=session.session_id,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                )
+                raise
 
     def route_question(
         self,
@@ -239,6 +323,7 @@ class ChatService:
         llm_preference: LlmPreference | None = None,
         cancellation_token: ChatCancellationToken | None = None,
         file_access: FileAccessContext | None = None,
+        request_id: str | None = None,
     ) -> ChatRouteResult:
         if session_id is not None:
             with self._session_operation_lock(session_id):
@@ -249,6 +334,7 @@ class ChatService:
                     llm_preference=llm_preference,
                     cancellation_token=cancellation_token,
                     file_access=file_access,
+                    request_id=request_id,
                 )
         return self._route_question_locked(
             question,
@@ -257,6 +343,7 @@ class ChatService:
             llm_preference=llm_preference,
             cancellation_token=cancellation_token,
             file_access=file_access,
+            request_id=request_id,
         )
 
     def _route_question_locked(
@@ -268,10 +355,13 @@ class ChatService:
         llm_preference: LlmPreference | None = None,
         cancellation_token: ChatCancellationToken | None = None,
         file_access: FileAccessContext | None = None,
+        request_id: str | None = None,
     ) -> ChatRouteResult:
         preference = llm_preference or self._llm_preferences.get_preference()
         self._raise_if_cancelled(cancellation_token)
-        session = self._get_or_create_session(session_id, user_id=user_id)
+        if session_id is None:
+            raise AssetNotFoundError("chat session was not found")
+        session = self._require_session(session_id, user_id=user_id)
         existing_turns = self._filter_accessible_turn_context(
             self._sessions.list_turns(session.session_id),
             access=file_access,
@@ -299,23 +389,15 @@ class ChatService:
         )
         self._raise_if_cancelled(cancellation_token)
 
-        newly_attached = self._attach_new_documents(
+        newly_attached, planned_attachments = self._plan_new_documents(
             session_id=session.session_id,
             selected_documents=selected_documents,
             attached_documents=attached_before,
             access=file_access,
         )
-        try:
-            self._raise_if_cancelled(cancellation_token)
-        except ChatRequestCancelledError:
-            self._rollback_new_attachments(session.session_id, newly_attached)
-            raise
-        attached_after = self._filter_accessible_attached_documents(
-            self._sessions.list_attached_documents(session.session_id),
-            access=file_access,
-        )
+        self._raise_if_cancelled(cancellation_token)
+        attached_after = [*attached_before, *planned_attachments]
         created_at = utc_now_iso()
-        self._sessions.touch_session(session.session_id, created_at)
         return ChatRouteResult(
             session_id=session.session_id,
             question=question,
@@ -323,6 +405,8 @@ class ChatService:
             newly_attached_documents=newly_attached,
             attached_documents=attached_after,
             created_at=created_at,
+            request_id=request_id,
+            session_revision=session.conversation_revision,
         )
 
     def answer_routed_question(
@@ -337,6 +421,7 @@ class ChatService:
         llm_preference: LlmPreference | None = None,
         cancellation_token: ChatCancellationToken | None = None,
         file_access: FileAccessContext | None = None,
+        request_id: str | None = None,
     ) -> ChatAnswer:
         with self._session_operation_lock(session_id):
             return self._answer_routed_question_locked(
@@ -349,6 +434,7 @@ class ChatService:
                 llm_preference=llm_preference,
                 cancellation_token=cancellation_token,
                 file_access=file_access,
+                request_id=request_id,
             )
 
     def _answer_routed_question_locked(
@@ -363,19 +449,23 @@ class ChatService:
         llm_preference: LlmPreference | None = None,
         cancellation_token: ChatCancellationToken | None = None,
         file_access: FileAccessContext | None = None,
+        request_id: str | None = None,
     ) -> ChatAnswer:
         preference = llm_preference or self._llm_preferences.get_preference()
-        session = self._get_or_create_session(session_id, user_id=user_id)
-        created_turn_id: str | None = None
+        session = self._require_session(session_id, user_id=user_id)
         try:
             self._raise_if_cancelled(cancellation_token)
             existing_turns = self._filter_accessible_turn_context(
                 self._sessions.list_turns(session.session_id),
                 access=file_access,
             )
-            attached_documents = self._filter_accessible_attached_documents(
-                self._sessions.list_attached_documents(session.session_id),
-                access=file_access,
+            attached_documents = (
+                route_result.attached_documents
+                if route_result is not None
+                else self._filter_accessible_attached_documents(
+                    self._sessions.list_attached_documents(session.session_id),
+                    access=file_access,
+                )
             )
             documents_for_answer = self._resolve_documents_for_answer(
                 attached_documents=attached_documents,
@@ -464,40 +554,59 @@ class ChatService:
                 created_at=created_at,
             )
             self._raise_if_cancelled(cancellation_token)
-            created_turn_id = new_id("turn")
-            self._sessions.create_turn(
-                ChatTurn(
-                    turn_id=created_turn_id,
-                    session_id=session.session_id,
-                    question=question,
-                    answer_text="\n".join(block.text for block in answer_blocks),
-                    citation_ids=[
-                        citation_id
-                        for block in answer_blocks
-                        for citation_id in block.citation_ids
-                    ],
-                    selected_documents=selected_documents,
-                    created_at=created_at,
-                    answer_blocks=answer_blocks,
-                    newly_attached_documents=newly_attached_documents,
-                    attached_documents=attached_documents,
-                    citations=citations,
-                    insufficient_evidence=answer.insufficient_evidence,
-                    follow_up_suggestions=answer.follow_up_suggestions,
-                    warnings=answer.warnings,
-                )
+            turn = ChatTurn(
+                turn_id=new_id("turn"),
+                session_id=session.session_id,
+                question=question,
+                answer_text="\n".join(block.text for block in answer_blocks),
+                citation_ids=[
+                    citation_id
+                    for block in answer_blocks
+                    for citation_id in block.citation_ids
+                ],
+                selected_documents=selected_documents,
+                created_at=created_at,
+                answer_blocks=answer_blocks,
+                newly_attached_documents=newly_attached_documents,
+                attached_documents=attached_documents,
+                citations=citations,
+                insufficient_evidence=answer.insufficient_evidence,
+                follow_up_suggestions=answer.follow_up_suggestions,
+                warnings=answer.warnings,
+                request_id=request_id,
             )
-            self._sessions.touch_session(session.session_id, created_at)
             self._raise_if_cancelled(cancellation_token)
-            return answer
+            newly_attached_version_ids = {
+                document.version_id for document in newly_attached_documents
+            }
+            committed_turn = self._sessions.commit_excel_chat_turn(
+                session_id=session.session_id,
+                user_id=user_id,
+                expected_conversation_revision=(
+                    route_result.session_revision
+                    if route_result is not None
+                    else session.conversation_revision
+                ),
+                attached_documents=[
+                    document
+                    for document in attached_documents
+                    if document.version_id in newly_attached_version_ids
+                ],
+                turn=turn,
+                request_fingerprint=(
+                    self._request_fingerprint(
+                        session_id=session.session_id,
+                        user_id=user_id,
+                        question=question,
+                        enable_deep_thinking=enable_deep_thinking,
+                        selected_version_ids=selected_version_ids,
+                    )
+                    if request_id
+                    else None
+                ),
+            )
+            return self._answer_from_turn(committed_turn)
         except ChatRequestCancelledError:
-            if created_turn_id is not None:
-                self._sessions.delete_turn(session.session_id, created_turn_id)
-            if route_result is not None:
-                self._rollback_new_attachments(
-                    session.session_id,
-                    route_result.newly_attached_documents,
-                )
             raise
 
     def _cancellation_checker(
@@ -538,29 +647,6 @@ class ChatService:
                 self._session_locks.pop(session_id, None)
             else:
                 entry.discard_when_idle = True
-
-    def _rollback_new_attachments(
-        self,
-        session_id: str,
-        newly_attached: list[SelectedDocument],
-    ) -> None:
-        referenced_version_ids = {
-            document.version_id
-            for turn in self._sessions.list_turns(session_id)
-            for document in [
-                *turn.selected_documents,
-                *turn.newly_attached_documents,
-                *turn.attached_documents,
-            ]
-        }
-        self._sessions.detach_documents(
-            session_id,
-            [
-                document.version_id
-                for document in newly_attached
-                if document.version_id not in referenced_version_ids
-            ],
-        )
 
     def _filter_accessible_attached_documents(
         self,
@@ -770,39 +856,165 @@ class ChatService:
             ]
         return self._attached_to_selected_documents(attached_documents)
 
-    def _get_or_create_session(self, session_id: str | None, *, user_id: str) -> ChatSession:
-        if session_id is None:
-            return self.create_session_for_user(user_id)
+    def _require_session(self, session_id: str, *, user_id: str) -> ChatSession:
         session = self._sessions.get_session(session_id, workspace=self._workspace)
         if session is not None and session.user_id == user_id:
             return session
-        if session is not None:
-            raise AssetNotFoundError("chat session was not found")
-        now = utc_now_iso()
-        session = ChatSession(
-            session_id=session_id,
-            user_id=user_id,
-            created_at=now,
-            updated_at=now,
-            workspace=ChatWorkspace.EXCEL,
+        raise AssetNotFoundError("chat session was not found")
+
+    def _request_fingerprint(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        question: str,
+        enable_deep_thinking: bool,
+        selected_version_ids: list[str] | None = None,
+    ) -> str:
+        payload = {
+            "workspace": self._workspace,
+            "session_id": session_id,
+            "user_id": user_id,
+            "question": question,
+            "enable_deep_thinking": enable_deep_thinking,
+            "selected_version_ids": sorted(set(selected_version_ids or [])),
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _claim_request(
+        self,
+        *,
+        session: ChatSession,
+        request_id: str | None,
+        request_fingerprint: str,
+    ) -> ChatAnswer | None:
+        if request_id is None:
+            return None
+        claimed_at = datetime.now(UTC)
+        existing_turn = self._sessions.claim_excel_chat_request(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+            claimed_at=claimed_at.isoformat(),
+            lease_expires_at=(claimed_at + timedelta(minutes=10)).isoformat(),
         )
-        self._sessions.create_session(session)
-        return session
+        if existing_turn is None:
+            return None
+        return self._answer_from_turn(existing_turn)
+
+    def _release_request(
+        self,
+        *,
+        session_id: str,
+        request_id: str | None,
+        request_fingerprint: str,
+    ) -> None:
+        if request_id is None:
+            return
+        self._sessions.release_excel_chat_request(
+            session_id=session_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+
+    def _answer_from_turn(self, turn: ChatTurn) -> ChatAnswer:
+        return ChatAnswer(
+            session_id=turn.session_id,
+            question=turn.question,
+            answer_blocks=turn.answer_blocks,
+            selected_documents=turn.selected_documents,
+            newly_attached_documents=turn.newly_attached_documents,
+            attached_documents=turn.attached_documents,
+            citations=turn.citations,
+            insufficient_evidence=turn.insufficient_evidence,
+            follow_up_suggestions=turn.follow_up_suggestions,
+            warnings=turn.warnings,
+            created_at=turn.created_at,
+        )
+
+    def _plan_selected_version_route(
+        self,
+        *,
+        question: str,
+        session: ChatSession,
+        selected_version_ids: list[str],
+        access: FileAccessContext,
+        request_id: str | None,
+        expected_session_revision: int | None,
+    ) -> ChatRouteResult:
+        if (
+            expected_session_revision is not None
+            and expected_session_revision != session.conversation_revision
+        ):
+            raise ChatSessionRevisionConflict(session.session_id)
+        summaries_by_version_id = {
+            summary.version_id: summary
+            for summary in self._summaries.list_active_summaries(access=access)
+        }
+        selected_documents: list[SelectedDocument] = []
+        seen_version_ids: set[str] = set()
+        for version_id in selected_version_ids:
+            if version_id in seen_version_ids:
+                continue
+            seen_version_ids.add(version_id)
+            summary = summaries_by_version_id.get(version_id)
+            if summary is None:
+                continue
+            selected_documents.append(
+                SelectedDocument(
+                    file_id=summary.file_id,
+                    version_id=summary.version_id,
+                    reason="selected by the route plan",
+                )
+            )
+        attached_before = self._filter_accessible_attached_documents(
+            self._sessions.list_attached_documents(session.session_id),
+            access=access,
+        )
+        newly_attached, planned_attachments = self._plan_new_documents(
+            session_id=session.session_id,
+            selected_documents=selected_documents,
+            attached_documents=attached_before,
+            access=access,
+        )
+        return ChatRouteResult(
+            session_id=session.session_id,
+            question=question,
+            selected_documents=selected_documents,
+            newly_attached_documents=newly_attached,
+            attached_documents=[*attached_before, *planned_attachments],
+            created_at=utc_now_iso(),
+            request_id=request_id,
+            session_revision=(
+                session.conversation_revision
+                if expected_session_revision is None
+                else expected_session_revision
+            ),
+        )
 
     def _normalize_session_title(self, title: str) -> str:
         normalized = " ".join(title.split())
         return normalized[:120] if normalized else "New chat"
 
-    def _attach_new_documents(
+    def _plan_new_documents(
         self,
         session_id: str,
         selected_documents: list[SelectedDocument],
         attached_documents: list[AttachedDocument],
         *,
         access: FileAccessContext | None,
-    ) -> list[SelectedDocument]:
+    ) -> tuple[list[SelectedDocument], list[AttachedDocument]]:
         attached_version_ids = {document.version_id for document in attached_documents}
         newly_attached: list[SelectedDocument] = []
+        planned_attachments: list[AttachedDocument] = []
         for document in selected_documents:
             if document.version_id in attached_version_ids:
                 continue
@@ -821,9 +1033,9 @@ class ChatService:
                 row_count=sum(sheet.row_count for sheet in sheets),
                 context_hash=self._document_context_hash(document.version_id, sheets),
             )
-            if self._sessions.attach_document(attached):
-                newly_attached.append(document)
-        return newly_attached
+            newly_attached.append(document)
+            planned_attachments.append(attached)
+        return newly_attached, planned_attachments
 
     def _load_rows_for_attached_documents(
         self,

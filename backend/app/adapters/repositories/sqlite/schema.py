@@ -931,4 +931,96 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=23,
+        name="add_chat_session_context_scope",
+        statements=(
+            """
+            ALTER TABLE chat_sessions
+            ADD COLUMN context_file_ids_json TEXT NOT NULL DEFAULT '[]'
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=24,
+        name="add_chat_turn_request_idempotency_key",
+        statements=(
+            """
+            ALTER TABLE chat_turns
+            ADD COLUMN request_id TEXT
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_turns_session_request
+              ON chat_turns(session_id, request_id)
+              WHERE request_id IS NOT NULL
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=25,
+        name="add_chat_session_optimistic_revision",
+        statements=(
+            """
+            ALTER TABLE chat_sessions
+            ADD COLUMN revision INTEGER NOT NULL DEFAULT 0
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=26,
+        name="persist_pdf_content_fingerprint",
+        statements=(
+            """
+            ALTER TABLE pdf_files
+            ADD COLUMN content_fingerprint TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_files_content_fingerprint
+              ON pdf_files(content_fingerprint)
+              WHERE content_fingerprint <> ''
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=27,
+        name="add_excel_chat_conversation_revision",
+        statements=(
+            """
+            ALTER TABLE chat_sessions
+            ADD COLUMN conversation_revision INTEGER NOT NULL DEFAULT 0
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=28,
+        name="add_excel_chat_request_executions",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS chat_request_executions (
+              workspace TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              request_id TEXT NOT NULL,
+              user_id TEXT NOT NULL,
+              request_fingerprint TEXT NOT NULL,
+              status TEXT NOT NULL,
+              lease_expires_at TEXT NOT NULL,
+              turn_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(workspace, session_id, request_id),
+              FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id),
+              FOREIGN KEY(turn_id) REFERENCES chat_turns(turn_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_request_executions_lease
+              ON chat_request_executions(status, lease_expires_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_request_executions_turn
+              ON chat_request_executions(turn_id)
+              WHERE turn_id IS NOT NULL
+            """,
+        ),
+    ),
 )

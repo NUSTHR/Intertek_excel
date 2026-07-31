@@ -4,20 +4,10 @@ from app.domain.models import PdfAttachedDocument, PdfDocumentChunk, PdfFile, Se
 
 
 @dataclass(frozen=True)
-class PdfChunkSearchMatch:
+class PdfGroundingChunk:
     file: PdfFile
     chunk: PdfDocumentChunk
-    score: float
     excerpt: str
-    matched_terms: list[str]
-
-
-@dataclass(frozen=True)
-class PdfChunkSearchResult:
-    query: str
-    matches: list[PdfChunkSearchMatch]
-    total_matches: int
-    limit: int
 
 
 @dataclass(frozen=True)
@@ -46,7 +36,6 @@ class PdfChatAnswer:
     question: str
     answer_blocks: list[PdfAnswerBlock]
     citations: list[PdfCitation]
-    retrieval_matches: list[PdfChunkSearchMatch]
     selected_documents: list[SelectedDocument]
     newly_attached_documents: list[SelectedDocument]
     attached_documents: list[PdfAttachedDocument]
@@ -54,6 +43,7 @@ class PdfChatAnswer:
     follow_up_suggestions: list[str]
     warnings: list[str]
     created_at: str
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)

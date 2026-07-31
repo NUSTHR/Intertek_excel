@@ -457,6 +457,14 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
       fileIndex >= 0 ? Math.floor(fileIndex / pdfFilePageSize) + 1 : 1
   }
 
+  function focusFileById(fileId: string): boolean {
+    if (!fileLookup.value.has(fileId)) {
+      return false
+    }
+    setSingleSelectionById(fileId)
+    return true
+  }
+
   function revealFocusedUpload(force = false): void {
     if (!focusedUploadFileId) {
       return
@@ -525,6 +533,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
     renameFile,
     toggleFileVisibility,
     deleteFile,
+    focusFileById,
     selectFile,
     selectScope,
     openScope,

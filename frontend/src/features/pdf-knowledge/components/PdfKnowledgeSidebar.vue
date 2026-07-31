@@ -4,6 +4,7 @@ import WorkspaceNavigation from '../../../components/WorkspaceNavigation.vue'
 import type { WorkspaceNavigationItem } from '../../../types/workspace-navigation'
 import type { PdfKnowledgeNode, PdfRecentChat, PdfSidebarView } from '../types'
 import PdfKnowledgeTreeNode from './PdfKnowledgeTreeNode.vue'
+import PdfRecentChatList from './PdfRecentChatList.vue'
 
 defineProps<{
   activeView: PdfSidebarView
@@ -11,8 +12,16 @@ defineProps<{
   selectedContextId: string
   isAdmin: boolean
   isSessionLoading: boolean
+  isStartingNewChat: boolean
+  activeSessionId: string
   tree: PdfKnowledgeNode[]
   recentChats: PdfRecentChat[]
+  isChatSelectionMode: boolean
+  isAllChatsSelected: boolean
+  isChatBatchPending: boolean
+  selectedSessionIds: Set<string>
+  busySessionIds: Set<string>
+  sessionActionError: string
   userEmail: string
   userRoleLabel: string
 }>()
@@ -23,6 +32,16 @@ const emit = defineEmits<{
   openManagement: []
   newChat: []
   openChat: [chatId: string]
+  beginChatSelection: [sessionId?: string]
+  cancelChatSelection: []
+  toggleChatSelection: [sessionId: string]
+  toggleSelectAllChats: []
+  renameChat: [chat: PdfRecentChat]
+  toggleChatPinned: [chat: PdfRecentChat]
+  deleteChat: [chat: PdfRecentChat]
+  pinSelectedChats: []
+  unpinSelectedChats: []
+  deleteSelectedChats: []
   selectContext: [fileId: string]
   logout: []
 }>()
@@ -114,6 +133,7 @@ function handleDestination(itemId: string): void {
             type="button"
             :class="{ active: !selectedContextId }"
             aria-label="Use all PDF sources"
+            :aria-pressed="!selectedContextId"
             @click="emit('selectContext', '')"
           >
             <AppIcon name="grid_view" />
@@ -144,35 +164,31 @@ function handleDestination(itemId: string): void {
         </div>
       </section>
 
-      <section v-else class="pdfkb-sidebar-panel pdfkb-chat-list-panel">
-        <div class="pdfkb-section-title">
-          <span>Recent Chats</span>
-          <button type="button" aria-label="Add chat unavailable" disabled>
-            <AppIcon name="add" />
-          </button>
-        </div>
-
-        <div class="pdfkb-recent-chat-list">
-          <div v-if="recentChats.length === 0" class="pdfkb-sidebar-empty">
-            <AppIcon name="chat_bubble" />
-            <strong>No recent chats</strong>
-            <span>Start a PDF chat to keep history here.</span>
-          </div>
-
-          <button
-            v-else
-            v-for="chat in recentChats"
-            :key="chat.id"
-            type="button"
-            class="pdfkb-recent-chat chat-session-item"
-            :disabled="isSessionLoading"
-            @click="emit('openChat', chat.id)"
-          >
-            <span class="session-glyph"><AppIcon name="chat_bubble" /></span>
-            <span class="session-copy"><strong>{{ chat.title }}</strong></span>
-          </button>
-        </div>
-      </section>
+      <PdfRecentChatList
+        v-else
+        :chats="recentChats"
+        :active-session-id="activeSessionId"
+        :is-session-loading="isSessionLoading"
+        :is-starting-new-chat="isStartingNewChat"
+        :is-selection-mode="isChatSelectionMode"
+        :is-all-selected="isAllChatsSelected"
+        :is-batch-pending="isChatBatchPending"
+        :selected-session-ids="selectedSessionIds"
+        :busy-session-ids="busySessionIds"
+        :error-message="sessionActionError"
+        @new-chat="emit('newChat')"
+        @open-chat="emit('openChat', $event)"
+        @begin-selection="emit('beginChatSelection', $event)"
+        @cancel-selection="emit('cancelChatSelection')"
+        @toggle-selection="emit('toggleChatSelection', $event)"
+        @toggle-select-all="emit('toggleSelectAllChats')"
+        @rename-chat="emit('renameChat', $event)"
+        @toggle-pinned="emit('toggleChatPinned', $event)"
+        @delete-chat="emit('deleteChat', $event)"
+        @pin-selected="emit('pinSelectedChats')"
+        @unpin-selected="emit('unpinSelectedChats')"
+        @delete-selected="emit('deleteSelectedChats')"
+      />
     </div>
 
     <div class="pdfkb-sidebar-footer">

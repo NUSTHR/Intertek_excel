@@ -6,7 +6,6 @@ from app.api.schema_models.pdf import (
     PdfChatAnswerResponse,
     PdfChatRouteResponse,
     PdfChatTurnResponse,
-    PdfChunkSearchMatchResponse,
     PdfCitationResponse,
     PdfDocumentChunkResponse,
     PdfDocumentDetailResponse,
@@ -27,7 +26,6 @@ from app.api.schema_models.pdf import (
 from app.application.pdf_knowledge.models import (
     DeletePdfFileResult,
     PdfChatAnswer,
-    PdfChunkSearchMatch,
     PdfCitation,
 )
 from app.core.llm_catalog import list_supported_llm_models
@@ -103,6 +101,8 @@ def to_session_response(session: ChatSession) -> ChatSessionResponse:
         title=session.title,
         pinned_at=session.pinned_at,
         status=session.status,
+        context_file_ids=session.context_file_ids,
+        revision=session.revision,
     )
 
 
@@ -298,18 +298,6 @@ def to_pdf_document_chunk_response(
     )
 
 
-def to_pdf_chunk_search_match_response(
-    match: PdfChunkSearchMatch,
-) -> PdfChunkSearchMatchResponse:
-    return PdfChunkSearchMatchResponse(
-        file=to_pdf_file_response(match.file),
-        chunk=to_pdf_document_chunk_response(match.chunk),
-        score=match.score,
-        excerpt=match.excerpt,
-        matched_terms=match.matched_terms,
-    )
-
-
 def to_pdf_chat_answer_response(answer: PdfChatAnswer) -> PdfChatAnswerResponse:
     return PdfChatAnswerResponse(
         session_id=answer.session_id,
@@ -323,9 +311,6 @@ def to_pdf_chat_answer_response(answer: PdfChatAnswer) -> PdfChatAnswerResponse:
             for block in answer.answer_blocks
         ],
         citations=[to_pdf_citation_response(citation) for citation in answer.citations],
-        retrieval_matches=[
-            to_pdf_chunk_search_match_response(match) for match in answer.retrieval_matches
-        ],
         selected_documents=[
             to_pdf_selected_document_response(document) for document in answer.selected_documents
         ],
@@ -340,6 +325,7 @@ def to_pdf_chat_answer_response(answer: PdfChatAnswer) -> PdfChatAnswerResponse:
         follow_up_suggestions=answer.follow_up_suggestions,
         warnings=answer.warnings,
         created_at=answer.created_at,
+        request_id=answer.request_id,
     )
 
 
@@ -361,7 +347,10 @@ def to_pdf_chat_route_response(
             to_pdf_attached_document_response(document)
             for document in route_result.attached_documents
         ],
+        context_file_ids=route_result.context_file_ids,
+        session_revision=route_result.session_revision,
         created_at=route_result.created_at,
+        request_id=route_result.request_id,
     )
 
 
@@ -385,7 +374,6 @@ def to_pdf_chat_turn_response(turn: ChatTurn) -> PdfChatTurnResponse:
                 to_pdf_citation_response(_pdf_citation_from_stored_citation(citation))
                 for citation in turn.citations
             ],
-            retrieval_matches=[],
             selected_documents=[
                 to_pdf_selected_document_response(document) for document in turn.selected_documents
             ],
@@ -403,6 +391,7 @@ def to_pdf_chat_turn_response(turn: ChatTurn) -> PdfChatTurnResponse:
             follow_up_suggestions=turn.follow_up_suggestions,
             warnings=turn.warnings,
             created_at=turn.created_at,
+            request_id=turn.request_id,
         ),
         created_at=turn.created_at,
     )

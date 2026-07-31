@@ -53,6 +53,7 @@ class LangGraphChatWorkflow:
             llm_preference=request.llm_preference,
             cancellation_token=request.cancellation_token,
             file_access=request.file_access,
+            request_id=request.request_id,
         )
         return {"route_result": route_result}
 
@@ -68,5 +69,6 @@ class LangGraphChatWorkflow:
             llm_preference=request.llm_preference,
             cancellation_token=request.cancellation_token,
             file_access=request.file_access,
+            request_id=request.request_id,
         )
         return {"answer": answer}

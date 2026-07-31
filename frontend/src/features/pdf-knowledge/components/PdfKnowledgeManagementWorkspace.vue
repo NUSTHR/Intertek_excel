@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import { pdfManagementNavItems } from '../constants'
 import { usePdfDocumentInsight } from '../composables/use-pdf-document-insight'
 import { usePdfKnowledgeLibrary } from '../composables/use-pdf-knowledge-library'
-import type { PdfManagedFile, PdfWorkspaceMode } from '../types'
+import type {
+  PdfManagedFile,
+  PdfManagementFocusTarget,
+  PdfWorkspaceMode,
+} from '../types'
 import PdfManagementFilePane from './PdfManagementFilePane.vue'
 import PdfManagementInsightPane from './PdfManagementInsightPane.vue'
 import PdfManagementSidebar from './PdfManagementSidebar.vue'
@@ -19,6 +23,7 @@ const emit = defineEmits<{
 }>()
 
 const props = defineProps<{
+  focusTarget?: PdfManagementFocusTarget
   isAdmin: boolean
   userEmail: string
   userRoleLabel: string
@@ -54,14 +59,32 @@ const pendingDeleteDescendantCount = computed(() => {
   }).length
 })
 
-onMounted(() => {
-  void library.loadLibrary()
+onMounted(async () => {
+  await library.loadLibrary()
+  applyFocusTarget()
   document.addEventListener('keydown', handleDocumentKeyDown)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', handleDocumentKeyDown)
 })
+
+watch(
+  () => props.focusTarget?.requestId,
+  () => {
+    applyFocusTarget()
+  },
+)
+
+function applyFocusTarget(): void {
+  const fileId = props.focusTarget?.fileId
+  if (!fileId) {
+    return
+  }
+  if (!library.focusFileById(fileId)) {
+    library.errorMessage.value = 'The referenced PDF is no longer available.'
+  }
+}
 
 function openFolderPicker(): void {
   if (!props.isAdmin || library.isUploading.value) {

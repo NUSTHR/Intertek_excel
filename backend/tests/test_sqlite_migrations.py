@@ -7,7 +7,14 @@ import pytest
 from app.adapters.repositories import sqlite_repository
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.core.config import Settings
-from app.domain.models import ExcelUploadTask, ExcelUploadTaskStatus
+from app.core.errors import ChatSessionRevisionConflict
+from app.domain.models import (
+    ChatSession,
+    ChatTurn,
+    ChatWorkspace,
+    ExcelUploadTask,
+    ExcelUploadTaskStatus,
+)
 
 
 def test_repository_initialization_records_schema_migration(tmp_path: Path) -> None:
@@ -127,6 +134,301 @@ def test_repository_creates_raw_row_mapping_pagination_index(tmp_path: Path) -> 
         }
 
     assert "idx_mappings_sheet_raw_csv_row" in indexes
+
+
+def test_repository_creates_chat_turn_idempotency_index(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+
+    repository.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('chat_turns')")
+        }
+        session_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('chat_sessions')")
+        }
+        request_execution_table = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'chat_request_executions'
+            """
+        ).fetchone()
+        indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list('chat_turns')")
+        }
+
+    assert "request_id" in columns
+    assert "conversation_revision" in session_columns
+    assert request_execution_table is not None
+    assert "idx_chat_turns_session_request" in indexes
+
+    with sqlite3.connect(database_path) as connection:
+        pdf_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('pdf_files')")
+        }
+        pdf_indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list('pdf_files')")
+        }
+
+    assert "content_fingerprint" in pdf_columns
+    assert "idx_pdf_files_content_fingerprint" in pdf_indexes
+
+
+def test_pdf_chat_turn_commit_is_atomic_and_revision_guarded(tmp_path: Path) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    repository.initialize()
+    session = ChatSession(
+        session_id="pdfsession_atomic",
+        user_id="user_admin",
+        created_at="2026-07-29T00:00:00+00:00",
+        updated_at="2026-07-29T00:00:00+00:00",
+        workspace=ChatWorkspace.PDF,
+    )
+    repository.create_session(session)
+    failed_turn = ChatTurn(
+        turn_id="turn_atomic_failed",
+        session_id=session.session_id,
+        question="must roll back",
+        answer_text="must not persist",
+        citation_ids=[],
+        selected_documents=[],
+        created_at="2026-07-29T00:00:00.500000+00:00",
+    )
+    original_insert_turn = repository._insert_turn_on_connection
+
+    def fail_turn_insert(
+        _connection: sqlite3.Connection,
+        _turn: ChatTurn,
+    ) -> None:
+        raise RuntimeError("injected PDF turn insert failure")
+
+    repository._insert_turn_on_connection = fail_turn_insert  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="injected PDF turn insert failure"):
+        repository.commit_pdf_chat_turn(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            expected_conversation_revision=0,
+            context_file_ids=["failed_scope"],
+            attached_documents=[],
+            turn=failed_turn,
+            title_if_new="must roll back",
+            request_fingerprint=None,
+        )
+    repository._insert_turn_on_connection = original_insert_turn  # type: ignore[method-assign]
+
+    after_failure = repository.get_session(
+        session.session_id,
+        workspace=ChatWorkspace.PDF.value,
+    )
+    assert after_failure is not None
+    assert after_failure.conversation_revision == 0
+    assert after_failure.context_file_ids == []
+    assert after_failure.title == "New chat"
+    assert after_failure.updated_at == session.updated_at
+    assert repository.list_turns(
+        session.session_id,
+        workspace=ChatWorkspace.PDF.value,
+    ) == []
+
+    first_turn = ChatTurn(
+        turn_id="turn_atomic_first",
+        session_id=session.session_id,
+        question="first",
+        answer_text="answer",
+        citation_ids=[],
+        selected_documents=[],
+        created_at="2026-07-29T00:00:01+00:00",
+        request_id="pdfreq_atomic_first",
+    )
+    request_fingerprint = "pdf-chat-atomic-fingerprint"
+    claimed = repository.claim_pdf_chat_request(
+        session_id=session.session_id,
+        user_id=session.user_id,
+        request_id=first_turn.request_id,
+        request_fingerprint=request_fingerprint,
+        claimed_at="2026-07-29T00:00:00+00:00",
+        lease_expires_at="2026-07-29T00:10:00+00:00",
+    )
+    assert claimed is None
+
+    committed = repository.commit_pdf_chat_turn(
+        session_id=session.session_id,
+        user_id=session.user_id,
+        expected_conversation_revision=0,
+        context_file_ids=["folder_scope"],
+        attached_documents=[],
+        turn=first_turn,
+        title_if_new="first",
+        request_fingerprint=request_fingerprint,
+    )
+
+    assert committed == first_turn
+    updated_session = repository.get_session(
+        session.session_id,
+        workspace=ChatWorkspace.PDF.value,
+    )
+    assert updated_session is not None
+    assert updated_session.revision == 0
+    assert updated_session.conversation_revision == 1
+    assert updated_session.context_file_ids == ["folder_scope"]
+    assert updated_session.title == "first"
+
+    stale_turn = ChatTurn(
+        turn_id="turn_atomic_stale",
+        session_id=session.session_id,
+        question="stale",
+        answer_text="must not persist",
+        citation_ids=[],
+        selected_documents=[],
+        created_at="2026-07-29T00:00:02+00:00",
+    )
+    with pytest.raises(ChatSessionRevisionConflict):
+        repository.commit_pdf_chat_turn(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            expected_conversation_revision=0,
+            context_file_ids=["stale_scope"],
+            attached_documents=[],
+            turn=stale_turn,
+            title_if_new="stale",
+            request_fingerprint=None,
+        )
+
+    persisted_turns = repository.list_turns(
+        session.session_id,
+        workspace=ChatWorkspace.PDF.value,
+    )
+    assert [turn.turn_id for turn in persisted_turns] == [first_turn.turn_id]
+    unchanged_session = repository.get_session(
+        session.session_id,
+        workspace=ChatWorkspace.PDF.value,
+    )
+    assert unchanged_session is not None
+    assert unchanged_session.revision == 0
+    assert unchanged_session.conversation_revision == 1
+    assert unchanged_session.context_file_ids == ["folder_scope"]
+
+    retried = repository.commit_pdf_chat_turn(
+        session_id=session.session_id,
+        user_id=session.user_id,
+        expected_conversation_revision=0,
+        context_file_ids=["ignored_retry_scope"],
+        attached_documents=[],
+        turn=first_turn,
+        title_if_new="ignored retry",
+        request_fingerprint=request_fingerprint,
+    )
+    assert retried.turn_id == first_turn.turn_id
+    assert retried.request_id == first_turn.request_id
+
+
+def test_excel_chat_turn_commit_is_atomic_and_revision_guarded(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    repository.initialize()
+    session = ChatSession(
+        session_id="excelsession_atomic",
+        user_id="user_admin",
+        created_at="2026-07-30T00:00:00+00:00",
+        updated_at="2026-07-30T00:00:00+00:00",
+        workspace=ChatWorkspace.EXCEL,
+    )
+    repository.create_session(session)
+    failed_turn = ChatTurn(
+        turn_id="turn_excel_failed",
+        session_id=session.session_id,
+        question="must roll back",
+        answer_text="must not persist",
+        citation_ids=[],
+        selected_documents=[],
+        created_at="2026-07-30T00:00:01+00:00",
+    )
+    original_insert_turn = repository._insert_turn_on_connection
+
+    def fail_turn_insert(
+        _connection: sqlite3.Connection,
+        _turn: ChatTurn,
+    ) -> None:
+        raise RuntimeError("injected turn insert failure")
+
+    repository._insert_turn_on_connection = fail_turn_insert  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="injected turn insert failure"):
+        repository.commit_excel_chat_turn(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            expected_conversation_revision=0,
+            attached_documents=[],
+            turn=failed_turn,
+            request_fingerprint=None,
+        )
+    repository._insert_turn_on_connection = original_insert_turn  # type: ignore[method-assign]
+
+    after_failure = repository.get_session(
+        session.session_id,
+        workspace=ChatWorkspace.EXCEL.value,
+    )
+    assert after_failure is not None
+    assert after_failure.conversation_revision == 0
+    assert after_failure.updated_at == session.updated_at
+    assert repository.list_turns(
+        session.session_id,
+        workspace=ChatWorkspace.EXCEL.value,
+    ) == []
+
+    first_turn = ChatTurn(
+        turn_id="turn_excel_first",
+        session_id=session.session_id,
+        question="first",
+        answer_text="answer",
+        citation_ids=[],
+        selected_documents=[],
+        created_at="2026-07-30T00:00:02+00:00",
+    )
+    repository.commit_excel_chat_turn(
+        session_id=session.session_id,
+        user_id=session.user_id,
+        expected_conversation_revision=0,
+        attached_documents=[],
+        turn=first_turn,
+        request_fingerprint=None,
+    )
+
+    stale_turn = ChatTurn(
+        turn_id="turn_excel_stale",
+        session_id=session.session_id,
+        question="stale",
+        answer_text="must not persist",
+        citation_ids=[],
+        selected_documents=[],
+        created_at="2026-07-30T00:00:03+00:00",
+    )
+    with pytest.raises(ChatSessionRevisionConflict):
+        repository.commit_excel_chat_turn(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            expected_conversation_revision=0,
+            attached_documents=[],
+            turn=stale_turn,
+            request_fingerprint=None,
+        )
+
+    committed_session = repository.get_session(
+        session.session_id,
+        workspace=ChatWorkspace.EXCEL.value,
+    )
+    assert committed_session is not None
+    assert committed_session.conversation_revision == 1
+    assert [
+        turn.turn_id
+        for turn in repository.list_turns(
+            session.session_id,
+            workspace=ChatWorkspace.EXCEL.value,
+        )
+    ] == [first_turn.turn_id]
 
 
 def test_repository_migration_normalizes_storage_references(tmp_path: Path) -> None:

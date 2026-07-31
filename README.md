@@ -1050,7 +1050,6 @@ GET    /api/pdf/files/upload-tasks                       admin
 GET    /api/pdf/files/upload-tasks/{task_id}             admin
 GET    /api/pdf/files/{file_id}/detail
 GET    /api/pdf/files/{file_id}/chunks
-POST   /api/pdf/retrieval/search
 POST   /api/pdf/chat
 POST   /api/pdf/files/{file_id}/summary/generate
 GET    /api/pdf/model-settings

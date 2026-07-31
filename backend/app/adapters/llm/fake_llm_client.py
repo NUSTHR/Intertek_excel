@@ -117,6 +117,30 @@ class FakeLlmClient:
             if self._score(question, summary) > 0 or len(summaries) == 1
         ]
 
+    def route_pdf_documents(
+        self,
+        question: str,
+        summaries: list[DocumentSummary],
+        max_documents: int,
+        user_questions: list[str] | None = None,
+        attached_documents: list[AttachedDocument] | None = None,
+        previous_turns: list[ChatTurn] | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> list[SelectedDocument]:
+        return self.route_documents(
+            question=question,
+            summaries=summaries,
+            max_documents=max_documents,
+            user_questions=user_questions,
+            attached_documents=attached_documents,
+            previous_turns=previous_turns,
+            model=model,
+            provider=provider,
+            cancellation_checker=cancellation_checker,
+        )
+
     def answer_with_rows(
         self,
         question: str,
@@ -159,12 +183,13 @@ class FakeLlmClient:
         self,
         question: str,
         chunks: list[dict],
+        previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
         cancellation_checker: CancellationChecker | None = None,
     ) -> DraftChatAnswer:
-        _ = model, provider, enable_deep_thinking
+        _ = previous_turns, model, provider, enable_deep_thinking
         if cancellation_checker is not None:
             cancellation_checker()
         evidence_ids = [str(chunk["evidence_id"]) for chunk in chunks[:3]]

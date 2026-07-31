@@ -84,6 +84,8 @@ export interface ChatRouteResult {
   newly_attached_documents: SelectedDocument[]
   attached_documents: AttachedDocument[]
   created_at: string
+  request_id?: string | null
+  session_revision: number
 }
 
 export interface ChatModelSelection {

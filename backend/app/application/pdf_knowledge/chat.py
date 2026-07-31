@@ -1,46 +1,64 @@
+import hashlib
+import json
+import logging
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from threading import Lock, RLock
 
-from app.application.pdf_knowledge.model_settings import pdf_model_selection
-from app.application.pdf_knowledge.models import (
-    PdfAnswerBlock,
-    PdfChatAnswer,
-    PdfChunkSearchMatch,
-    PdfCitation,
+from app.application.chat.cancellation import ChatCancellationToken
+from app.application.pdf_knowledge.chat_answer import (
+    attached_pdf_to_routing_document,
+    build_pdf_answer,
+    chat_turn_from_pdf_answer,
+    chunk_payload,
+    insufficient_evidence_answer,
+    pdf_answer_from_chat_turn,
 )
-from app.application.pdf_knowledge.retrieval import PdfRetrievalService
-from app.core.errors import AssetNotFoundError, UploadValidationError
+from app.application.pdf_knowledge.chat_context import (
+    PdfContextAllocation,
+    PdfContextAssembler,
+)
+from app.application.pdf_knowledge.chat_policy import (
+    DEFAULT_PDF_CHAT_POLICY,
+    PdfChatPolicy,
+)
+from app.application.pdf_knowledge.chat_routing import PdfRoutingCatalogBuilder
+from app.application.pdf_knowledge.chat_scope import (
+    PdfChatScopeResolver,
+    is_visible_ready_pdf,
+)
+from app.application.pdf_knowledge.model_settings import (
+    PdfModelSelection,
+    pdf_model_selection,
+)
+from app.application.pdf_knowledge.models import (
+    PdfChatAnswer,
+)
+from app.core.errors import (
+    AssetNotFoundError,
+    ChatSessionRevisionConflict,
+    UploadValidationError,
+)
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
-    AttachedDocument,
-    ChatAnswerBlock,
     ChatSession,
     ChatTurn,
     ChatWorkspace,
-    DocumentSummary,
     DraftChatAnswer,
-    DraftCitation,
-    ExcelCitation,
     PdfAttachedDocument,
     PdfChatRouteResult,
     PdfDocumentChunk,
-    PdfFile,
-    PdfFileKind,
-    PdfFileVisibility,
-    PdfProcessingStatus,
     SelectedDocument,
-    SheetSummary,
     UserRole,
 )
-from app.ports.llm_client import LlmClient
+from app.ports.llm_client import PdfChatLlmClient
 from app.ports.repository import PdfChatRepository
 
-DEFAULT_PDF_CHAT_RETRIEVAL_LIMIT = 8
-MAX_PDF_CHAT_RETRIEVAL_LIMIT = 20
 PDF_CHAT_WORKSPACE = ChatWorkspace.PDF.value
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,13 +72,22 @@ class PdfChatService:
     def __init__(
         self,
         *,
-        retrieval: PdfRetrievalService,
-        llm_client: LlmClient,
+        llm_client: PdfChatLlmClient,
         sessions: PdfChatRepository,
+        policy: PdfChatPolicy = DEFAULT_PDF_CHAT_POLICY,
     ) -> None:
-        self._retrieval = retrieval
         self._llm_client = llm_client
         self._sessions = sessions
+        self._policy = policy
+        self._scope_resolver = PdfChatScopeResolver(sessions)
+        self._routing_catalog = PdfRoutingCatalogBuilder(
+            repository=sessions,
+            policy=policy,
+        )
+        self._context_assembler = PdfContextAssembler(
+            repository=sessions,
+            policy=policy,
+        )
         self._session_locks: dict[str, _SessionOperationLock] = {}
         self._session_locks_guard = Lock()
 
@@ -93,6 +120,7 @@ class PdfChatService:
         session_id: str,
         title: str,
         user_id: str | None = None,
+        expected_revision: int | None = None,
     ) -> ChatSession | None:
         with self._session_operation_lock(session_id):
             if self.get_session(session_id, user_id=user_id) is None:
@@ -102,6 +130,7 @@ class PdfChatService:
                 title=self._normalize_session_title(title),
                 updated_at=utc_now_iso(),
                 workspace=PDF_CHAT_WORKSPACE,
+                expected_revision=expected_revision,
             )
 
     def set_session_pinned(
@@ -109,6 +138,7 @@ class PdfChatService:
         session_id: str,
         pinned: bool,
         user_id: str | None = None,
+        expected_revision: int | None = None,
     ) -> ChatSession | None:
         with self._session_operation_lock(session_id):
             if self.get_session(session_id, user_id=user_id) is None:
@@ -119,19 +149,69 @@ class PdfChatService:
                 pinned_at=now if pinned else None,
                 updated_at=now,
                 workspace=PDF_CHAT_WORKSPACE,
+                expected_revision=expected_revision,
             )
 
-    def delete_session(self, session_id: str, user_id: str | None = None) -> bool:
+    def delete_session(
+        self,
+        session_id: str,
+        user_id: str | None = None,
+        expected_revision: int | None = None,
+    ) -> bool:
         with self._session_operation_lock(session_id):
             if self.get_session(session_id, user_id=user_id) is None:
                 return False
             deleted = self._sessions.delete_session(
                 session_id,
                 workspace=PDF_CHAT_WORKSPACE,
+                expected_revision=expected_revision,
             )
         if deleted:
             self._discard_session_operation_lock(session_id)
         return deleted
+
+    def batch_mutate_sessions(
+        self,
+        *,
+        action: str,
+        session_items: list[tuple[str, int]],
+        user_id: str,
+    ) -> tuple[list[ChatSession], list[str]]:
+        session_revisions: dict[str, int] = {}
+        for session_id, expected_revision in session_items:
+            existing_revision = session_revisions.get(session_id)
+            if (
+                existing_revision is not None
+                and existing_revision != expected_revision
+            ):
+                raise ChatSessionRevisionConflict(session_id)
+            session_revisions[session_id] = expected_revision
+        session_ids = sorted(session_revisions)
+        with self._session_operation_locks(session_ids):
+            for session_id in session_ids:
+                session = self.get_session(session_id, user_id=user_id)
+                if session is None:
+                    raise AssetNotFoundError("PDF chat session was not found")
+                if session.revision != session_revisions[session_id]:
+                    raise ChatSessionRevisionConflict(session_id)
+            if action in {"pin", "unpin"}:
+                now = utc_now_iso()
+                updated_sessions = self._sessions.batch_set_sessions_pinned(
+                    session_revisions,
+                    pinned_at=now if action == "pin" else None,
+                    updated_at=now,
+                    workspace=PDF_CHAT_WORKSPACE,
+                )
+                return updated_sessions, []
+            if action != "delete":
+                raise UploadValidationError("unsupported PDF chat session batch action")
+            deleted_session_ids = self._sessions.batch_delete_sessions(
+                session_revisions,
+                workspace=PDF_CHAT_WORKSPACE,
+            )
+        for session_id in deleted_session_ids:
+            self._discard_session_operation_lock(session_id)
+        return [], deleted_session_ids
 
     def list_turns(
         self,
@@ -147,11 +227,12 @@ class PdfChatService:
         *,
         question: str,
         file_ids: list[str] | None,
-        limit: int | None = None,
         enable_deep_thinking: bool = False,
         user_role: UserRole,
+        request_id: str | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
     ) -> PdfChatAnswer:
-        _ = limit
+        self._raise_if_cancelled(cancellation_token)
         normalized_question = _normalize_question(question)
         route_result = self.route_question(
             question=normalized_question,
@@ -159,6 +240,8 @@ class PdfChatService:
             user_id="legacy",
             file_ids=file_ids,
             user_role=user_role,
+            request_id=request_id,
+            cancellation_token=cancellation_token,
         )
         return self.answer_routed_question(
             session_id=route_result.session_id,
@@ -168,6 +251,8 @@ class PdfChatService:
             enable_deep_thinking=enable_deep_thinking,
             user_role=user_role,
             persist_turn=True,
+            request_id=request_id,
+            cancellation_token=cancellation_token,
         )
 
     def answer_session_question(
@@ -177,31 +262,58 @@ class PdfChatService:
         user_id: str,
         question: str,
         file_ids: list[str] | None,
-        limit: int | None = None,
         enable_deep_thinking: bool = False,
         user_role: UserRole,
+        request_id: str | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
     ) -> PdfChatAnswer:
-        _ = limit
         with self._session_operation_lock(session_id):
+            self._raise_if_cancelled(cancellation_token)
             session = self.get_session(session_id, user_id=user_id)
             if session is None:
                 raise AssetNotFoundError("PDF chat session was not found")
             normalized_question = _normalize_question(question)
-            route_result = self._route_question_locked(
+            request_fingerprint = self._request_fingerprint(
+                session_id=session.session_id,
+                user_id=user_id,
                 question=normalized_question,
-                session=session,
                 file_ids=file_ids,
-                user_role=user_role,
-            )
-            return self._answer_routed_question_locked(
-                question=normalized_question,
-                session=session,
-                route_result=route_result,
-                selected_file_ids=None,
                 enable_deep_thinking=enable_deep_thinking,
-                user_role=user_role,
-                persist_turn=True,
             )
+            existing_answer = self._claim_request(
+                session=session,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+            if existing_answer is not None:
+                return existing_answer
+            try:
+                route_result = self._route_question_locked(
+                    question=normalized_question,
+                    session=session,
+                    file_ids=file_ids,
+                    user_role=user_role,
+                    request_id=request_id,
+                    cancellation_token=cancellation_token,
+                )
+                return self._answer_routed_question_locked(
+                    question=normalized_question,
+                    session=session,
+                    route_result=route_result,
+                    enable_deep_thinking=enable_deep_thinking,
+                    user_role=user_role,
+                    persist_turn=True,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    cancellation_token=cancellation_token,
+                )
+            except Exception:
+                self._release_request(
+                    session_id=session.session_id,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                )
+                raise
 
     def route_question(
         self,
@@ -211,7 +323,10 @@ class PdfChatService:
         user_id: str,
         file_ids: list[str] | None,
         user_role: UserRole,
+        request_id: str | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
     ) -> PdfChatRouteResult:
+        self._raise_if_cancelled(cancellation_token)
         normalized_question = _normalize_question(question)
         if session_id is not None:
             with self._session_operation_lock(session_id):
@@ -223,6 +338,8 @@ class PdfChatService:
                     session=session,
                     file_ids=file_ids,
                     user_role=user_role,
+                    request_id=request_id,
+                    cancellation_token=cancellation_token,
                 )
         session = self.create_session_for_user(user_id)
         return self._route_question_locked(
@@ -230,6 +347,8 @@ class PdfChatService:
             session=session,
             file_ids=file_ids,
             user_role=user_role,
+            request_id=request_id,
+            cancellation_token=cancellation_token,
         )
 
     def answer_routed_question(
@@ -238,25 +357,131 @@ class PdfChatService:
         session_id: str,
         user_id: str,
         question: str,
-        route_result: PdfChatRouteResult | None = None,
-        selected_file_ids: list[str] | None = None,
+        route_result: PdfChatRouteResult,
         enable_deep_thinking: bool = False,
         user_role: UserRole,
         persist_turn: bool = True,
+        request_id: str | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
     ) -> PdfChatAnswer:
         with self._session_operation_lock(session_id):
+            self._raise_if_cancelled(cancellation_token)
             session = self.get_session(session_id, user_id=user_id)
             if session is None:
                 raise AssetNotFoundError("PDF chat session was not found")
-            return self._answer_routed_question_locked(
-                question=_normalize_question(question),
-                session=session,
-                route_result=route_result,
+            normalized_question = _normalize_question(question)
+            request_fingerprint = self._request_fingerprint(
+                session_id=session.session_id,
+                user_id=user_id,
+                question=normalized_question,
+                file_ids=route_result.context_file_ids,
+                selected_file_ids=[
+                    document.file_id
+                    for document in route_result.selected_documents
+                ],
+                enable_deep_thinking=enable_deep_thinking,
+            )
+            existing_answer = (
+                self._claim_request(
+                    session=session,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                )
+                if persist_turn
+                else None
+            )
+            if existing_answer is not None:
+                return existing_answer
+            try:
+                if route_result.session_revision != session.conversation_revision:
+                    raise ChatSessionRevisionConflict(session.session_id)
+                return self._answer_routed_question_locked(
+                    question=normalized_question,
+                    session=session,
+                    route_result=route_result,
+                    enable_deep_thinking=enable_deep_thinking,
+                    user_role=user_role,
+                    persist_turn=persist_turn,
+                    request_id=request_id,
+                    request_fingerprint=(
+                        request_fingerprint if persist_turn else None
+                    ),
+                    cancellation_token=cancellation_token,
+                )
+            except Exception:
+                if persist_turn:
+                    self._release_request(
+                        session_id=session.session_id,
+                        request_id=request_id,
+                        request_fingerprint=request_fingerprint,
+                    )
+                raise
+
+    def answer_selected_question(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        question: str,
+        selected_file_ids: list[str],
+        file_ids: list[str] | None,
+        expected_session_revision: int,
+        enable_deep_thinking: bool = False,
+        user_role: UserRole,
+        request_id: str | None = None,
+        cancellation_token: ChatCancellationToken | None = None,
+    ) -> PdfChatAnswer:
+        with self._session_operation_lock(session_id):
+            self._raise_if_cancelled(cancellation_token)
+            session = self.get_session(session_id, user_id=user_id)
+            if session is None:
+                raise AssetNotFoundError("PDF chat session was not found")
+            normalized_question = _normalize_question(question)
+            request_fingerprint = self._request_fingerprint(
+                session_id=session.session_id,
+                user_id=user_id,
+                question=normalized_question,
+                file_ids=file_ids,
                 selected_file_ids=selected_file_ids,
                 enable_deep_thinking=enable_deep_thinking,
-                user_role=user_role,
-                persist_turn=persist_turn,
             )
+            existing_answer = self._claim_request(
+                session=session,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+            if existing_answer is not None:
+                return existing_answer
+            try:
+                if expected_session_revision != session.conversation_revision:
+                    raise ChatSessionRevisionConflict(session.session_id)
+                route_result = self._plan_selected_file_route(
+                    question=normalized_question,
+                    session=session,
+                    selected_file_ids=selected_file_ids,
+                    file_ids=file_ids,
+                    expected_session_revision=expected_session_revision,
+                    user_role=user_role,
+                    request_id=request_id,
+                )
+                return self._answer_routed_question_locked(
+                    question=normalized_question,
+                    session=session,
+                    route_result=route_result,
+                    enable_deep_thinking=enable_deep_thinking,
+                    user_role=user_role,
+                    persist_turn=True,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    cancellation_token=cancellation_token,
+                )
+            except Exception:
+                self._release_request(
+                    session_id=session.session_id,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                )
+                raise
 
     def _route_question_locked(
         self,
@@ -265,16 +490,15 @@ class PdfChatService:
         session: ChatSession,
         file_ids: list[str] | None,
         user_role: UserRole,
+        request_id: str | None,
+        cancellation_token: ChatCancellationToken | None,
     ) -> PdfChatRouteResult:
-        model_selection = pdf_model_selection(
-            self._sessions.list_pdf_model_settings(),
-            "router",
-        )
-        scope_file_ids = self._resolve_scope_pdf_file_ids(
-            file_ids=file_ids,
+        self._raise_if_cancelled(cancellation_token)
+        resolved_scope = self._scope_resolver.resolve(
+            selected_node_ids=file_ids,
             user_role=user_role,
         )
-        has_explicit_scope = bool(_dedupe_file_ids(file_ids or []))
+        candidate_file_ids = resolved_scope.candidate_file_ids
         existing_turns = self._filter_accessible_turns(
             self._sessions.list_turns(session.session_id, workspace=PDF_CHAT_WORKSPACE),
             user_role=user_role,
@@ -285,44 +509,70 @@ class PdfChatService:
         )
         attached_before = self._filter_attached_documents_by_scope(
             attached_before,
-            scope_file_ids=scope_file_ids,
-            has_explicit_scope=has_explicit_scope,
+            scope_file_ids=candidate_file_ids,
+            has_explicit_scope=resolved_scope.has_explicit_scope,
         )
-        summaries = self._routing_summaries(file_ids=file_ids, user_role=user_role)
-        selected_documents = self._llm_client.route_documents(
-            question=question,
-            summaries=summaries,
-            max_documents=3,
-            user_questions=[turn.question for turn in existing_turns] + [question],
-            attached_documents=[
-                _attached_pdf_to_excel_document(document)
-                for document in attached_before
-            ],
-            previous_turns=existing_turns,
-            model=model_selection.model,
-            provider=model_selection.provider,
-        )
+        if not candidate_file_ids:
+            selected_documents = []
+        elif len(candidate_file_ids) == 1:
+            file_id = candidate_file_ids[0]
+            selected_documents = [
+                SelectedDocument(
+                    file_id=file_id,
+                    version_id=file_id,
+                    reason="only PDF candidate in the current scope",
+                    confidence=1.0,
+                )
+            ]
+        else:
+            model_selection = pdf_model_selection(
+                self._sessions.list_pdf_model_settings(),
+                "router",
+            )
+            summaries = self._routing_catalog.build(
+                candidate_file_ids=candidate_file_ids,
+                user_role=user_role,
+            )
+            selected_documents = self._llm_client.route_pdf_documents(
+                question=question,
+                summaries=summaries,
+                max_documents=self._policy.max_routed_documents,
+                user_questions=[turn.question for turn in existing_turns] + [question],
+                attached_documents=[
+                    attached_pdf_to_routing_document(document)
+                    for document in attached_before
+                ],
+                previous_turns=existing_turns,
+                model=model_selection.model,
+                provider=model_selection.provider,
+                cancellation_checker=self._cancellation_checker(cancellation_token),
+            )
+            self._raise_if_cancelled(cancellation_token)
         selected_documents = self._filter_accessible_selected_documents(
             selected_documents,
             user_role=user_role,
+            allowed_file_ids=candidate_file_ids,
         )
-        newly_attached = self._attach_new_documents(
+        self._raise_if_cancelled(cancellation_token)
+        newly_attached, planned_attachments = self._plan_new_documents(
             session_id=session.session_id,
             selected_documents=selected_documents,
             attached_documents=attached_before,
             user_role=user_role,
         )
-        attached_after = self._filter_accessible_attached_documents(
-            self._sessions.list_pdf_attached_documents(session.session_id),
-            user_role=user_role,
-        )
-        attached_after = self._filter_attached_documents_by_scope(
-            attached_after,
-            scope_file_ids=scope_file_ids,
-            has_explicit_scope=has_explicit_scope,
-        )
+        attached_after = [*attached_before, *planned_attachments]
         created_at = utc_now_iso()
-        self._sessions.touch_session(session.session_id, created_at)
+        self._raise_if_cancelled(cancellation_token)
+        logger.info(
+            "pdf chat route planned session_id=%s request_id=%s "
+            "scope_mode=%s candidate_count=%s selected_count=%s revision=%s",
+            session.session_id,
+            request_id,
+            resolved_scope.scope.mode.value,
+            len(candidate_file_ids),
+            len(selected_documents),
+            session.conversation_revision,
+        )
         return PdfChatRouteResult(
             session_id=session.session_id,
             question=question,
@@ -330,6 +580,9 @@ class PdfChatService:
             newly_attached_documents=newly_attached,
             attached_documents=attached_after,
             created_at=created_at,
+            request_id=request_id,
+            context_file_ids=resolved_scope.scope.selected_node_ids,
+            session_revision=session.conversation_revision,
         )
 
     def _answer_routed_question_locked(
@@ -337,101 +590,374 @@ class PdfChatService:
         *,
         question: str,
         session: ChatSession,
-        route_result: PdfChatRouteResult | None,
-        selected_file_ids: list[str] | None,
+        route_result: PdfChatRouteResult,
         enable_deep_thinking: bool,
         user_role: UserRole,
         persist_turn: bool,
+        request_id: str | None,
+        request_fingerprint: str | None,
+        cancellation_token: ChatCancellationToken | None,
     ) -> PdfChatAnswer:
-        attached_documents = self._filter_accessible_attached_documents(
-            self._sessions.list_pdf_attached_documents(session.session_id),
+        self._raise_if_cancelled(cancellation_token)
+        existing_turns = self._filter_accessible_turns(
+            self._sessions.list_turns(
+                session.session_id,
+                workspace=PDF_CHAT_WORKSPACE,
+            ),
             user_role=user_role,
         )
-        if route_result is not None:
-            attached_documents = route_result.attached_documents
-        documents = self._resolve_documents_for_answer(
-            attached_documents=attached_documents,
-            route_result=route_result,
-            selected_file_ids=selected_file_ids,
+        attached_documents = self._filter_accessible_attached_documents(
+            route_result.attached_documents,
+            user_role=user_role,
         )
+        documents = route_result.selected_documents
         documents = self._filter_accessible_selected_documents(
             documents,
             user_role=user_role,
         )
-        matches = self._matches_for_documents(documents, user_role=user_role)
-        if not matches:
-            answer = _insufficient_evidence_answer(
+        model_selection = pdf_model_selection(
+            self._sessions.list_pdf_model_settings(),
+            "chat",
+        )
+        (
+            draft_answer,
+            documents,
+            context_allocation,
+            visibility_changed,
+        ) = self._answer_with_current_access(
+            question=question,
+            documents=documents,
+            previous_turns=existing_turns,
+            user_role=user_role,
+            model_selection=model_selection,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_token=cancellation_token,
+        )
+        self._raise_if_cancelled(cancellation_token)
+        grounding_chunks = context_allocation.chunks
+        attached_documents = self._filter_accessible_attached_documents(
+            attached_documents,
+            user_role=user_role,
+        )
+        selected_file_ids = {document.file_id for document in documents}
+        newly_attached_documents = [
+            document
+            for document in route_result.newly_attached_documents
+            if document.file_id in selected_file_ids
+        ]
+        logger.info(
+            "pdf chat context allocated session_id=%s request_id=%s "
+            "document_count=%s chunk_count=%s token_count=%s "
+            "character_count=%s truncated=%s",
+            session.session_id,
+            request_id,
+            len(context_allocation.document_chunk_counts),
+            len(grounding_chunks),
+            context_allocation.used_tokens,
+            context_allocation.used_characters,
+            context_allocation.truncated,
+        )
+        context_warnings = (
+            [
+                "The selected PDF context exceeded the answer budget and was "
+                "deterministically truncated across documents."
+            ]
+            if context_allocation.truncated
+            else []
+        )
+        if visibility_changed:
+            context_warnings.append(
+                "The available PDF evidence changed while this answer was being "
+                "prepared. Send the question again to use the current file visibility."
+            )
+        if draft_answer is None or not grounding_chunks:
+            answer = insufficient_evidence_answer(
                 session_id=session.session_id,
                 question=question,
                 selected_documents=documents,
-                newly_attached_documents=(
-                    route_result.newly_attached_documents
-                    if route_result is not None
-                    else []
-                ),
+                newly_attached_documents=newly_attached_documents,
                 attached_documents=attached_documents,
+                warnings=context_warnings,
+                request_id=request_id,
             )
         else:
-            model_selection = pdf_model_selection(
-                self._sessions.list_pdf_model_settings(),
-                "chat",
-            )
-            draft_answer = self._llm_client.answer_with_pdf_chunks(
-                question,
-                [_chunk_payload(match) for match in matches],
-                model=model_selection.model,
-                provider=model_selection.provider,
-                enable_deep_thinking=enable_deep_thinking,
-            )
-            answer = _build_pdf_answer(
+            answer = build_pdf_answer(
                 session_id=session.session_id,
                 question=question,
                 draft_answer=draft_answer,
-                matches=matches,
+                grounding_chunks=grounding_chunks,
                 selected_documents=documents,
-                newly_attached_documents=(
-                    route_result.newly_attached_documents
-                    if route_result is not None
-                    else []
-                ),
+                newly_attached_documents=newly_attached_documents,
                 attached_documents=attached_documents,
+                warnings=context_warnings,
+                request_id=request_id,
             )
         if persist_turn:
-            self._sessions.create_turn(_chat_turn_from_pdf_answer(answer))
-            self._sessions.touch_session(session.session_id, answer.created_at)
+            self._raise_if_cancelled(cancellation_token)
+            turn = chat_turn_from_pdf_answer(answer)
+            newly_attached_file_ids = {
+                document.file_id
+                for document in answer.newly_attached_documents
+            }
+            committed_turn = self._sessions.commit_pdf_chat_turn(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                expected_conversation_revision=route_result.session_revision,
+                context_file_ids=route_result.context_file_ids,
+                attached_documents=[
+                    document
+                    for document in answer.attached_documents
+                    if document.file_id in newly_attached_file_ids
+                ],
+                turn=turn,
+                title_if_new=self._normalize_session_title(question),
+                request_fingerprint=request_fingerprint,
+            )
+            logger.info(
+                "pdf chat turn committed session_id=%s request_id=%s "
+                "turn_id=%s expected_revision=%s",
+                session.session_id,
+                request_id,
+                committed_turn.turn_id,
+                route_result.session_revision,
+            )
+            return pdf_answer_from_chat_turn(committed_turn)
         return answer
 
-    def _routing_summaries(
+    def _request_fingerprint(
         self,
         *,
+        session_id: str,
+        user_id: str,
+        question: str,
         file_ids: list[str] | None,
-        user_role: UserRole,
-    ) -> list[DocumentSummary]:
-        has_explicit_scope = bool(_dedupe_file_ids(file_ids or []))
-        allowed_file_ids = set(
-            self._resolve_scope_pdf_file_ids(file_ids=file_ids, user_role=user_role)
-        )
-        if has_explicit_scope and not allowed_file_ids:
-            return []
-        files = {
-            file.file_id: file
-            for file in self._sessions.list_pdf_files()
-            if _is_visible_ready_pdf(file, user_role)
+        selected_file_ids: list[str] | None = None,
+        enable_deep_thinking: bool,
+    ) -> str:
+        payload = {
+            "workspace": PDF_CHAT_WORKSPACE,
+            "session_id": session_id,
+            "user_id": user_id,
+            "question": question,
+            "file_ids": sorted(
+                {
+                    file_id.strip()
+                    for file_id in file_ids or []
+                    if file_id.strip()
+                }
+            ),
+            "selected_file_ids": sorted(
+                {
+                    file_id.strip()
+                    for file_id in selected_file_ids or []
+                    if file_id.strip()
+                }
+            ),
+            "enable_deep_thinking": enable_deep_thinking,
         }
-        summaries = [
-            summary
-            for summary in self._sessions.list_pdf_document_summaries()
-            if summary.status == "ready"
-            and summary.file_id in files
-            and (not has_explicit_scope or summary.file_id in allowed_file_ids)
-        ]
-        return [
-            _pdf_summary_to_document_summary(
-                summary=summary,
-                file=files[summary.file_id],
-            )
-            for summary in summaries
-        ]
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _claim_request(
+        self,
+        *,
+        session: ChatSession,
+        request_id: str | None,
+        request_fingerprint: str,
+    ) -> PdfChatAnswer | None:
+        if request_id is None:
+            return None
+        claimed_at = datetime.now(UTC)
+        existing_turn = self._sessions.claim_pdf_chat_request(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+            claimed_at=claimed_at.isoformat(),
+            lease_expires_at=(claimed_at + timedelta(minutes=10)).isoformat(),
+        )
+        if existing_turn is None:
+            return None
+        return pdf_answer_from_chat_turn(existing_turn)
+
+    def _plan_selected_file_route(
+        self,
+        *,
+        question: str,
+        session: ChatSession,
+        selected_file_ids: list[str],
+        file_ids: list[str] | None,
+        expected_session_revision: int,
+        user_role: UserRole,
+        request_id: str | None,
+    ) -> PdfChatRouteResult:
+        resolved_scope = self._scope_resolver.resolve(
+            selected_node_ids=file_ids,
+            user_role=user_role,
+        )
+        selected_documents = self._filter_accessible_selected_documents(
+            [
+                SelectedDocument(
+                    file_id=file_id,
+                    version_id=file_id,
+                    reason="selected by the route plan",
+                )
+                for file_id in selected_file_ids
+            ],
+            user_role=user_role,
+            allowed_file_ids=resolved_scope.candidate_file_ids,
+        )
+        attached_before = self._filter_accessible_attached_documents(
+            self._sessions.list_pdf_attached_documents(session.session_id),
+            user_role=user_role,
+        )
+        attached_before = self._filter_attached_documents_by_scope(
+            attached_before,
+            scope_file_ids=resolved_scope.candidate_file_ids,
+            has_explicit_scope=resolved_scope.has_explicit_scope,
+        )
+        newly_attached, planned_attachments = self._plan_new_documents(
+            session_id=session.session_id,
+            selected_documents=selected_documents,
+            attached_documents=attached_before,
+            user_role=user_role,
+        )
+        return PdfChatRouteResult(
+            session_id=session.session_id,
+            question=question,
+            selected_documents=selected_documents,
+            newly_attached_documents=newly_attached,
+            attached_documents=[*attached_before, *planned_attachments],
+            created_at=utc_now_iso(),
+            request_id=request_id,
+            context_file_ids=resolved_scope.scope.selected_node_ids,
+            session_revision=expected_session_revision,
+        )
+
+    def _release_request(
+        self,
+        *,
+        session_id: str,
+        request_id: str | None,
+        request_fingerprint: str,
+    ) -> None:
+        if request_id is None:
+            return
+        self._sessions.release_pdf_chat_request(
+            session_id=session_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+
+    def _answer_with_current_access(
+        self,
+        *,
+        question: str,
+        documents: list[SelectedDocument],
+        previous_turns: list[ChatTurn],
+        user_role: UserRole,
+        model_selection: PdfModelSelection,
+        enable_deep_thinking: bool,
+        cancellation_token: ChatCancellationToken | None,
+    ) -> tuple[
+        DraftChatAnswer | None,
+        list[SelectedDocument],
+        PdfContextAllocation,
+        bool,
+    ]:
+        current_documents = self._filter_accessible_selected_documents(
+            documents,
+            user_role=user_role,
+        )
+        allocation = self._context_assembler.assemble(
+            documents=current_documents,
+            user_role=user_role,
+        )
+        if not allocation.chunks:
+            return None, current_documents, allocation, False
+
+        draft_answer = self._generate_pdf_draft_answer(
+            question=question,
+            allocation=allocation,
+            previous_turns=previous_turns,
+            model_selection=model_selection,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_token=cancellation_token,
+        )
+        refreshed_documents = self._filter_accessible_selected_documents(
+            current_documents,
+            user_role=user_role,
+        )
+        if self._document_keys(refreshed_documents) == self._document_keys(
+            current_documents
+        ):
+            return draft_answer, current_documents, allocation, False
+
+        refreshed_allocation = self._context_assembler.assemble(
+            documents=refreshed_documents,
+            user_role=user_role,
+        )
+        if not refreshed_allocation.chunks:
+            return None, refreshed_documents, refreshed_allocation, True
+
+        refreshed_answer = self._generate_pdf_draft_answer(
+            question=question,
+            allocation=refreshed_allocation,
+            previous_turns=previous_turns,
+            model_selection=model_selection,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_token=cancellation_token,
+        )
+        final_documents = self._filter_accessible_selected_documents(
+            refreshed_documents,
+            user_role=user_role,
+        )
+        if self._document_keys(final_documents) != self._document_keys(
+            refreshed_documents
+        ):
+            return None, [], refreshed_allocation, True
+        return refreshed_answer, refreshed_documents, refreshed_allocation, False
+
+    def _generate_pdf_draft_answer(
+        self,
+        *,
+        question: str,
+        allocation: PdfContextAllocation,
+        previous_turns: list[ChatTurn],
+        model_selection: PdfModelSelection,
+        enable_deep_thinking: bool,
+        cancellation_token: ChatCancellationToken | None,
+    ) -> DraftChatAnswer:
+        self._raise_if_cancelled(cancellation_token)
+        draft_answer = self._llm_client.answer_with_pdf_chunks(
+            question,
+            [
+                chunk_payload(
+                    item,
+                    max_characters=self._policy.max_single_chunk_characters,
+                )
+                for item in allocation.chunks
+            ],
+            previous_turns=previous_turns,
+            model=model_selection.model,
+            provider=model_selection.provider,
+            enable_deep_thinking=enable_deep_thinking,
+            cancellation_checker=self._cancellation_checker(cancellation_token),
+        )
+        self._raise_if_cancelled(cancellation_token)
+        return draft_answer
+
+    @staticmethod
+    def _document_keys(
+        documents: list[SelectedDocument],
+    ) -> set[tuple[str, str]]:
+        return {(document.file_id, document.version_id) for document in documents}
 
     def _filter_accessible_turns(
         self,
@@ -447,6 +973,7 @@ class PdfChatService:
                 for document in [
                     *turn.selected_documents,
                     *turn.newly_attached_documents,
+                    *turn.attached_documents,
                 ]
             )
             and all(
@@ -472,14 +999,28 @@ class PdfChatService:
         documents: list[SelectedDocument],
         *,
         user_role: UserRole,
+        allowed_file_ids: list[str] | None = None,
     ) -> list[SelectedDocument]:
         filtered: list[SelectedDocument] = []
         seen: set[str] = set()
+        allowed = set(allowed_file_ids) if allowed_file_ids is not None else None
+        requested_file_ids = [
+            document.file_id.strip()
+            for document in documents
+            if document.file_id.strip()
+        ]
+        accessible_file_ids = {
+            file.file_id
+            for file in self._sessions.list_pdf_files_by_ids(requested_file_ids)
+            if is_visible_ready_pdf(file, user_role)
+        }
         for document in documents:
             file_id = document.file_id.strip()
             if not file_id or file_id in seen:
                 continue
-            if not self._can_use_file(file_id, user_role=user_role):
+            if allowed is not None and file_id not in allowed:
+                continue
+            if file_id not in accessible_file_ids:
                 continue
             seen.add(file_id)
             filtered.append(
@@ -490,37 +1031,7 @@ class PdfChatService:
                     confidence=document.confidence,
                 )
             )
-        return filtered
-
-    def _resolve_scope_pdf_file_ids(
-        self,
-        *,
-        file_ids: list[str] | None,
-        user_role: UserRole,
-    ) -> list[str]:
-        explicit_file_ids = _dedupe_file_ids(file_ids or [])
-        if not explicit_file_ids:
-            return []
-        files = self._sessions.list_pdf_files()
-        files_by_id = {file.file_id: file for file in files}
-        selected: list[PdfFile] = []
-        for file_id in explicit_file_ids:
-            file = files_by_id.get(file_id)
-            if file is None or not _is_visible_pdf_scope(file, user_role):
-                raise AssetNotFoundError("PDF file was not found")
-            if file.kind == PdfFileKind.FOLDER:
-                selected.extend(_descendant_ready_pdf_files(file.file_id, files_by_id, user_role))
-                continue
-            if _is_visible_ready_pdf(file, user_role):
-                selected.append(file)
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for file in selected:
-            if file.file_id in seen:
-                continue
-            seen.add(file.file_id)
-            deduped.append(file.file_id)
-        return deduped
+        return filtered[: self._policy.max_routed_documents]
 
     def _filter_attached_documents_by_scope(
         self,
@@ -534,79 +1045,49 @@ class PdfChatService:
         allowed_file_ids = set(scope_file_ids)
         return [document for document in documents if document.file_id in allowed_file_ids]
 
-    def _attach_new_documents(
+    def _plan_new_documents(
         self,
         *,
         session_id: str,
         selected_documents: list[SelectedDocument],
         attached_documents: list[PdfAttachedDocument],
         user_role: UserRole,
-    ) -> list[SelectedDocument]:
+    ) -> tuple[list[SelectedDocument], list[PdfAttachedDocument]]:
         attached_file_ids = {document.file_id for document in attached_documents}
+        selected_file_ids = [
+            document.file_id
+            for document in selected_documents
+            if document.file_id not in attached_file_ids
+        ]
+        accessible_file_ids = {
+            file.file_id
+            for file in self._sessions.list_pdf_files_by_ids(selected_file_ids)
+            if is_visible_ready_pdf(file, user_role)
+        }
+        chunks_by_file_id = self._sessions.list_pdf_document_chunks_by_file_ids(
+            list(accessible_file_ids)
+        )
         newly_attached: list[SelectedDocument] = []
+        planned_attachments: list[PdfAttachedDocument] = []
         for document in selected_documents:
             if document.file_id in attached_file_ids:
                 continue
-            chunks = self._sessions.list_pdf_document_chunks(document.file_id)
-            attached = PdfAttachedDocument(
+            chunks = chunks_by_file_id.get(document.file_id, [])
+            planned_attachment = PdfAttachedDocument(
                 session_id=session_id,
                 file_id=document.file_id,
                 attached_at=utc_now_iso(),
                 chunk_count=len(chunks),
                 context_hash=_document_context_hash(document.file_id, chunks),
             )
-            if self._can_use_file(document.file_id, user_role=user_role) and (
-                self._sessions.attach_pdf_document(attached)
-            ):
+            if document.file_id in accessible_file_ids:
                 newly_attached.append(document)
-        return newly_attached
-
-    def _resolve_documents_for_answer(
-        self,
-        *,
-        attached_documents: list[PdfAttachedDocument],
-        route_result: PdfChatRouteResult | None,
-        selected_file_ids: list[str] | None,
-    ) -> list[SelectedDocument]:
-        if route_result is not None:
-            if route_result.selected_documents:
-                return route_result.selected_documents
-            return [_attached_pdf_to_selected_document(document) for document in attached_documents]
-        if selected_file_ids:
-            selected_file_id_set = set(_dedupe_file_ids(selected_file_ids))
-            return [
-                _attached_pdf_to_selected_document(document)
-                for document in attached_documents
-                if document.file_id in selected_file_id_set
-            ]
-        return [_attached_pdf_to_selected_document(document) for document in attached_documents]
-
-    def _matches_for_documents(
-        self,
-        documents: list[SelectedDocument],
-        *,
-        user_role: UserRole,
-    ) -> list[PdfChunkSearchMatch]:
-        matches: list[PdfChunkSearchMatch] = []
-        for document in documents:
-            file = self._sessions.get_pdf_file(document.file_id)
-            if file is None or not _is_visible_ready_pdf(file, user_role):
-                continue
-            for chunk in self._sessions.list_pdf_document_chunks(file.file_id):
-                matches.append(
-                    PdfChunkSearchMatch(
-                        file=file,
-                        chunk=chunk,
-                        score=1.0,
-                        excerpt=_chunk_excerpt(chunk.text),
-                        matched_terms=[],
-                    )
-                )
-        return matches
+                planned_attachments.append(planned_attachment)
+        return newly_attached, planned_attachments
 
     def _can_use_file(self, file_id: str, *, user_role: UserRole) -> bool:
         file = self._sessions.get_pdf_file(file_id)
-        return file is not None and _is_visible_ready_pdf(file, user_role)
+        return file is not None and is_visible_ready_pdf(file, user_role)
 
     @contextmanager
     def _session_operation_lock(self, session_id: str) -> Iterator[None]:
@@ -622,6 +1103,16 @@ class PdfChatService:
                 if entry.users == 0 and entry.discard_when_idle:
                     self._session_locks.pop(session_id, None)
 
+    @contextmanager
+    def _session_operation_locks(
+        self,
+        session_ids: list[str],
+    ) -> Iterator[None]:
+        with ExitStack() as stack:
+            for session_id in sorted(set(session_ids)):
+                stack.enter_context(self._session_operation_lock(session_id))
+            yield
+
     def _discard_session_operation_lock(self, session_id: str) -> None:
         with self._session_locks_guard:
             entry = self._session_locks.get(session_id)
@@ -636,162 +1127,20 @@ class PdfChatService:
         normalized = " ".join(title.split())
         return normalized[:120] if normalized else "New chat"
 
+    @staticmethod
+    def _cancellation_checker(
+        cancellation_token: ChatCancellationToken | None,
+    ):
+        if cancellation_token is None:
+            return None
+        return cancellation_token.raise_if_cancelled
 
-def _build_pdf_answer(
-    *,
-    session_id: str | None,
-    question: str,
-    draft_answer: DraftChatAnswer,
-    matches: list[PdfChunkSearchMatch],
-    selected_documents: list[SelectedDocument],
-    newly_attached_documents: list[SelectedDocument],
-    attached_documents: list[PdfAttachedDocument],
-) -> PdfChatAnswer:
-    citation_index = {_evidence_id(match): match for match in matches}
-    draft_quotes = _draft_quotes_by_evidence_id(draft_answer.citations, citation_index)
-    cited_evidence_ids = [
-        evidence_id
-        for block in draft_answer.answer_blocks
-        for evidence_id in block.evidence_ids
-        if evidence_id in citation_index
-    ]
-    citations, citation_ids = _build_citations(
-        evidence_ids=[*draft_quotes, *cited_evidence_ids],
-        citation_index=citation_index,
-        draft_quotes=draft_quotes,
-    )
-    answer_blocks = [
-        PdfAnswerBlock(
-            text=block.text,
-            citation_ids=[
-                citation_id
-                for evidence_id in block.evidence_ids
-                if (citation_id := citation_ids.get(evidence_id)) is not None
-            ],
-            reasoning=block.reasoning,
-        )
-        for block in draft_answer.answer_blocks
-        if block.text.strip()
-    ]
-    if not answer_blocks:
-        answer_blocks = [
-            PdfAnswerBlock(
-                text="The PDF evidence was retrieved, but no answer text was generated.",
-                citation_ids=[],
-            )
-        ]
-    return PdfChatAnswer(
-        session_id=session_id,
-        question=question,
-        answer_blocks=answer_blocks,
-        citations=citations,
-        retrieval_matches=matches,
-        selected_documents=selected_documents,
-        newly_attached_documents=newly_attached_documents,
-        attached_documents=attached_documents,
-        insufficient_evidence=draft_answer.insufficient_evidence or not citations,
-        follow_up_suggestions=draft_answer.follow_up_suggestions,
-        warnings=[],
-        created_at=utc_now_iso(),
-    )
-
-
-def _insufficient_evidence_answer(
-    *,
-    session_id: str,
-    question: str,
-    selected_documents: list[SelectedDocument],
-    newly_attached_documents: list[SelectedDocument],
-    attached_documents: list[PdfAttachedDocument],
-) -> PdfChatAnswer:
-    return PdfChatAnswer(
-        session_id=session_id,
-        question=question,
-        answer_blocks=[
-            PdfAnswerBlock(
-                text="No visible PDF evidence is available for this question.",
-                citation_ids=[],
-            )
-        ],
-        citations=[],
-        retrieval_matches=[],
-        selected_documents=selected_documents,
-        newly_attached_documents=newly_attached_documents,
-        attached_documents=attached_documents,
-        insufficient_evidence=True,
-        follow_up_suggestions=[],
-        warnings=[],
-        created_at=utc_now_iso(),
-    )
-
-
-def _chat_turn_from_pdf_answer(answer: PdfChatAnswer) -> ChatTurn:
-    if answer.session_id is None:
-        raise AssetNotFoundError("PDF chat session was not found")
-    return ChatTurn(
-        turn_id=new_id("turn"),
-        session_id=answer.session_id,
-        question=answer.question,
-        answer_text="\n".join(block.text for block in answer.answer_blocks),
-        citation_ids=[
-            citation_id
-            for block in answer.answer_blocks
-            for citation_id in block.citation_ids
-        ],
-        selected_documents=answer.selected_documents,
-        created_at=answer.created_at,
-        answer_blocks=[
-            ChatAnswerBlock(
-                text=block.text,
-                citation_ids=block.citation_ids,
-                reasoning=block.reasoning,
-            )
-            for block in answer.answer_blocks
-        ],
-        newly_attached_documents=answer.newly_attached_documents,
-        attached_documents=[
-            _attached_pdf_to_excel_document(document)
-            for document in answer.attached_documents
-        ],
-        citations=[
-            ExcelCitation(
-                citation_id=citation.citation_id,
-                evidence_id=citation.evidence_id,
-                file_id=citation.file_id,
-                version_id=citation.chunk_id,
-                sheet_id=citation.chunk_id,
-                sheet_name=citation.title,
-                row_id=str(citation.chunk_index),
-                row=[
-                    citation.file_name,
-                    citation.page_label or "",
-                    citation.title,
-                ],
-                quote=citation.quote,
-            )
-            for citation in answer.citations
-        ],
-        insufficient_evidence=answer.insufficient_evidence,
-        follow_up_suggestions=answer.follow_up_suggestions,
-        warnings=answer.warnings,
-    )
-
-
-def _chunk_payload(match: PdfChunkSearchMatch) -> dict[str, object]:
-    chunk = match.chunk
-    return {
-        "evidence_id": _evidence_id(match),
-        "file_id": match.file.file_id,
-        "file_name": match.file.display_name,
-        "chunk_id": chunk.chunk_id,
-        "chunk_index": chunk.chunk_index,
-        "page_label": chunk.page_label,
-        "title": chunk.title,
-        "text": chunk.text,
-        "excerpt": match.excerpt,
-        "score": match.score,
-        "matched_terms": match.matched_terms,
-    }
+    @staticmethod
+    def _raise_if_cancelled(
+        cancellation_token: ChatCancellationToken | None,
+    ) -> None:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
 
 
 def _normalize_question(question: str) -> str:
@@ -799,170 +1148,6 @@ def _normalize_question(question: str) -> str:
     if not normalized:
         raise UploadValidationError("PDF chat question is required")
     return normalized
-
-
-def _evidence_id(match: PdfChunkSearchMatch) -> str:
-    return f"{match.file.file_id}::{match.chunk.chunk_id}"
-
-
-def _draft_quotes_by_evidence_id(
-    draft_citations: list[DraftCitation],
-    citation_index: dict[str, PdfChunkSearchMatch],
-) -> dict[str, str]:
-    quotes: dict[str, str] = {}
-    for draft in draft_citations:
-        if draft.evidence_id not in citation_index:
-            continue
-        quotes[draft.evidence_id] = draft.quote
-    return quotes
-
-
-def _build_citations(
-    *,
-    evidence_ids: list[str],
-    citation_index: dict[str, PdfChunkSearchMatch],
-    draft_quotes: dict[str, str],
-) -> tuple[list[PdfCitation], dict[str, str]]:
-    citations: list[PdfCitation] = []
-    citation_ids: dict[str, str] = {}
-    for evidence_id in evidence_ids:
-        if evidence_id in citation_ids:
-            continue
-        match = citation_index.get(evidence_id)
-        if match is None:
-            continue
-        citation_id = f"P{len(citations) + 1}"
-        citation_ids[evidence_id] = citation_id
-        chunk = match.chunk
-        citations.append(
-            PdfCitation(
-                citation_id=citation_id,
-                evidence_id=evidence_id,
-                file_id=match.file.file_id,
-                file_name=match.file.display_name,
-                chunk_id=chunk.chunk_id,
-                chunk_index=chunk.chunk_index,
-                page_label=chunk.page_label,
-                title=chunk.title,
-                quote=draft_quotes.get(evidence_id) or match.excerpt,
-            )
-        )
-    return citations, citation_ids
-
-
-def _normalize_limit(limit: int | None) -> int:
-    requested_limit = DEFAULT_PDF_CHAT_RETRIEVAL_LIMIT if limit is None else limit
-    return max(1, min(MAX_PDF_CHAT_RETRIEVAL_LIMIT, requested_limit))
-
-
-def _dedupe_file_ids(file_ids: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for file_id in file_ids:
-        normalized = file_id.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    return deduped
-
-
-def _is_visible_ready_pdf(file: PdfFile, user_role: UserRole) -> bool:
-    return (
-        file.kind == PdfFileKind.PDF
-        and file.processing_status == PdfProcessingStatus.READY
-        and (
-            user_role == UserRole.ADMIN
-            or file.visibility == PdfFileVisibility.VISIBLE
-        )
-    )
-
-
-def _is_visible_pdf_scope(file: PdfFile, user_role: UserRole) -> bool:
-    return user_role == UserRole.ADMIN or file.visibility == PdfFileVisibility.VISIBLE
-
-
-def _descendant_ready_pdf_files(
-    parent_id: str,
-    files_by_id: dict[str, PdfFile],
-    user_role: UserRole,
-) -> list[PdfFile]:
-    children_by_parent: dict[str | None, list[PdfFile]] = {}
-    for file in files_by_id.values():
-        children_by_parent.setdefault(file.parent_id, []).append(file)
-    descendants: list[PdfFile] = []
-    stack = list(children_by_parent.get(parent_id, []))
-    while stack:
-        file = stack.pop(0)
-        if file.kind == PdfFileKind.PDF:
-            if _is_visible_ready_pdf(file, user_role):
-                descendants.append(file)
-            continue
-        if file.kind == PdfFileKind.FOLDER and _is_visible_pdf_scope(file, user_role):
-            stack.extend(children_by_parent.get(file.file_id, []))
-    return descendants
-
-
-def _pdf_summary_to_document_summary(
-    *,
-    summary,
-    file: PdfFile,
-) -> DocumentSummary:
-    title = summary.document_title.strip() or file.display_name
-    key_topics = summary.key_topics or [file.display_name]
-    positive_terms = summary.positive_routing_terms or key_topics
-    return DocumentSummary(
-        summary_id=f"pdf-summary::{summary.file_id}",
-        file_id=summary.file_id,
-        version_id=summary.file_id,
-        document_title=title,
-        document_type=summary.document_type or "pdf_document",
-        summary_text=summary.content,
-        business_domain=summary.business_domain or "pdf knowledge",
-        coverage_scope={"business_processes": ["pdf knowledge chat"]},
-        key_topics=key_topics,
-        positive_routing_terms=positive_terms,
-        negative_routing_terms=summary.negative_routing_terms,
-        exact_identifiers=summary.exact_identifiers or [file.display_name],
-        suitable_questions=summary.suitable_questions,
-        unsuitable_questions=summary.unsuitable_questions,
-        sheet_summaries=[
-            SheetSummary(
-                sheet_id=summary.file_id,
-                sheet_name=file.display_name,
-                summary=summary.content,
-                important_columns=[],
-                likely_question_types=summary.suitable_questions,
-                header_terms=positive_terms,
-                sampled_identifiers=summary.exact_identifiers,
-            )
-        ],
-        routing_notes=summary.routing_notes,
-        created_at=summary.updated_at or file.updated_at,
-    )
-
-
-def _attached_pdf_to_selected_document(
-    document: PdfAttachedDocument,
-) -> SelectedDocument:
-    return SelectedDocument(
-        file_id=document.file_id,
-        version_id=document.file_id,
-        reason="already attached to PDF chat session",
-        confidence=1.0,
-    )
-
-
-def _attached_pdf_to_excel_document(document: PdfAttachedDocument) -> AttachedDocument:
-    return AttachedDocument(
-        session_id=document.session_id,
-        file_id=document.file_id,
-        version_id=document.file_id,
-        attached_at=document.attached_at,
-        row_count=document.chunk_count,
-        context_hash=document.context_hash,
-        status=document.status,
-    )
 
 
 def _document_context_hash(file_id: str, chunks: list[PdfDocumentChunk]) -> str:
@@ -974,10 +1159,3 @@ def _document_context_hash(file_id: str, chunks: list[PdfDocumentChunk]) -> str:
         digest.update(chunk.chunk_id.encode("utf-8"))
         digest.update(chunk.content_hash.encode("utf-8"))
     return digest.hexdigest()
-
-
-def _chunk_excerpt(text: str, radius: int = 240) -> str:
-    normalized = " ".join(text.split())
-    if len(normalized) <= radius:
-        return normalized
-    return f"{normalized[:radius].strip()}..."

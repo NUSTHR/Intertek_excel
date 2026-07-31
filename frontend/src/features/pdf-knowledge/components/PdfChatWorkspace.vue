@@ -3,12 +3,19 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import { renderMarkdown } from '../../../utils/markdown'
-import type { PdfBreadcrumbItem, PdfChatMessage } from '../types'
+import type {
+  PdfBreadcrumbItem,
+  PdfChatSourceDocument,
+  PdfChatTurnView,
+} from '../types'
+import PdfChatDataSources from './PdfChatDataSources.vue'
 
 const props = defineProps<{
   breadcrumbs: PdfBreadcrumbItem[]
   contextLabel: string
-  messages: PdfChatMessage[]
+  turns: PdfChatTurnView[]
+  sourceDocuments: PdfChatSourceDocument[]
+  activeCitationKey: string
   isAnswering: boolean
   enableDeepThinking: boolean
   errorMessage: string
@@ -16,6 +23,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   clearChat: []
+  selectCitation: [turnId: string, citationId: string]
+  selectSourceDocument: [document: PdfChatSourceDocument]
   sendQuestion: [question: string]
   toggleDeepThinking: []
 }>()
@@ -35,7 +44,11 @@ const contextPathTitle = computed(() => (
 const contextPathLabel = computed(() => contextPathTitle.value)
 
 watch(
-  () => [props.messages.length, props.isAnswering],
+  () => [
+    props.turns.length,
+    props.turns.at(-1)?.status,
+    props.isAnswering,
+  ],
   () => {
     void nextTick(() => {
       chatHistory.value?.scrollTo({
@@ -88,22 +101,27 @@ function onTextareaKeydown(event: KeyboardEvent): void {
     </header>
 
     <section ref="chatHistory" class="pdfkb-chat-history" aria-label="Chat history">
-      <article v-if="messages.length === 0" class="pdfkb-chat-empty">
+      <PdfChatDataSources
+        :documents="sourceDocuments"
+        @select-document="emit('selectSourceDocument', $event)"
+      />
+
+      <article v-if="turns.length === 0" class="pdfkb-chat-empty">
         <strong>Ask a question about indexed PDFs</strong>
         <span>{{ contextLabel }}</span>
       </article>
 
-      <template v-for="message in messages" :key="message.id">
-        <article
-          v-if="message.role === 'user'"
-          class="pdfkb-message-row user"
-        >
+      <template v-for="turn in turns" :key="turn.turnId">
+        <article class="pdfkb-message-row user">
           <div class="pdfkb-user-bubble">
-            <p>{{ message.content }}</p>
+            <p>{{ turn.question }}</p>
           </div>
         </article>
 
-        <article v-else class="pdfkb-message-row assistant" :class="{ error: message.error }">
+        <article
+          v-if="turn.status === 'complete' && turn.answer"
+          class="pdfkb-message-row assistant"
+        >
           <div class="pdfkb-assistant-heading">
             <span class="pdfkb-assistant-avatar">
               <AppIcon name="auto_awesome" />
@@ -112,41 +130,82 @@ function onTextareaKeydown(event: KeyboardEvent): void {
           </div>
 
           <div class="pdfkb-assistant-bubble">
-            <details
-              v-if="message.reasoning"
-              class="pdfkb-thinking-details"
+            <p v-if="turn.answer.insufficientEvidence" class="pdfkb-muted-paragraph">
+              {{
+                /[\u3400-\u9fff]/.test(turn.question)
+                  ? '当前所选 PDF 范围内的证据可能不足以形成完整回答。'
+                  : 'The selected PDF scope may not contain enough evidence for a complete answer.'
+              }}
+            </p>
+            <section
+              v-for="block in turn.answer.blocks"
+              :key="block.id"
+              class="pdfkb-answer-block"
             >
-              <summary>
-                <AppIcon name="psychology" />
-                <span>Model reasoning</span>
-              </summary>
+              <details
+                v-if="block.reasoning"
+                class="pdfkb-thinking-details"
+              >
+                <summary>
+                  <AppIcon name="psychology" />
+                  <span>Model reasoning</span>
+                </summary>
+                <div
+                  class="markdown-body pdfkb-thinking-markdown"
+                  v-html="renderMarkdown(block.reasoning)"
+                ></div>
+              </details>
               <div
-                class="markdown-body pdfkb-thinking-markdown"
-                v-html="renderMarkdown(message.reasoning)"
+                class="markdown-body pdfkb-answer-markdown"
+                v-html="renderMarkdown(block.text)"
               ></div>
-            </details>
-            <div
-              class="markdown-body pdfkb-answer-markdown"
-              v-html="renderMarkdown(message.content)"
-            ></div>
-            <ul v-if="message.bullets?.length">
-              <li v-for="bullet in message.bullets" :key="bullet.title">
-                <strong>{{ bullet.title }}</strong>
-                {{ bullet.text }}
-              </li>
-            </ul>
-            <blockquote v-if="message.quote">{{ message.quote }}</blockquote>
-            <p v-if="message.closing" class="pdfkb-muted-paragraph">
-              {{ message.closing }}
-            </p>
-            <div v-if="message.citationIds?.length" class="pdfkb-message-citations">
-              <span v-for="citationId in message.citationIds" :key="citationId">
-                {{ citationId }}
-              </span>
+              <div
+                v-if="block.citations.length || block.unresolvedCitationIds.length"
+                class="pdfkb-message-citations"
+              >
+                <button
+                  v-for="citation in block.citations"
+                  :key="citation.key"
+                  type="button"
+                  :class="{ active: activeCitationKey === citation.key }"
+                  :aria-label="`Open PDF citation ${citation.citationId}`"
+                  :aria-pressed="activeCitationKey === citation.key"
+                  @click="emit('selectCitation', turn.turnId, citation.citationId)"
+                >
+                  {{ citation.citationId }}
+                </button>
+                <button
+                  v-for="citationId in block.unresolvedCitationIds"
+                  :key="`${block.id}:unresolved:${citationId}`"
+                  type="button"
+                  disabled
+                  :aria-label="`Unavailable PDF citation ${citationId}`"
+                >
+                  {{ citationId }}
+                </button>
+              </div>
+            </section>
+            <div v-if="turn.answer.blocks.length === 0" class="pdfkb-muted-paragraph">
+              No answer text was generated.
             </div>
-            <p v-if="message.insufficientEvidence" class="pdfkb-muted-paragraph">
-              The available PDF evidence may be insufficient for a complete answer.
-            </p>
+            <div v-if="turn.answer.warnings.length" class="pdfkb-answer-warnings">
+              <p v-for="warning in turn.answer.warnings" :key="warning">{{ warning }}</p>
+            </div>
+          </div>
+        </article>
+
+        <article
+          v-else-if="turn.status === 'failed'"
+          class="pdfkb-message-row assistant error"
+        >
+          <div class="pdfkb-assistant-heading">
+            <span class="pdfkb-assistant-avatar">
+              <AppIcon name="error" />
+            </span>
+            <span>AI Assistant</span>
+          </div>
+          <div class="pdfkb-assistant-bubble">
+            <p>{{ turn.errorMessage }}</p>
           </div>
         </article>
       </template>

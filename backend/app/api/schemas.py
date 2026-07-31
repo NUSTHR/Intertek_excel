@@ -28,7 +28,6 @@ from app.api.schema_models.pdf import (  # noqa: F401
     PdfChatRouteResponse,
     PdfChatTurnListResponse,
     PdfChatTurnResponse,
-    PdfChunkSearchMatchResponse,
     PdfCitationResponse,
     PdfDocumentChunkResponse,
     PdfDocumentDetailResponse,
@@ -48,8 +47,6 @@ from app.api.schema_models.pdf import (  # noqa: F401
     PdfUploadBatchResponse,
     PdfUploadTaskResponse,
     RenamePdfFileRequest,
-    SearchPdfChunksRequest,
-    SearchPdfChunksResponse,
     SetPdfFileVisibilityRequest,
     UpdatePdfModelSettingRequest,
     UpdatePdfParserProfileRequest,
@@ -58,6 +55,9 @@ from app.api.schema_models.pdf import (  # noqa: F401
 
 class ErrorResponse(BaseModel):
     detail: str
+    code: str = "WORKSPACE_ERROR"
+    retryable: bool = False
+    request_id: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -375,6 +375,7 @@ class ChatRequest(BaseModel):
 class ChatAnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     selected_version_ids: list[str] = Field(default_factory=list)
+    session_revision: int | None = Field(default=None, ge=0)
     enable_deep_thinking: bool = False
     request_id: str | None = Field(default=None, min_length=8, max_length=120)
 
@@ -382,6 +383,7 @@ class ChatAnswerRequest(BaseModel):
 class ChatRouteRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None
+    request_id: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class CancelChatRequest(BaseModel):
@@ -460,6 +462,8 @@ class ChatRouteResponse(BaseModel):
     newly_attached_documents: list[SelectedDocumentResponse] = Field(default_factory=list)
     attached_documents: list[AttachedDocumentResponse] = Field(default_factory=list)
     created_at: str
+    request_id: str | None = None
+    session_revision: int = 0
 
 
 class LlmModelDefaultsResponse(BaseModel):

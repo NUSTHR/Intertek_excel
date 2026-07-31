@@ -15,6 +15,7 @@ class ChatWorkflowRequest:
     llm_preference: LlmPreference | None = None
     cancellation_token: ChatCancellationToken | None = None
     file_access: FileAccessContext | None = None
+    request_id: str | None = None
 
 
 class ChatWorkflowActions(Protocol):
@@ -27,6 +28,7 @@ class ChatWorkflowActions(Protocol):
         llm_preference: LlmPreference | None = None,
         cancellation_token: ChatCancellationToken | None = None,
         file_access: FileAccessContext | None = None,
+        request_id: str | None = None,
     ) -> ChatRouteResult:
         ...
 
@@ -42,6 +44,7 @@ class ChatWorkflowActions(Protocol):
         llm_preference: LlmPreference | None = None,
         cancellation_token: ChatCancellationToken | None = None,
         file_access: FileAccessContext | None = None,
+        request_id: str | None = None,
     ) -> ChatAnswer:
         ...
 

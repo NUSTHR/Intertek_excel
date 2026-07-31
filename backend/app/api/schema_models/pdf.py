@@ -1,4 +1,8 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+from app.api.schema_models.common import ChatSessionResponse
 
 
 class RenamePdfFileRequest(BaseModel):
@@ -262,43 +266,44 @@ class ListPdfDocumentChunksResponse(BaseModel):
     chunks: list[PdfDocumentChunkResponse] = Field(default_factory=list)
 
 
-class SearchPdfChunksRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=4000)
-    file_ids: list[str] = Field(default_factory=list)
-    limit: int = Field(default=12, ge=1, le=50)
-
-
-class PdfChunkSearchMatchResponse(BaseModel):
-    file: PdfFileResponse
-    chunk: PdfDocumentChunkResponse
-    score: float
-    excerpt: str
-    matched_terms: list[str] = Field(default_factory=list)
-
-
-class SearchPdfChunksResponse(BaseModel):
-    query: str
-    matches: list[PdfChunkSearchMatchResponse] = Field(default_factory=list)
-    total_matches: int
-    limit: int
-
-
 class PdfChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     file_ids: list[str] = Field(default_factory=list)
-    retrieval_limit: int = Field(default=8, ge=1, le=20)
     enable_deep_thinking: bool = False
+    request_id: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class PdfChatRouteRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     file_ids: list[str] = Field(default_factory=list)
+    request_id: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class PdfChatAnswerRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     selected_file_ids: list[str] = Field(default_factory=list)
+    file_ids: list[str] = Field(default_factory=list)
+    session_revision: int = Field(ge=0)
     enable_deep_thinking: bool = False
+    request_id: str | None = Field(default=None, min_length=8, max_length=120)
+
+
+class PdfChatSessionBatchItemRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=120)
+    expected_revision: int = Field(ge=0)
+
+
+class PdfChatSessionBatchRequest(BaseModel):
+    action: Literal["pin", "unpin", "delete"]
+    items: list[PdfChatSessionBatchItemRequest] = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+
+class PdfChatSessionBatchResponse(BaseModel):
+    updated_sessions: list[ChatSessionResponse] = Field(default_factory=list)
+    deleted_session_ids: list[str] = Field(default_factory=list)
 
 
 class PdfSelectedDocumentResponse(BaseModel):
@@ -322,7 +327,10 @@ class PdfChatRouteResponse(BaseModel):
     selected_documents: list[PdfSelectedDocumentResponse] = Field(default_factory=list)
     newly_attached_documents: list[PdfSelectedDocumentResponse] = Field(default_factory=list)
     attached_documents: list[PdfAttachedDocumentResponse] = Field(default_factory=list)
+    context_file_ids: list[str] = Field(default_factory=list)
+    session_revision: int = Field(ge=0)
     created_at: str
+    request_id: str | None = None
 
 
 class PdfChatAnswerBlockResponse(BaseModel):
@@ -348,7 +356,6 @@ class PdfChatAnswerResponse(BaseModel):
     question: str
     answer_blocks: list[PdfChatAnswerBlockResponse] = Field(default_factory=list)
     citations: list[PdfCitationResponse] = Field(default_factory=list)
-    retrieval_matches: list[PdfChunkSearchMatchResponse] = Field(default_factory=list)
     selected_documents: list[PdfSelectedDocumentResponse] = Field(default_factory=list)
     newly_attached_documents: list[PdfSelectedDocumentResponse] = Field(default_factory=list)
     attached_documents: list[PdfAttachedDocumentResponse] = Field(default_factory=list)
@@ -356,6 +363,7 @@ class PdfChatAnswerResponse(BaseModel):
     follow_up_suggestions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     created_at: str
+    request_id: str | None = None
 
 
 class PdfChatTurnResponse(BaseModel):

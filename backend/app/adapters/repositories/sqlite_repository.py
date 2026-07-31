@@ -29,6 +29,12 @@ from app.adapters.repositories.sqlite.serialization import (
     row_value,
     safe_int,
 )
+from app.core.content_fingerprint import ordered_content_fingerprint
+from app.core.errors import (
+    ChatIdempotencyConflict,
+    ChatRequestInProgress,
+    ChatSessionRevisionConflict,
+)
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
@@ -119,6 +125,7 @@ SELECT
   f.created_at,
   f.updated_at,
   f.deleted_at,
+  f.content_fingerprint,
   r.quality_status AS parse_quality_status,
   r.coverage_ratio AS parse_coverage_ratio,
   r.warning_count AS parse_warning_count,
@@ -161,7 +168,40 @@ class SQLiteExcelAssetRepository:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect(run_maintenance=False) as connection:
             self._migration_runner.initialize_schema(connection)
+            self._backfill_pdf_content_fingerprints(connection)
         self.run_operational_maintenance()
+
+    def _backfill_pdf_content_fingerprints(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT chunk.file_id, chunk.content_hash
+            FROM pdf_document_chunks AS chunk
+            JOIN pdf_files AS file ON file.file_id = chunk.file_id
+            WHERE file.kind = ?
+              AND file.content_fingerprint = ''
+            ORDER BY chunk.file_id ASC, chunk.chunk_index ASC
+            """,
+            (PdfFileKind.PDF.value,),
+        ).fetchall()
+        hashes_by_file_id: dict[str, list[str]] = {}
+        for row in rows:
+            hashes_by_file_id.setdefault(str(row["file_id"]), []).append(
+                str(row["content_hash"])
+            )
+        connection.executemany(
+            """
+            UPDATE pdf_files
+            SET content_fingerprint = ?
+            WHERE file_id = ?
+            """,
+            [
+                (ordered_content_fingerprint(content_hashes), file_id)
+                for file_id, content_hashes in hashes_by_file_id.items()
+            ],
+        )
 
     def create_file(self, file: ExcelFile) -> None:
         with self._connect() as connection:
@@ -864,6 +904,22 @@ class SQLiteExcelAssetRepository:
                 ORDER BY f.updated_at DESC, f.display_name ASC
                 """,
                 (PdfFileStatus.ACTIVE.value,),
+            ).fetchall()
+        return [file for row in rows if (file := self._to_pdf_file(row)) is not None]
+
+    def list_pdf_files_by_ids(self, file_ids: list[str]) -> list[PdfFile]:
+        normalized_ids = list(dict.fromkeys(file_id for file_id in file_ids if file_id))
+        if not normalized_ids:
+            return []
+        placeholders = ",".join("?" for _file_id in normalized_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                {PDF_FILE_WITH_PARSE_REPORT_SELECT}
+                WHERE f.file_id IN ({placeholders})
+                  AND f.status = ?
+                """,
+                (*normalized_ids, PdfFileStatus.ACTIVE.value),
             ).fetchall()
         return [file for row in rows if (file := self._to_pdf_file(row)) is not None]
 
@@ -2161,6 +2217,19 @@ class SQLiteExcelAssetRepository:
                     for chunk in chunks
                 ],
             )
+            connection.execute(
+                """
+                UPDATE pdf_files
+                SET content_fingerprint = ?
+                WHERE file_id = ?
+                """,
+                (
+                    ordered_content_fingerprint(
+                        [chunk.content_hash for chunk in chunks]
+                    ),
+                    file_id,
+                ),
+            )
 
     def list_pdf_document_chunks(self, file_id: str) -> list[PdfDocumentChunk]:
         with self._connect() as connection:
@@ -2173,6 +2242,29 @@ class SQLiteExcelAssetRepository:
                 (file_id,),
             ).fetchall()
         return [self._to_pdf_chunk(row) for row in rows]
+
+    def list_pdf_document_chunks_by_file_ids(
+        self,
+        file_ids: list[str],
+    ) -> dict[str, list[PdfDocumentChunk]]:
+        normalized_ids = list(dict.fromkeys(file_id for file_id in file_ids if file_id))
+        chunks_by_file_id = {file_id: [] for file_id in normalized_ids}
+        if not normalized_ids:
+            return chunks_by_file_id
+        placeholders = ",".join("?" for _file_id in normalized_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM pdf_document_chunks
+                WHERE file_id IN ({placeholders})
+                ORDER BY file_id ASC, chunk_index ASC
+                """,
+                normalized_ids,
+            ).fetchall()
+        for row in rows:
+            chunk = self._to_pdf_chunk(row)
+            chunks_by_file_id.setdefault(chunk.file_id, []).append(chunk)
+        return chunks_by_file_id
 
     def list_pdf_model_settings(self) -> list[PdfModelSetting]:
         with self._connect() as connection:
@@ -2390,9 +2482,10 @@ class SQLiteExcelAssetRepository:
                 INSERT OR IGNORE INTO chat_sessions
                   (
                     session_id, user_id, created_at, updated_at,
-                    title, pinned_at, status, workspace
+                    title, pinned_at, status, workspace, context_file_ids_json,
+                    revision, conversation_revision
                   )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.session_id,
@@ -2403,6 +2496,9 @@ class SQLiteExcelAssetRepository:
                     session.pinned_at,
                     session.status,
                     session.workspace.value,
+                    dump_json(session.context_file_ids),
+                    session.revision,
+                    session.conversation_revision,
                 ),
             )
 
@@ -2439,16 +2535,16 @@ class SQLiteExcelAssetRepository:
             connection.execute(
                 """
                 UPDATE chat_sessions
-                SET updated_at = ?
+                SET updated_at = ?, revision = revision + 1
                 WHERE session_id = ?
                 """,
                 (updated_at, session_id),
             )
 
-    def rename_session(
+    def set_session_context_file_ids(
         self,
         session_id: str,
-        title: str,
+        file_ids: list[str],
         updated_at: str,
         *,
         workspace: str = ChatWorkspace.EXCEL.value,
@@ -2457,12 +2553,55 @@ class SQLiteExcelAssetRepository:
             cursor = connection.execute(
                 """
                 UPDATE chat_sessions
-                SET title = ?, updated_at = ?
+                SET context_file_ids_json = ?, updated_at = ?, revision = revision + 1
                 WHERE session_id = ? AND workspace = ?
                 """,
-                (title, updated_at, session_id, workspace),
+                (dump_json(file_ids), updated_at, session_id, workspace),
             )
             if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM chat_sessions WHERE session_id = ? AND workspace = ?",
+                (session_id, workspace),
+            ).fetchone()
+        return self._to_session(row)
+
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        updated_at: str,
+        *,
+        workspace: str = ChatWorkspace.EXCEL.value,
+        expected_revision: int | None = None,
+    ) -> ChatSession | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE chat_sessions
+                SET title = ?, updated_at = ?, revision = revision + 1
+                WHERE session_id = ? AND workspace = ?
+                  AND (? IS NULL OR revision = ?)
+                """,
+                (
+                    title,
+                    updated_at,
+                    session_id,
+                    workspace,
+                    expected_revision,
+                    expected_revision,
+                ),
+            )
+            if cursor.rowcount == 0:
+                existing = connection.execute(
+                    """
+                    SELECT revision FROM chat_sessions
+                    WHERE session_id = ? AND workspace = ?
+                    """,
+                    (session_id, workspace),
+                ).fetchone()
+                if existing is not None and expected_revision is not None:
+                    raise ChatSessionRevisionConflict(session_id)
                 return None
             row = connection.execute(
                 "SELECT * FROM chat_sessions WHERE session_id = ? AND workspace = ?",
@@ -2477,17 +2616,35 @@ class SQLiteExcelAssetRepository:
         updated_at: str,
         *,
         workspace: str = ChatWorkspace.EXCEL.value,
+        expected_revision: int | None = None,
     ) -> ChatSession | None:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE chat_sessions
-                SET pinned_at = ?, updated_at = ?
+                SET pinned_at = ?, updated_at = ?, revision = revision + 1
                 WHERE session_id = ? AND workspace = ?
+                  AND (? IS NULL OR revision = ?)
                 """,
-                (pinned_at, updated_at, session_id, workspace),
+                (
+                    pinned_at,
+                    updated_at,
+                    session_id,
+                    workspace,
+                    expected_revision,
+                    expected_revision,
+                ),
             )
             if cursor.rowcount == 0:
+                existing = connection.execute(
+                    """
+                    SELECT revision FROM chat_sessions
+                    WHERE session_id = ? AND workspace = ?
+                    """,
+                    (session_id, workspace),
+                ).fetchone()
+                if existing is not None and expected_revision is not None:
+                    raise ChatSessionRevisionConflict(session_id)
                 return None
             row = connection.execute(
                 "SELECT * FROM chat_sessions WHERE session_id = ? AND workspace = ?",
@@ -2500,14 +2657,27 @@ class SQLiteExcelAssetRepository:
         session_id: str,
         *,
         workspace: str = ChatWorkspace.EXCEL.value,
+        expected_revision: int | None = None,
     ) -> bool:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT session_id FROM chat_sessions WHERE session_id = ? AND workspace = ?",
+                """
+                SELECT session_id, revision FROM chat_sessions
+                WHERE session_id = ? AND workspace = ?
+                """,
                 (session_id, workspace),
             ).fetchone()
             if row is None:
                 return False
+            if (
+                expected_revision is not None
+                and int(row["revision"]) != expected_revision
+            ):
+                raise ChatSessionRevisionConflict(session_id)
+            connection.execute(
+                "DELETE FROM chat_request_executions WHERE session_id = ?",
+                (session_id,),
+            )
             connection.execute(
                 "DELETE FROM chat_turns WHERE session_id = ?",
                 (session_id,),
@@ -2521,10 +2691,135 @@ class SQLiteExcelAssetRepository:
                 (session_id,),
             )
             cursor = connection.execute(
-                "DELETE FROM chat_sessions WHERE session_id = ?",
-                (session_id,),
+                """
+                DELETE FROM chat_sessions
+                WHERE session_id = ?
+                  AND workspace = ?
+                  AND (? IS NULL OR revision = ?)
+                """,
+                (
+                    session_id,
+                    workspace,
+                    expected_revision,
+                    expected_revision,
+                ),
             )
+            if cursor.rowcount != 1:
+                raise ChatSessionRevisionConflict(session_id)
         return cursor.rowcount > 0
+
+    def batch_set_sessions_pinned(
+        self,
+        session_revisions: dict[str, int],
+        pinned_at: str | None,
+        updated_at: str,
+        *,
+        workspace: str = ChatWorkspace.EXCEL.value,
+    ) -> list[ChatSession]:
+        if not session_revisions:
+            return []
+        session_ids = sorted(session_revisions)
+        placeholders = ",".join("?" for _session_id in session_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM chat_sessions
+                WHERE workspace = ? AND session_id IN ({placeholders})
+                """,
+                (workspace, *session_ids),
+            ).fetchall()
+            rows_by_id = {str(row["session_id"]): row for row in rows}
+            for session_id in session_ids:
+                row = rows_by_id.get(session_id)
+                if (
+                    row is None
+                    or int(row["revision"]) != session_revisions[session_id]
+                ):
+                    raise ChatSessionRevisionConflict(session_id)
+            cursor = connection.executemany(
+                """
+                UPDATE chat_sessions
+                SET pinned_at = ?, updated_at = ?, revision = revision + 1
+                WHERE session_id = ? AND workspace = ? AND revision = ?
+                """,
+                [
+                    (
+                        pinned_at,
+                        updated_at,
+                        session_id,
+                        workspace,
+                        session_revisions[session_id],
+                    )
+                    for session_id in session_ids
+                ],
+            )
+            if cursor.rowcount != len(session_ids):
+                raise ChatSessionRevisionConflict(session_ids[0])
+            updated_rows = connection.execute(
+                f"""
+                SELECT * FROM chat_sessions
+                WHERE workspace = ? AND session_id IN ({placeholders})
+                """,
+                (workspace, *session_ids),
+            ).fetchall()
+        sessions = [
+            session
+            for row in updated_rows
+            if (session := self._to_session(row)) is not None
+        ]
+        return sessions
+
+    def batch_delete_sessions(
+        self,
+        session_revisions: dict[str, int],
+        *,
+        workspace: str = ChatWorkspace.EXCEL.value,
+    ) -> list[str]:
+        if not session_revisions:
+            return []
+        session_ids = sorted(session_revisions)
+        placeholders = ",".join("?" for _session_id in session_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT session_id, revision FROM chat_sessions
+                WHERE workspace = ? AND session_id IN ({placeholders})
+                """,
+                (workspace, *session_ids),
+            ).fetchall()
+            rows_by_id = {str(row["session_id"]): row for row in rows}
+            for session_id in session_ids:
+                row = rows_by_id.get(session_id)
+                if (
+                    row is None
+                    or int(row["revision"]) != session_revisions[session_id]
+                ):
+                    raise ChatSessionRevisionConflict(session_id)
+            for table_name in (
+                "chat_request_executions",
+                "chat_turns",
+                "chat_session_documents",
+                "pdf_chat_session_documents",
+            ):
+                connection.execute(
+                    f"DELETE FROM {table_name} WHERE session_id IN ({placeholders})",
+                    session_ids,
+                )
+            cursor = connection.executemany(
+                """
+                DELETE FROM chat_sessions
+                WHERE workspace = ?
+                  AND session_id = ?
+                  AND revision = ?
+                """,
+                [
+                    (workspace, session_id, session_revisions[session_id])
+                    for session_id in session_ids
+                ],
+            )
+            if cursor.rowcount != len(session_ids):
+                raise ChatSessionRevisionConflict(session_ids[0])
+        return session_ids
 
     def attach_document(self, document: AttachedDocument) -> bool:
         with self._connect() as connection:
@@ -2625,41 +2920,473 @@ class SQLiteExcelAssetRepository:
             if (document := self._to_pdf_attached_document(row)) is not None
         ]
 
+    def commit_pdf_chat_turn(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        expected_conversation_revision: int,
+        context_file_ids: list[str],
+        attached_documents: list[PdfAttachedDocument],
+        turn: ChatTurn,
+        title_if_new: str | None,
+        request_fingerprint: str | None,
+    ) -> ChatTurn:
+        with self._connect() as connection:
+            existing_turn = self._get_turn_by_request_id_on_connection(
+                connection,
+                session_id=session_id,
+                request_id=turn.request_id,
+                workspace=ChatWorkspace.PDF.value,
+            )
+            if existing_turn is not None:
+                return existing_turn
+            cursor = connection.execute(
+                """
+                UPDATE chat_sessions
+                SET
+                  context_file_ids_json = ?,
+                  updated_at = ?,
+                  title = CASE
+                    WHEN title = 'New chat' AND ? IS NOT NULL THEN ?
+                    ELSE title
+                  END,
+                  conversation_revision = conversation_revision + 1
+                WHERE session_id = ?
+                  AND user_id = ?
+                  AND workspace = ?
+                  AND conversation_revision = ?
+                """,
+                (
+                    dump_json(context_file_ids),
+                    turn.created_at,
+                    title_if_new,
+                    title_if_new,
+                    session_id,
+                    user_id,
+                    ChatWorkspace.PDF.value,
+                    expected_conversation_revision,
+                ),
+            )
+            if cursor.rowcount == 0:
+                existing_turn = self._get_turn_by_request_id_on_connection(
+                    connection,
+                    session_id=session_id,
+                    request_id=turn.request_id,
+                    workspace=ChatWorkspace.PDF.value,
+                )
+                if existing_turn is not None:
+                    return existing_turn
+                raise ChatSessionRevisionConflict(session_id)
+            for document in attached_documents:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO pdf_chat_session_documents
+                      (
+                        session_id, file_id, attached_at,
+                        chunk_count, context_hash, status
+                      )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        document.session_id,
+                        document.file_id,
+                        document.attached_at,
+                        document.chunk_count,
+                        document.context_hash,
+                        document.status,
+                    ),
+                )
+            self._insert_turn_on_connection(connection, turn)
+            self._complete_chat_request_on_connection(
+                connection,
+                workspace=ChatWorkspace.PDF.value,
+                session_id=session_id,
+                user_id=user_id,
+                turn=turn,
+                request_fingerprint=request_fingerprint,
+            )
+        return turn
+
     def create_turn(self, turn: ChatTurn) -> None:
+        with self._connect() as connection:
+            self._insert_turn_on_connection(connection, turn)
+
+    def get_turn_by_request_id(
+        self,
+        session_id: str,
+        request_id: str,
+        *,
+        workspace: str = ChatWorkspace.EXCEL.value,
+    ) -> ChatTurn | None:
+        with self._connect() as connection:
+            return self._get_turn_by_request_id_on_connection(
+                connection,
+                session_id=session_id,
+                request_id=request_id,
+                workspace=workspace,
+            )
+
+    def claim_excel_chat_request(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        request_id: str,
+        request_fingerprint: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> ChatTurn | None:
+        return self._claim_chat_request(
+            workspace=ChatWorkspace.EXCEL.value,
+            session_id=session_id,
+            user_id=user_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+            claimed_at=claimed_at,
+            lease_expires_at=lease_expires_at,
+        )
+
+    def claim_pdf_chat_request(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        request_id: str,
+        request_fingerprint: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> ChatTurn | None:
+        return self._claim_chat_request(
+            workspace=ChatWorkspace.PDF.value,
+            session_id=session_id,
+            user_id=user_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+            claimed_at=claimed_at,
+            lease_expires_at=lease_expires_at,
+        )
+
+    def _claim_chat_request(
+        self,
+        *,
+        workspace: str,
+        session_id: str,
+        user_id: str,
+        request_id: str,
+        request_fingerprint: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> ChatTurn | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM chat_request_executions
+                WHERE workspace = ?
+                  AND session_id = ?
+                  AND request_id = ?
+                """,
+                (workspace, session_id, request_id),
+            ).fetchone()
+            if row is not None:
+                if (
+                    str(row["user_id"]) != user_id
+                    or str(row["request_fingerprint"]) != request_fingerprint
+                ):
+                    raise ChatIdempotencyConflict(request_id)
+                if str(row["status"]) == "completed":
+                    turn = self._get_turn_by_request_id_on_connection(
+                        connection,
+                        session_id=session_id,
+                        request_id=request_id,
+                        workspace=workspace,
+                    )
+                    if turn is not None:
+                        return turn
+                if (
+                    str(row["status"]) == "in_progress"
+                    and str(row["lease_expires_at"]) >= claimed_at
+                ):
+                    raise ChatRequestInProgress(request_id)
+                connection.execute(
+                    """
+                    UPDATE chat_request_executions
+                    SET
+                      status = 'in_progress',
+                      lease_expires_at = ?,
+                      turn_id = NULL,
+                      updated_at = ?
+                    WHERE workspace = ?
+                      AND session_id = ?
+                      AND request_id = ?
+                    """,
+                    (
+                        lease_expires_at,
+                        claimed_at,
+                        workspace,
+                        session_id,
+                        request_id,
+                    ),
+                )
+                return None
+            connection.execute(
+                """
+                INSERT INTO chat_request_executions
+                  (
+                    workspace, session_id, request_id, user_id,
+                    request_fingerprint, status, lease_expires_at,
+                    turn_id, created_at, updated_at
+                  )
+                VALUES (?, ?, ?, ?, ?, 'in_progress', ?, NULL, ?, ?)
+                """,
+                (
+                    workspace,
+                    session_id,
+                    request_id,
+                    user_id,
+                    request_fingerprint,
+                    lease_expires_at,
+                    claimed_at,
+                    claimed_at,
+                ),
+            )
+        return None
+
+    def release_excel_chat_request(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> None:
+        self._release_chat_request(
+            workspace=ChatWorkspace.EXCEL.value,
+            session_id=session_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+
+    def release_pdf_chat_request(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> None:
+        self._release_chat_request(
+            workspace=ChatWorkspace.PDF.value,
+            session_id=session_id,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+
+    def _release_chat_request(
+        self,
+        *,
+        workspace: str,
+        session_id: str,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO chat_turns
-                  (
-                    turn_id, session_id, question, answer_text,
-                    citation_ids_json, selected_documents_json, created_at,
-                    answer_blocks_json, newly_attached_documents_json,
-                    attached_documents_json, citations_json, insufficient_evidence,
-                    follow_up_suggestions_json, warnings_json
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                DELETE FROM chat_request_executions
+                WHERE workspace = ?
+                  AND session_id = ?
+                  AND request_id = ?
+                  AND request_fingerprint = ?
+                  AND status = 'in_progress'
                 """,
                 (
-                    turn.turn_id,
-                    turn.session_id,
-                    turn.question,
-                    turn.answer_text,
-                    dump_json(turn.citation_ids),
-                    dump_json(self._selected_documents_payload(turn.selected_documents)),
-                    turn.created_at,
-                    dump_json(self._answer_blocks_payload(turn.answer_blocks)),
-                    dump_json(
-                        self._selected_documents_payload(turn.newly_attached_documents)
-                    ),
-                    dump_json(
-                        self._attached_documents_payload(turn.attached_documents)
-                    ),
-                    dump_json(self._citations_payload(turn.citations)),
-                    1 if turn.insufficient_evidence else 0,
-                    dump_json(turn.follow_up_suggestions),
-                    dump_json(turn.warnings),
+                    workspace,
+                    session_id,
+                    request_id,
+                    request_fingerprint,
                 ),
             )
+
+    def commit_excel_chat_turn(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        expected_conversation_revision: int,
+        attached_documents: list[AttachedDocument],
+        turn: ChatTurn,
+        request_fingerprint: str | None,
+    ) -> ChatTurn:
+        with self._connect() as connection:
+            existing_turn = self._get_turn_by_request_id_on_connection(
+                connection,
+                session_id=session_id,
+                request_id=turn.request_id,
+                workspace=ChatWorkspace.EXCEL.value,
+            )
+            if existing_turn is not None:
+                return existing_turn
+            cursor = connection.execute(
+                """
+                UPDATE chat_sessions
+                SET
+                  updated_at = ?,
+                  conversation_revision = conversation_revision + 1
+                WHERE session_id = ?
+                  AND user_id = ?
+                  AND workspace = ?
+                  AND conversation_revision = ?
+                """,
+                (
+                    turn.created_at,
+                    session_id,
+                    user_id,
+                    ChatWorkspace.EXCEL.value,
+                    expected_conversation_revision,
+                ),
+            )
+            if cursor.rowcount == 0:
+                existing_turn = self._get_turn_by_request_id_on_connection(
+                    connection,
+                    session_id=session_id,
+                    request_id=turn.request_id,
+                    workspace=ChatWorkspace.EXCEL.value,
+                )
+                if existing_turn is not None:
+                    return existing_turn
+                raise ChatSessionRevisionConflict(session_id)
+            for document in attached_documents:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO chat_session_documents
+                      (
+                        session_id, file_id, version_id, attached_at,
+                        row_count, context_hash, status
+                      )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        document.session_id,
+                        document.file_id,
+                        document.version_id,
+                        document.attached_at,
+                        document.row_count,
+                        document.context_hash,
+                        document.status,
+                    ),
+                )
+            self._insert_turn_on_connection(connection, turn)
+            self._complete_chat_request_on_connection(
+                connection,
+                workspace=ChatWorkspace.EXCEL.value,
+                session_id=session_id,
+                user_id=user_id,
+                turn=turn,
+                request_fingerprint=request_fingerprint,
+            )
+        return turn
+
+    def _complete_chat_request_on_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace: str,
+        session_id: str,
+        user_id: str,
+        turn: ChatTurn,
+        request_fingerprint: str | None,
+    ) -> None:
+        if not turn.request_id or not request_fingerprint:
+            return
+        cursor = connection.execute(
+            """
+            UPDATE chat_request_executions
+            SET
+              status = 'completed',
+              turn_id = ?,
+              updated_at = ?
+            WHERE workspace = ?
+              AND session_id = ?
+              AND request_id = ?
+              AND user_id = ?
+              AND request_fingerprint = ?
+              AND status = 'in_progress'
+            """,
+            (
+                turn.turn_id,
+                turn.created_at,
+                workspace,
+                session_id,
+                turn.request_id,
+                user_id,
+                request_fingerprint,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise ChatIdempotencyConflict(turn.request_id)
+
+    def _get_turn_by_request_id_on_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        request_id: str | None,
+        workspace: str,
+    ) -> ChatTurn | None:
+        if not request_id:
+            return None
+        row = connection.execute(
+            """
+            SELECT turn.*
+            FROM chat_turns AS turn
+            JOIN chat_sessions AS session
+              ON session.session_id = turn.session_id
+            WHERE turn.session_id = ?
+              AND turn.request_id = ?
+              AND session.workspace = ?
+            LIMIT 1
+            """,
+            (session_id, request_id, workspace),
+        ).fetchone()
+        return self._to_turn(row)
+
+    def _insert_turn_on_connection(
+        self,
+        connection: sqlite3.Connection,
+        turn: ChatTurn,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO chat_turns
+              (
+                turn_id, session_id, question, answer_text,
+                citation_ids_json, selected_documents_json, created_at,
+                answer_blocks_json, newly_attached_documents_json,
+                attached_documents_json, citations_json, insufficient_evidence,
+                follow_up_suggestions_json, warnings_json, request_id
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                turn.turn_id,
+                turn.session_id,
+                turn.question,
+                turn.answer_text,
+                dump_json(turn.citation_ids),
+                dump_json(self._selected_documents_payload(turn.selected_documents)),
+                turn.created_at,
+                dump_json(self._answer_blocks_payload(turn.answer_blocks)),
+                dump_json(
+                    self._selected_documents_payload(turn.newly_attached_documents)
+                ),
+                dump_json(self._attached_documents_payload(turn.attached_documents)),
+                dump_json(self._citations_payload(turn.citations)),
+                1 if turn.insufficient_evidence else 0,
+                dump_json(turn.follow_up_suggestions),
+                dump_json(turn.warnings),
+                turn.request_id,
+            ),
+        )
 
     def delete_turn(self, session_id: str, turn_id: str) -> None:
         with self._connect() as connection:
@@ -3321,6 +4048,7 @@ class SQLiteExcelAssetRepository:
             warning_count=_optional_int(row_value(row, "parse_warning_count")),
             failed_page_count=_optional_int(row_value(row, "parse_failed_page_count")),
             parser_backend=row_value(row, "parse_parser_backend"),
+            content_fingerprint=str(row_value(row, "content_fingerprint", "")),
         )
 
     def _pdf_upload_batch_values(self, batch: PdfUploadBatch) -> tuple[object, ...]:
@@ -3737,6 +4465,13 @@ class SQLiteExcelAssetRepository:
             workspace=ChatWorkspace(
                 row_str(row, "workspace", ChatWorkspace.EXCEL.value)
             ),
+            context_file_ids=load_string_list(
+                row_value(row, "context_file_ids_json", "[]")
+            ),
+            revision=int(row_value(row, "revision", 0) or 0),
+            conversation_revision=int(
+                row_value(row, "conversation_revision", 0) or 0
+            ),
         )
 
     def _to_user(self, row: sqlite3.Row | None) -> UserAccount | None:
@@ -3847,6 +4582,7 @@ class SQLiteExcelAssetRepository:
                 row_value(row, "follow_up_suggestions_json", "[]")
             ),
             warnings=load_string_list(row_value(row, "warnings_json", "[]")),
+            request_id=row_value(row, "request_id", None),
         )
 
     def _to_llm_preference(self, row: sqlite3.Row | None) -> LlmPreference | None:

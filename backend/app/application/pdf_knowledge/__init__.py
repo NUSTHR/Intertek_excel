@@ -3,7 +3,6 @@ from app.application.pdf_knowledge.indexing import PdfIndexingService
 from app.application.pdf_knowledge.library_service import PdfLibraryService
 from app.application.pdf_knowledge.parser_profiles import PdfParserProfileRegistry
 from app.application.pdf_knowledge.parsing_service import PdfParsingService
-from app.application.pdf_knowledge.retrieval import PdfRetrievalService
 from app.application.pdf_knowledge.service import PdfKnowledgeService
 from app.application.pdf_knowledge.settings_service import PdfModelSettingsService
 from app.application.pdf_knowledge.summary_service import PdfSummaryService
@@ -20,7 +19,6 @@ __all__ = [
     "PdfModelSettingsService",
     "PdfParsingService",
     "PdfParserProfileRegistry",
-    "PdfRetrievalService",
     "PdfSummaryService",
     "PdfSummaryTaskWorker",
     "PdfUploadCandidate",

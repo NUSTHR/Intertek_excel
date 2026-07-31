@@ -324,6 +324,98 @@ def test_siliconflow_router_filters_weak_low_confidence_matches() -> None:
     assert selected == []
 
 
+def test_siliconflow_pdf_router_uses_compact_prompt_and_repairs_invalid_json() -> None:
+    requests: list[dict[str, Any]] = []
+    responses = [
+        '{"document_for_this_turn": [',
+        json.dumps(
+            {
+                "document_for_this_turn": [
+                    {
+                        "file_id": "file_1",
+                        "version_id": "version_1",
+                        "reason": "The PDF covers the requested clause.",
+                        "confidence": 0.92,
+                    }
+                ]
+            }
+        ),
+    ]
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": responses.pop(0),
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+    selected = client.route_pdf_documents(
+        "Summarize every PDF in this folder.",
+        [
+            DocumentSummary(
+                summary_id="summary_1",
+                file_id="file_1",
+                version_id="version_1",
+                document_title="standard.pdf",
+                summary_text="A PDF about clause 4.1.",
+                business_domain="standards",
+                key_topics=["clause 4.1"],
+                suitable_questions=["What does clause 4.1 require?"],
+                unsuitable_questions=[],
+                coverage_scope={"duplicate_content_group": ["content-abc"]},
+                sheet_summaries=[
+                    SheetSummary(
+                        sheet_id="unused",
+                        sheet_name="unused",
+                        summary="PDF routing must not serialize Excel sheet details.",
+                        important_columns=[],
+                        likely_question_types=[],
+                        header_terms=[],
+                        sampled_identifiers=[],
+                    )
+                ],
+                created_at="now",
+            )
+        ],
+        max_documents=9,
+    )
+
+    assert [document.file_id for document in selected] == ["file_1"]
+    assert len(requests) == 2
+    assert requests[0]["max_tokens"] == 1600
+    assert "enterprise PDF knowledge base" in requests[0]["messages"][0]["content"]
+    assert "Excel" not in requests[0]["messages"][0]["content"]
+    assert "sheet_summaries" not in requests[0]["messages"][1]["content"]
+    assert '"duplicate_content_group": "content-abc"' in requests[0]["messages"][1][
+        "content"
+    ]
+    assert "range-wide intents" in requests[0]["messages"][0]["content"]
+    assert "previous response was not a complete JSON object" in requests[1][
+        "messages"
+    ][-1]["content"]
+
+
 def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
     requests: list[dict[str, Any]] = []
 
@@ -641,6 +733,108 @@ def test_siliconflow_pdf_answer_uses_pdf_chunk_prompt() -> None:
     )
     assert "provided PDF chunks" in requests[0]["messages"][-1]["content"]
     assert '"evidence_id": "string"' in requests[0]["messages"][-1]["content"]
+
+
+def test_siliconflow_pdf_answer_sends_history_as_role_messages() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request(
+                "POST",
+                "https://api.example.test/v1/chat/completions",
+            ),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_blocks": [
+                                        {
+                                            "text": (
+                                                "The current PDF evidence answers "
+                                                "the follow-up."
+                                            ),
+                                            "evidence_ids": ["pdf_1::chunk_1"],
+                                        }
+                                    ],
+                                    "citations": [
+                                        {
+                                            "evidence_id": "pdf_1::chunk_1",
+                                            "quote": "current evidence",
+                                        }
+                                    ],
+                                    "insufficient_evidence": False,
+                                    "follow_up_suggestions": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+    client.answer_with_pdf_chunks(
+        "What about the next clause?",
+        [
+            {
+                "evidence_id": "pdf_1::chunk_1",
+                "file_id": "pdf_1",
+                "file_name": "guide.pdf",
+                "chunk_id": "chunk_1",
+                "chunk_index": 0,
+                "page_label": "Page 2",
+                "title": "Next clause",
+                "text": "current evidence",
+                "excerpt": "current evidence",
+            }
+        ],
+        previous_turns=[
+            ChatTurn(
+                turn_id="turn_pdf_1",
+                session_id="pdf_session_1",
+                question="What did the previous clause require?",
+                answer_text="It required traceable evidence.",
+                citation_ids=["P1"],
+                selected_documents=[
+                    SelectedDocument(
+                        file_id="pdf_1",
+                        version_id="pdf_1",
+                        reason="Previous PDF evidence.",
+                    )
+                ],
+                created_at="now",
+            )
+        ],
+    )
+
+    messages = requests[0]["messages"]
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert messages[1]["content"] == "What did the previous clause require?"
+    assert "It required traceable evidence." in messages[2]["content"]
+    assert "Previous answer metadata" in messages[2]["content"]
+    assert '"citation_ids": ["P1"]' in messages[2]["content"]
+    assert "provided PDF chunks" in messages[-1]["content"]
 
 
 def test_siliconflow_timeout_error_includes_stage_model_and_duration() -> None:

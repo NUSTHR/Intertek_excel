@@ -2,17 +2,24 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { listPdfKnowledgeFiles } from '../../../api/pdf-knowledge-api'
+import { ExcelWorkspaceApiError } from '../../../api/errors'
 import { usePdfChat } from '../composables/use-pdf-chat'
+import { usePdfChatSessionActions } from '../composables/use-pdf-chat-session-actions'
+import { shouldDefaultCollapsePdfCitations } from '../utils/pdf-citation-layout'
 import { buildPdfKnowledgeTree } from '../utils/pdf-tree'
 import type {
   PdfBreadcrumbItem,
+  PdfChatSourceDocument,
   PdfKnowledgeNode,
+  PdfManagementFocusTarget,
   PdfManagedFile,
   PdfRecentChat,
   PdfSidebarView,
   PdfWorkspaceMode,
 } from '../types'
 import PdfChatWorkspace from './PdfChatWorkspace.vue'
+import PdfChatSessionDialogs from './PdfChatSessionDialogs.vue'
+import PdfCitationEvidenceDialog from './PdfCitationEvidenceDialog.vue'
 import PdfKnowledgeManagementWorkspace from './PdfKnowledgeManagementWorkspace.vue'
 import PdfKnowledgeSidebar from './PdfKnowledgeSidebar.vue'
 import PdfSourceCitations from './PdfSourceCitations.vue'
@@ -34,10 +41,14 @@ const workspaceMode = ref<PdfWorkspaceMode>(props.entryMode)
 const activeSidebarView = ref<PdfSidebarView>('knowledge')
 const isCitationPanelCollapsed = ref(false)
 const hasUserToggledCitationPanel = ref(false)
+const citationFocusRequestId = ref(0)
 const knowledgeFiles = ref<PdfManagedFile[]>([])
 const knowledgeTreeError = ref('')
 const isKnowledgeTreeStale = ref(true)
 const selectedContextId = ref('')
+const isStartingNewChat = ref(false)
+const managementFocusTarget = ref<PdfManagementFocusTarget>()
+let managementFocusRequestId = 0
 const pdfChat = usePdfChat()
 
 const knowledgeTree = computed<PdfKnowledgeNode[]>(() => {
@@ -46,8 +57,51 @@ const knowledgeTree = computed<PdfKnowledgeNode[]>(() => {
 
 const recentChats = computed<PdfRecentChat[]>(() => pdfChat.recentChats.value)
 
+const sessionActions = usePdfChatSessionActions(recentChats, {
+  renameSession: (chat, title) => runSessionMutation(() =>
+    pdfChat.renameSession(chat.id, title, chat.revision)),
+  setSessionPinned: (chat, pinned) => runSessionMutation(() =>
+    pdfChat.setSessionPinned(chat.id, pinned, chat.revision)),
+  deleteSessions: (chats) => runSessionMutation(async () => {
+    if (chats.length === 1) {
+      const chat = chats[0]
+      if (chat) {
+        await pdfChat.deleteSession(chat.id, chat.revision)
+      }
+      return
+    }
+    await pdfChat.batchMutateSessions(
+      'delete',
+      chats.map((chat) => ({
+        sessionId: chat.id,
+        expectedRevision: chat.revision,
+      })),
+    )
+  }),
+  setSessionsPinned: (chats, pinned) => runSessionMutation(() =>
+    pdfChat.batchMutateSessions(
+      pinned ? 'pin' : 'unpin',
+      chats.map((chat) => ({
+        sessionId: chat.id,
+        expectedRevision: chat.revision,
+      })),
+    )),
+})
+
 const fileLookup = computed(() => {
   return new Map(knowledgeFiles.value.map((file) => [file.id, file]))
+})
+
+const chatSourceDocuments = computed<PdfChatSourceDocument[]>(() => {
+  const turnId = pdfChat.activeTurnId.value || 'latest'
+  return pdfChat.selectedDocuments.value.map((document) => ({
+    key: `${turnId}:${document.fileId}:${document.versionId}`,
+    fileId: document.fileId,
+    versionId: document.versionId,
+    title: fileLookup.value.get(document.fileId)?.name ?? document.fileId,
+    reason: document.reason,
+    confidence: document.confidence,
+  }))
 })
 
 const chatContextLabel = computed(() => {
@@ -85,7 +139,8 @@ const chatContextBreadcrumbs = computed<PdfBreadcrumbItem[]>(() => {
 })
 
 function shouldCollapseCitationsForViewport(): boolean {
-  return typeof window !== 'undefined' && window.innerWidth <= 860
+  return typeof window !== 'undefined'
+    && shouldDefaultCollapsePdfCitations(window.innerWidth)
 }
 
 function changeSidebarView(view: PdfSidebarView): void {
@@ -93,11 +148,20 @@ function changeSidebarView(view: PdfSidebarView): void {
 }
 
 async function startNewChat(): Promise<void> {
+  if (isStartingNewChat.value || pdfChat.isSessionLoading.value) {
+    return
+  }
+  isStartingNewChat.value = true
   activeSidebarView.value = 'chats'
   workspaceMode.value = 'chat'
-  await refreshKnowledgeTreeIfNeeded()
-  await pdfChat.startNewChat()
-  syncCitationPanelWithViewport()
+  try {
+    await refreshKnowledgeTreeIfNeeded()
+    await pdfChat.startNewChat()
+    sessionActions.cancelSelection()
+    syncCitationPanelWithViewport()
+  } finally {
+    isStartingNewChat.value = false
+  }
 }
 
 async function openChat(chatId: string): Promise<void> {
@@ -105,6 +169,13 @@ async function openChat(chatId: string): Promise<void> {
   workspaceMode.value = 'chat'
   await refreshKnowledgeTreeIfNeeded()
   await pdfChat.openSession(chatId)
+  const restoredContextId = pdfChat.selectedContextFileIds.value[0] ?? ''
+  selectedContextId.value = fileLookup.value.has(restoredContextId)
+    ? restoredContextId
+    : ''
+  if (selectedContextId.value !== restoredContextId) {
+    pdfChat.setContextFileIds([])
+  }
   syncCitationPanelWithViewport()
 }
 
@@ -118,9 +189,32 @@ function toggleCitationPanel(): void {
   isCitationPanelCollapsed.value = !isCitationPanelCollapsed.value
 }
 
+function selectChatCitation(turnId: string, citationId: string): void {
+  if (isCitationPanelCollapsed.value) {
+    isCitationPanelCollapsed.value = false
+  }
+  pdfChat.selectCitation(turnId, citationId)
+}
+
+function closeCitationEvidence(): void {
+  pdfChat.closeCitationEvidence()
+  citationFocusRequestId.value += 1
+}
+
+function openSourceDocument(document: PdfChatSourceDocument): void {
+  managementFocusRequestId += 1
+  managementFocusTarget.value = {
+    requestId: managementFocusRequestId,
+    fileId: document.fileId,
+  }
+  void changeWorkspaceMode('management')
+}
+
 async function changeWorkspaceMode(mode: PdfWorkspaceMode): Promise<void> {
   if (mode === 'management') {
     pdfChat.cancelActiveOperations()
+  } else {
+    managementFocusTarget.value = undefined
   }
   workspaceMode.value = mode
   if (mode === 'chat') {
@@ -183,11 +277,26 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'PDF sources failed to load.'
 }
 
+async function runSessionMutation(action: () => Promise<void>): Promise<void> {
+  try {
+    await action()
+  } catch (error: unknown) {
+    if (
+      error instanceof ExcelWorkspaceApiError
+      && error.code === 'CHAT_SESSION_REVISION_CONFLICT'
+    ) {
+      await pdfChat.loadSessions()
+    }
+    throw error
+  }
+}
+
 </script>
 
 <template>
   <PdfKnowledgeManagementWorkspace
     v-if="workspaceMode === 'management'"
+    :focus-target="managementFocusTarget"
     :is-admin="isAdmin"
     :user-email="userEmail"
     :user-role-label="userRoleLabel"
@@ -208,13 +317,33 @@ function toErrorMessage(error: unknown): string {
       :selected-context-id="selectedContextId"
       :is-admin="isAdmin"
       :is-session-loading="pdfChat.isSessionLoading.value"
+      :is-starting-new-chat="isStartingNewChat"
+      :active-session-id="pdfChat.activeSessionId.value"
       :tree="knowledgeTree"
       :recent-chats="recentChats"
+      :is-chat-selection-mode="sessionActions.isSelectionMode.value"
+      :is-all-chats-selected="sessionActions.isAllSelected.value"
+      :is-chat-batch-pending="sessionActions.isBatchPending.value"
+      :selected-session-ids="sessionActions.selectedSessionIds.value"
+      :busy-session-ids="sessionActions.busySessionIds.value"
+      :session-action-error="sessionActions.batchError.value"
       :user-email="userEmail"
       :user-role-label="userRoleLabel"
       @change-view="changeSidebarView"
       @new-chat="startNewChat"
       @open-chat="openChat"
+      @begin-chat-selection="sessionActions.beginSelection"
+      @cancel-chat-selection="sessionActions.cancelSelection"
+      @toggle-chat-selection="sessionActions.toggleSelection"
+      @toggle-select-all-chats="sessionActions.toggleSelectAll"
+      @rename-chat="sessionActions.requestRename"
+      @toggle-chat-pinned="sessionActions.togglePinned"
+      @delete-chat="(chat) => sessionActions.requestDelete([chat])"
+      @pin-selected-chats="sessionActions.setSelectedPinned(true)"
+      @unpin-selected-chats="sessionActions.setSelectedPinned(false)"
+      @delete-selected-chats="
+        sessionActions.requestDelete(sessionActions.selectedChats.value)
+      "
       @open-excel-chat="emit('openExcelChat')"
       @open-management="changeWorkspaceMode('management')"
       @select-context="selectChatContext"
@@ -224,11 +353,15 @@ function toErrorMessage(error: unknown): string {
     <PdfChatWorkspace
       :breadcrumbs="chatContextBreadcrumbs"
       :context-label="chatContextLabel"
-      :messages="pdfChat.messages.value"
+      :turns="pdfChat.turns.value"
+      :source-documents="chatSourceDocuments"
+      :active-citation-key="pdfChat.activeCitationKey.value"
       :is-answering="pdfChat.isAnswering.value"
       :enable-deep-thinking="pdfChat.enableDeepThinking.value"
       :error-message="pdfChat.errorMessage.value"
       @send-question="pdfChat.sendQuestion"
+      @select-citation="selectChatCitation"
+      @select-source-document="openSourceDocument"
       @toggle-deep-thinking="pdfChat.toggleDeepThinking"
       @clear-chat="pdfChat.clearChat"
     />
@@ -236,7 +369,34 @@ function toErrorMessage(error: unknown): string {
     <PdfSourceCitations
       :citations="pdfChat.citations.value"
       :collapsed="isCitationPanelCollapsed"
+      :active-citation-key="pdfChat.activeCitationKey.value"
+      :focus-request-id="citationFocusRequestId"
+      @open-citation="pdfChat.openCitationEvidence"
       @toggle-collapsed="toggleCitationPanel"
+    />
+
+    <PdfCitationEvidenceDialog
+      v-if="pdfChat.citationEvidenceDialog.value"
+      :dialog="pdfChat.citationEvidenceDialog.value"
+      @close="closeCitationEvidence"
+      @retry="pdfChat.retryCitationEvidence"
+    />
+
+    <PdfChatSessionDialogs
+      :active-session-id="pdfChat.activeSessionId.value"
+      :pending-rename-chat="sessionActions.pendingRenameChat.value"
+      :rename-draft="sessionActions.renameDraft.value"
+      :rename-error="sessionActions.renameError.value"
+      :is-rename-pending="sessionActions.isRenamePending.value"
+      :can-submit-rename="sessionActions.canSubmitRename.value"
+      :pending-delete-chats="sessionActions.pendingDeleteChats.value"
+      :delete-error="sessionActions.deleteError.value"
+      :is-delete-pending="sessionActions.isDeletePending.value"
+      @update-rename-draft="sessionActions.renameDraft.value = $event"
+      @close-rename="sessionActions.closeRenameDialog"
+      @submit-rename="sessionActions.submitRename"
+      @close-delete="sessionActions.closeDeleteDialog"
+      @confirm-delete="sessionActions.confirmDelete"
     />
   </section>
 </template>

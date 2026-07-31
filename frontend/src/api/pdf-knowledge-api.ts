@@ -3,11 +3,13 @@ import { requestEmpty, requestJson } from './errors'
 import type {
   PdfAnswerBlock,
   PdfAnswerCitation,
-  PdfChunkSearchMatch,
-  PdfChunkSearchResult,
   PdfAttachedDocument,
   PdfChatAnswer,
+  PdfChatRouteResult,
   PdfChatSession,
+  PdfChatSessionBatchAction,
+  PdfChatSessionBatchItem,
+  PdfChatSessionBatchResult,
   PdfChatTurn,
   PdfDocumentChunk,
   PdfDocumentDetail,
@@ -275,21 +277,6 @@ interface ListPdfDocumentChunksResponse {
   chunks: PdfDocumentChunkResponse[]
 }
 
-interface PdfChunkSearchMatchResponse {
-  file: PdfFileResponse
-  chunk: PdfDocumentChunkResponse
-  score: number
-  excerpt: string
-  matched_terms: string[]
-}
-
-interface SearchPdfChunksResponse {
-  query: string
-  matches: PdfChunkSearchMatchResponse[]
-  total_matches: number
-  limit: number
-}
-
 interface PdfChatAnswerBlockResponse {
   text: string
   citation_ids: string[]
@@ -328,7 +315,6 @@ interface PdfChatAnswerResponse {
   question: string
   answer_blocks: PdfChatAnswerBlockResponse[]
   citations: PdfCitationResponse[]
-  retrieval_matches: PdfChunkSearchMatchResponse[]
   selected_documents?: PdfSelectedDocumentResponse[]
   newly_attached_documents?: PdfSelectedDocumentResponse[]
   attached_documents?: PdfAttachedDocumentResponse[]
@@ -336,6 +322,19 @@ interface PdfChatAnswerResponse {
   follow_up_suggestions: string[]
   warnings: string[]
   created_at: string
+  request_id?: string | null
+}
+
+interface PdfChatRouteResponse {
+  session_id: string
+  question: string
+  selected_documents: PdfSelectedDocumentResponse[]
+  newly_attached_documents: PdfSelectedDocumentResponse[]
+  attached_documents: PdfAttachedDocumentResponse[]
+  context_file_ids: string[]
+  session_revision: number
+  created_at: string
+  request_id?: string | null
 }
 
 interface PdfChatSessionResponse {
@@ -346,10 +345,17 @@ interface PdfChatSessionResponse {
   title: string
   pinned_at: string | null
   status: string
+  context_file_ids?: string[]
+  revision?: number
 }
 
 interface PdfChatSessionListResponse {
   sessions: PdfChatSessionResponse[]
+}
+
+interface PdfChatSessionBatchResponse {
+  updated_sessions: PdfChatSessionResponse[]
+  deleted_session_ids: string[]
 }
 
 interface PdfChatTurnResponse {
@@ -646,47 +652,27 @@ export async function reparsePdfDocument(fileId: string): Promise<PdfUploadTask>
   return toUploadTask(response)
 }
 
-export async function listPdfDocumentChunks(fileId: string): Promise<PdfDocumentChunk[]> {
+export async function listPdfDocumentChunks(
+  fileId: string,
+  signal?: AbortSignal,
+): Promise<PdfDocumentChunk[]> {
   const response = await requestJson<ListPdfDocumentChunksResponse>(
     `/api/pdf/files/${encodeURIComponent(fileId)}/chunks`,
     {},
-    defaultRequestOptions,
+    {
+      ...defaultRequestOptions,
+      signal,
+    },
   )
   return response.chunks.map(toDocumentChunk)
-}
-
-export async function searchPdfDocumentChunks(options: {
-  query: string
-  fileIds?: string[]
-  limit?: number
-}): Promise<PdfChunkSearchResult> {
-  const response = await requestJson<SearchPdfChunksResponse>(
-    '/api/pdf/retrieval/search',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: options.query,
-        file_ids: options.fileIds ?? [],
-        limit: options.limit ?? 12,
-      }),
-    },
-    defaultRequestOptions,
-  )
-  return {
-    query: response.query,
-    matches: response.matches.map(toChunkSearchMatch),
-    totalMatches: response.total_matches,
-    limit: response.limit,
-  }
 }
 
 export async function answerPdfQuestion(options: {
   question: string
   sessionId?: string
   fileIds?: string[]
-  retrievalLimit?: number
   enableDeepThinking?: boolean
+  requestId?: string
   signal?: AbortSignal
 }): Promise<PdfChatAnswer> {
   const path = options.sessionId
@@ -700,8 +686,8 @@ export async function answerPdfQuestion(options: {
       body: JSON.stringify({
         question: options.question,
         file_ids: options.fileIds ?? [],
-        retrieval_limit: options.retrievalLimit ?? 8,
         enable_deep_thinking: options.enableDeepThinking ?? false,
+        request_id: options.requestId,
       }),
     },
     {
@@ -711,6 +697,79 @@ export async function answerPdfQuestion(options: {
     },
   )
   return toPdfChatAnswer(response)
+}
+
+export async function routePdfQuestion(options: {
+  question: string
+  sessionId: string
+  fileIds?: string[]
+  requestId?: string
+  signal?: AbortSignal
+}): Promise<PdfChatRouteResult> {
+  const response = await requestJson<PdfChatRouteResponse>(
+    `/api/pdf/chat/sessions/${encodeURIComponent(options.sessionId)}/route`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: options.question,
+        file_ids: options.fileIds ?? [],
+        request_id: options.requestId,
+      }),
+    },
+    {
+      ...chatRequestOptions,
+      abortMessage: 'PDF routing request cancelled.',
+      signal: options.signal,
+    },
+  )
+  return toPdfChatRouteResult(response)
+}
+
+export async function answerRoutedPdfQuestion(options: {
+  question: string
+  sessionId: string
+  selectedFileIds: string[]
+  fileIds?: string[]
+  sessionRevision: number
+  enableDeepThinking?: boolean
+  requestId?: string
+  signal?: AbortSignal
+}): Promise<PdfChatAnswer> {
+  const response = await requestJson<PdfChatAnswerResponse>(
+    `/api/pdf/chat/sessions/${encodeURIComponent(options.sessionId)}/answer`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: options.question,
+        selected_file_ids: options.selectedFileIds,
+        file_ids: options.fileIds ?? [],
+        session_revision: options.sessionRevision,
+        enable_deep_thinking: options.enableDeepThinking ?? false,
+        request_id: options.requestId,
+      }),
+    },
+    {
+      ...chatRequestOptions,
+      abortMessage: 'PDF chat request cancelled.',
+      signal: options.signal,
+    },
+  )
+  return toPdfChatAnswer(response)
+}
+
+export async function cancelPdfChatRequest(requestId: string): Promise<boolean> {
+  const response = await requestJson<{ request_id: string; cancelled: boolean }>(
+    '/api/pdf/chat/cancel',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: requestId }),
+    },
+    defaultRequestOptions,
+  )
+  return response.cancelled
 }
 
 export async function createPdfChatSession(signal?: AbortSignal): Promise<PdfChatSession> {
@@ -739,6 +798,22 @@ export async function listPdfChatSessions(signal?: AbortSignal): Promise<PdfChat
   return response.sessions.map(toPdfChatSession)
 }
 
+export async function getPdfChatSession(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<PdfChatSession> {
+  const response = await requestJson<PdfChatSessionResponse>(
+    `/api/pdf/chat/sessions/${encodeURIComponent(sessionId)}`,
+    {},
+    {
+      ...defaultRequestOptions,
+      abortMessage: 'PDF chat session request cancelled.',
+      signal,
+    },
+  )
+  return toPdfChatSession(response)
+}
+
 export async function listPdfChatSessionTurns(
   sessionId: string,
   signal?: AbortSignal,
@@ -758,13 +833,17 @@ export async function listPdfChatSessionTurns(
 export async function renamePdfChatSession(
   sessionId: string,
   title: string,
+  expectedRevision: number,
 ): Promise<PdfChatSession> {
   const response = await requestJson<PdfChatSessionResponse>(
     `/api/pdf/chat/sessions/${encodeURIComponent(sessionId)}`,
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({
+        title,
+        expected_revision: expectedRevision,
+      }),
     },
     defaultRequestOptions,
   )
@@ -774,25 +853,58 @@ export async function renamePdfChatSession(
 export async function setPdfChatSessionPinned(
   sessionId: string,
   pinned: boolean,
+  expectedRevision: number,
 ): Promise<PdfChatSession> {
   const response = await requestJson<PdfChatSessionResponse>(
     `/api/pdf/chat/sessions/${encodeURIComponent(sessionId)}/pin`,
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pinned }),
+      body: JSON.stringify({
+        pinned,
+        expected_revision: expectedRevision,
+      }),
     },
     defaultRequestOptions,
   )
   return toPdfChatSession(response)
 }
 
-export async function deletePdfChatSession(sessionId: string): Promise<void> {
+export async function deletePdfChatSession(
+  sessionId: string,
+  expectedRevision: number,
+): Promise<void> {
   await requestEmpty(
-    `/api/pdf/chat/sessions/${encodeURIComponent(sessionId)}`,
+    `/api/pdf/chat/sessions/${encodeURIComponent(sessionId)}`
+      + `?expected_revision=${encodeURIComponent(expectedRevision)}`,
     { method: 'DELETE' },
     defaultRequestOptions,
   )
+}
+
+export async function batchMutatePdfChatSessions(
+  action: PdfChatSessionBatchAction,
+  items: PdfChatSessionBatchItem[],
+): Promise<PdfChatSessionBatchResult> {
+  const response = await requestJson<PdfChatSessionBatchResponse>(
+    '/api/pdf/chat/sessions/batch',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action,
+        items: items.map((item) => ({
+          session_id: item.sessionId,
+          expected_revision: item.expectedRevision,
+        })),
+      }),
+    },
+    defaultRequestOptions,
+  )
+  return {
+    updatedSessions: response.updated_sessions.map(toPdfChatSession),
+    deletedSessionIds: response.deleted_session_ids,
+  }
 }
 
 export async function generatePdfDocumentSummary(fileId: string): Promise<PdfDocumentSummary> {
@@ -1096,23 +1208,12 @@ function toDocumentChunk(chunk: PdfDocumentChunkResponse): PdfDocumentChunk {
   }
 }
 
-function toChunkSearchMatch(match: PdfChunkSearchMatchResponse): PdfChunkSearchMatch {
-  return {
-    file: toManagedFile(match.file),
-    chunk: toDocumentChunk(match.chunk),
-    score: match.score,
-    excerpt: match.excerpt,
-    matchedTerms: match.matched_terms,
-  }
-}
-
 function toPdfChatAnswer(response: PdfChatAnswerResponse): PdfChatAnswer {
   return {
     sessionId: response.session_id ?? undefined,
     question: response.question,
     answerBlocks: response.answer_blocks.map(toPdfAnswerBlock),
     citations: response.citations.map(toPdfAnswerCitation),
-    retrievalMatches: response.retrieval_matches.map(toChunkSearchMatch),
     selectedDocuments: (response.selected_documents ?? []).map(toPdfSelectedDocument),
     newlyAttachedDocuments: (response.newly_attached_documents ?? []).map(
       toPdfSelectedDocument,
@@ -1122,6 +1223,25 @@ function toPdfChatAnswer(response: PdfChatAnswerResponse): PdfChatAnswer {
     followUpSuggestions: response.follow_up_suggestions,
     warnings: response.warnings,
     createdAt: response.created_at,
+    requestId: response.request_id ?? undefined,
+  }
+}
+
+function toPdfChatRouteResult(
+  response: PdfChatRouteResponse,
+): PdfChatRouteResult {
+  return {
+    sessionId: response.session_id,
+    question: response.question,
+    selectedDocuments: response.selected_documents.map(toPdfSelectedDocument),
+    newlyAttachedDocuments: response.newly_attached_documents.map(
+      toPdfSelectedDocument,
+    ),
+    attachedDocuments: response.attached_documents.map(toPdfAttachedDocument),
+    contextFileIds: response.context_file_ids,
+    sessionRevision: response.session_revision,
+    createdAt: response.created_at,
+    requestId: response.request_id ?? undefined,
   }
 }
 
@@ -1157,6 +1277,8 @@ function toPdfChatSession(response: PdfChatSessionResponse): PdfChatSession {
     status: response.status,
     createdAt: response.created_at,
     updatedAt: response.updated_at,
+    contextFileIds: response.context_file_ids ?? [],
+    revision: response.revision ?? 0,
   }
 }
 

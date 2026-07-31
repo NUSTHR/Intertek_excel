@@ -3,6 +3,9 @@ import { publishSessionExpired } from './session-events'
 
 export interface ApiErrorPayload {
   detail?: string
+  code?: string
+  retryable?: boolean
+  request_id?: string
   requires_confirmation?: boolean
   retry_after_seconds?: number
 }
@@ -11,18 +14,27 @@ export class ExcelWorkspaceApiError extends Error {
   readonly statusCode: number | null
   readonly requiresConfirmation: boolean
   readonly retryAfterSeconds: number | null
+  readonly code: string
+  readonly retryable: boolean
+  readonly requestId: string | null
 
   constructor(
     message: string,
     statusCode: number | null = null,
     requiresConfirmation = false,
     retryAfterSeconds: number | null = null,
+    code = 'WORKSPACE_ERROR',
+    retryable = false,
+    requestId: string | null = null,
   ) {
     super(message)
     this.name = 'ExcelWorkspaceApiError'
     this.statusCode = statusCode
     this.requiresConfirmation = requiresConfirmation
     this.retryAfterSeconds = retryAfterSeconds
+    this.code = code
+    this.retryable = retryable
+    this.requestId = requestId
   }
 }
 
@@ -92,6 +104,9 @@ async function request(
         response.status,
         payload.requires_confirmation === true,
         typeof payload.retry_after_seconds === 'number' ? payload.retry_after_seconds : null,
+        payload.code ?? 'WORKSPACE_ERROR',
+        payload.retryable === true,
+        payload.request_id ?? null,
       )
     }
     return response
@@ -104,11 +119,21 @@ async function request(
         cancelledByCaller
           ? (options.abortMessage ?? 'Request cancelled.')
           : (options.timeoutMessage ?? 'Request timed out.'),
+        null,
+        false,
+        null,
+        cancelledByCaller ? 'REQUEST_CANCELLED' : 'REQUEST_TIMEOUT',
+        !cancelledByCaller,
       )
     }
     if (error instanceof TypeError) {
       throw new ExcelWorkspaceApiError(
         'Unable to reach the workspace backend. Check whether it is running.',
+        null,
+        false,
+        null,
+        'NETWORK_UNAVAILABLE',
+        true,
       )
     }
     if (error instanceof Error) {

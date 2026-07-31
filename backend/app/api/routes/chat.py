@@ -86,6 +86,7 @@ def answer_excel_question(
                 enable_deep_thinking=request.enable_deep_thinking,
                 cancellation_token=token,
                 user_role=user.role,
+                request_id=request.request_id,
             )
         )
     except ChatRequestCancelledError as exc:
@@ -217,6 +218,7 @@ def answer_excel_session_question(
                 enable_deep_thinking=request.enable_deep_thinking,
                 cancellation_token=token,
                 user_role=user.role,
+                request_id=request.request_id,
             )
         )
     except ChatRequestCancelledError as exc:
@@ -241,6 +243,7 @@ def route_excel_session_question(
             session_id=session_id,
             user_id=user.user_id,
             file_access=FileAccessContext(user_id=user.user_id, role=user.role),
+            request_id=request.request_id,
         )
     )
 
@@ -258,16 +261,30 @@ def answer_excel_routed_session_question(
 ) -> ChatAnswerResponse:
     token = cancellations.register(request.request_id)
     try:
-        return _to_chat_answer_response(
-            service.answer_routed_question(
+        if not request.selected_version_ids and request.session_revision is None:
+            answer = service.answer_question(
                 request.question,
                 session_id=session_id,
                 user_id=user.user_id,
-                selected_version_ids=request.selected_version_ids,
                 enable_deep_thinking=request.enable_deep_thinking,
                 cancellation_token=token,
-                file_access=FileAccessContext(user_id=user.user_id, role=user.role),
+                user_role=user.role,
+                request_id=request.request_id,
             )
+        else:
+            answer = service.answer_selected_question(
+                question=request.question,
+                session_id=session_id,
+                user_id=user.user_id,
+                selected_version_ids=request.selected_version_ids,
+                expected_session_revision=request.session_revision,
+                enable_deep_thinking=request.enable_deep_thinking,
+                cancellation_token=token,
+                user_role=user.role,
+                request_id=request.request_id,
+            )
+        return _to_chat_answer_response(
+            answer
         )
     except ChatRequestCancelledError as exc:
         raise ChatRequestCancelled(str(exc)) from exc
@@ -472,6 +489,8 @@ def _to_chat_route_response(route_result: ChatRouteResult) -> ChatRouteResponse:
             for document in route_result.attached_documents
         ],
         created_at=route_result.created_at,
+        request_id=route_result.request_id,
+        session_revision=route_result.session_revision,
     )
 
 
@@ -484,4 +503,6 @@ def _to_session_response(session: ChatSession) -> ChatSessionResponse:
         title=session.title,
         pinned_at=session.pinned_at,
         status=session.status,
+        context_file_ids=session.context_file_ids,
+        revision=session.revision,
     )
