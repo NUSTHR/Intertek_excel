@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     log_file_path: str = ""
     log_max_bytes: int = 10 * 1024 * 1024
     log_backup_count: int = 5
+    readiness_disk_warning_free_bytes: int = 2 * 1024 * 1024 * 1024
+    readiness_disk_critical_free_bytes: int = 512 * 1024 * 1024
+    readiness_disk_warning_free_percent: float = 10.0
+    readiness_disk_critical_free_percent: float = 3.0
 
     @property
     def backend_root(self) -> Path:
@@ -174,6 +178,25 @@ class Settings(BaseSettings):
             errors.append("LOG_MAX_BYTES must be greater than 0")
         if self.log_backup_count < 1:
             errors.append("LOG_BACKUP_COUNT must be at least 1")
+        if self.readiness_disk_critical_free_bytes < 0:
+            errors.append("READINESS_DISK_CRITICAL_FREE_BYTES must not be negative")
+        if (
+            self.readiness_disk_warning_free_bytes
+            < self.readiness_disk_critical_free_bytes
+        ):
+            errors.append(
+                "READINESS_DISK_WARNING_FREE_BYTES must be at least the critical threshold"
+            )
+        if not 0 <= self.readiness_disk_critical_free_percent <= 100:
+            errors.append("READINESS_DISK_CRITICAL_FREE_PERCENT must be between 0 and 100")
+        if not (
+            self.readiness_disk_critical_free_percent
+            <= self.readiness_disk_warning_free_percent
+            <= 100
+        ):
+            errors.append(
+                "READINESS_DISK_WARNING_FREE_PERCENT must be between the critical threshold and 100"
+            )
         if not self.cors_origins:
             errors.append("APP_CORS_ORIGINS must be set for production")
         for origin in self.cors_origins:

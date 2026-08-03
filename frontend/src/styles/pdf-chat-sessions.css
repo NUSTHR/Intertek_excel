@@ -1,0 +1,232 @@
+
+/* PDF chat session management */
+.pdfkb .pdfkb-section-title button.active {
+  color: #0f172a;
+  background: #eef2f7;
+  box-shadow: inset 0 0 0 1px #d8dee8;
+}
+
+.pdfkb-chat-section-title {
+  position: relative;
+  z-index: 3;
+}
+
+.pdfkb-section-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.pdfkb-section-actions button:not(:disabled):hover {
+  color: #0f172a;
+  background: #eef2f7;
+}
+
+.pdfkb-session-batch-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: #f8fafc;
+}
+
+.pdfkb-session-batch-toolbar button {
+  display: inline-flex;
+  min-width: 28px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 7px;
+  padding: 4px 6px;
+  color: #64748b;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pdfkb-session-batch-toolbar button:not(:disabled):hover {
+  color: #0f172a;
+  background: #ffffff;
+}
+
+.pdfkb-session-batch-toolbar button.danger:not(:disabled):hover {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.pdfkb-session-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pdfkb .pdfkb-recent-chat-list.has-open-menu {
+  padding-bottom: 180px;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 0;
+  width: 100%;
+  min-height: 42px;
+  overflow: visible;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0;
+  color: #64748b;
+  background: transparent;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item:hover,
+.pdfkb .pdfkb-recent-chat.chat-session-item:focus-within,
+.pdfkb .pdfkb-recent-chat.chat-session-item.menu-open {
+  color: #0f172a;
+  background: #f8fafc;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item.active {
+  color: #0f172a;
+  border-color: #e2e8f0;
+  background: #f1f5f9;
+  box-shadow: inset 3px 0 0 #0f172a;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item.pending {
+  color: #0f172a;
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  box-shadow: inset 3px 0 0 #94a3b8;
+}
+
+.pdfkb .pdfkb-recent-chat.chat-session-item.selected {
+  color: #065f46;
+  border-color: #a7d9cf;
+  background: #effcf8;
+  box-shadow: none;
+}
+
+.pdfkb-session-open,
+.pdfkb-session-selection {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  border-radius: inherit;
+  padding: 9px 0 9px 12px;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pdfkb-session-open {
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.pdfkb-session-selection {
+  grid-column: 1 / -1;
+  grid-template-columns: 22px 18px minmax(0, 1fr);
+  padding-right: 8px;
+}
+
+.pdfkb-session-open:focus-visible,
+.pdfkb-session-selection:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.pdfkb .pdfkb-recent-chat .session-actions {
+  position: relative;
+  z-index: 2;
+}
+
+.pdfkb-session-selection > .app-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.pdfkb .pdfkb-recent-chat .session-glyph {
+  width: 18px;
+  height: 18px;
+  color: inherit;
+}
+
+.pdfkb .pdfkb-recent-chat.pinned .session-glyph {
+  color: #047857;
+  background: transparent;
+}
+
+.pdfkb .pdfkb-recent-chat .session-copy strong {
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.pdfkb .pdfkb-recent-chat .session-actions {
+  margin-right: 8px;
+  opacity: 0;
+}
+
+.pdfkb .pdfkb-recent-chat:hover .session-actions,
+.pdfkb .pdfkb-recent-chat:focus-within .session-actions,
+.pdfkb .pdfkb-recent-chat.active .session-actions,
+.pdfkb .pdfkb-recent-chat.menu-open .session-actions {
+  opacity: 1;
+}
+
+.pdfkb .pdfkb-session-menu-trigger {
+  width: 26px;
+  height: 26px;
+  min-height: 0;
+}
+
+.pdfkb .pdfkb-session-action-menu {
+  position: absolute;
+  top: calc(100% - 3px);
+  right: 6px;
+  z-index: 50;
+  width: 156px;
+  border-color: #e2e8f0;
+  background: #ffffff;
+}
+
+.pdfkb .pdfkb-session-action-menu button {
+  border: 0;
+  background: transparent;
+}
+
+.pdfkb-session-action-error {
+  flex: 0 0 auto;
+  margin: 8px 0 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #991b1b;
+  background: #fef2f2;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.pdfkb .pdfkb-session-dialog {
+  width: min(440px, calc(100vw - 40px));
+}
+
+.pdfkb .pdfkb-session-dialog .dialog-field input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  padding: 9px 11px;
+  color: #0f172a;
+  background: #ffffff;
+}

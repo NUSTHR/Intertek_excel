@@ -332,6 +332,19 @@ class PdfKnowledgeService:
     ) -> list[PdfDocumentChunk]:
         return self._library.list_document_chunks(file_id, user_role=user_role)
 
+    def get_document_chunk(
+        self,
+        file_id: str,
+        chunk_id: str,
+        *,
+        user_role: UserRole,
+    ) -> PdfDocumentChunk:
+        return self._library.get_document_chunk(
+            file_id,
+            chunk_id,
+            user_role=user_role,
+        )
+
     def generate_summary(
         self,
         file_id: str,

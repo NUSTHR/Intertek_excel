@@ -17,6 +17,7 @@ from app.api.schema_models.pdf import (
     DeletePdfFileResponse,
     ListPdfDocumentChunksResponse,
     ListPdfFilesResponse,
+    PdfDocumentChunkResponse,
     PdfDocumentDetailResponse,
     PdfFileResponse,
     RenamePdfFileRequest,
@@ -115,4 +116,19 @@ def list_pdf_document_chunks(
             to_pdf_document_chunk_response(chunk)
             for chunk in service.list_document_chunks(file_id, user_role=user.role)
         ]
+    )
+
+
+@router.get(
+    "/files/{file_id}/chunks/{chunk_id}",
+    response_model=PdfDocumentChunkResponse,
+)
+def get_pdf_document_chunk(
+    file_id: str,
+    chunk_id: str,
+    service: PdfKnowledgeServiceDependency,
+    user: AuthenticatedDependency,
+) -> PdfDocumentChunkResponse:
+    return to_pdf_document_chunk_response(
+        service.get_document_chunk(file_id, chunk_id, user_role=user.role)
     )

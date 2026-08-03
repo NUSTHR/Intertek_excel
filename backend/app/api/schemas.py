@@ -26,6 +26,7 @@ from app.api.schema_models.pdf import (  # noqa: F401
     PdfChatRequest,
     PdfChatRouteRequest,
     PdfChatRouteResponse,
+    PdfChatSessionSnapshotResponse,
     PdfChatTurnListResponse,
     PdfChatTurnResponse,
     PdfCitationResponse,
@@ -104,9 +105,17 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class ReadinessCheckDetailResponse(BaseModel):
+    status: str
+    required: bool
+    message: str = ""
+    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+
 class ReadinessResponse(BaseModel):
     status: str
     checks: dict[str, str] = Field(default_factory=dict)
+    details: dict[str, ReadinessCheckDetailResponse] = Field(default_factory=dict)
 
 
 class WorkspaceUploadConfigResponse(BaseModel):

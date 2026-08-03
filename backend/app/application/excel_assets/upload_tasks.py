@@ -9,6 +9,10 @@ from pathlib import Path
 
 from app.application.excel_assets.models import UploadExcelResult
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.operational.worker_status import (
+    WorkerRuntimeStatus,
+    WorkerRuntimeTracker,
+)
 from app.core.errors import AssetNotFoundError, ExcelWorkspaceError
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
@@ -141,11 +145,13 @@ class UploadTaskWorker:
         self._worker_id = f"worker-{uuid.uuid4()}"
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._runtime = WorkerRuntimeTracker()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._runtime.mark_started()
         self._thread = threading.Thread(
             target=self._run,
             name="excel-upload-task-worker",
@@ -157,6 +163,13 @@ class UploadTaskWorker:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=max(0.1, timeout_seconds))
+            if not self._thread.is_alive():
+                self._runtime.mark_stopped()
+
+    def runtime_status(self) -> WorkerRuntimeStatus:
+        return self._runtime.snapshot(
+            running=self._thread is not None and self._thread.is_alive(),
+        )
 
     def run_once(self) -> bool:
         task = self._repository.claim_next_upload_task(
@@ -165,18 +178,27 @@ class UploadTaskWorker:
         )
         if task is None:
             return False
-        self._process_task(task)
+        self._runtime.mark_task_started()
+        try:
+            self._process_task(task)
+        finally:
+            self._runtime.mark_task_finished()
         return True
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                processed = self.run_once()
-            except Exception:
-                logger.exception("Upload task worker iteration failed")
-                processed = False
-            if not processed:
-                self._stop_event.wait(self._poll_interval_seconds)
+        try:
+            while not self._stop_event.is_set():
+                self._runtime.mark_poll()
+                try:
+                    processed = self.run_once()
+                except Exception:
+                    self._runtime.mark_loop_failure()
+                    logger.exception("Upload task worker iteration failed")
+                    processed = False
+                if not processed:
+                    self._stop_event.wait(self._poll_interval_seconds)
+        finally:
+            self._runtime.mark_stopped()
 
     def _process_task(self, task: ExcelUploadTask) -> None:
         try:

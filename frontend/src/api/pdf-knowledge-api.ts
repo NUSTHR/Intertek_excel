@@ -7,6 +7,7 @@ import type {
   PdfChatAnswer,
   PdfChatRouteResult,
   PdfChatSession,
+  PdfChatSessionSnapshot,
   PdfChatSessionBatchAction,
   PdfChatSessionBatchItem,
   PdfChatSessionBatchResult,
@@ -370,6 +371,11 @@ interface PdfChatTurnListResponse {
   turns: PdfChatTurnResponse[]
 }
 
+interface PdfChatSessionSnapshotResponse {
+  session: PdfChatSessionResponse
+  turns: PdfChatTurnResponse[]
+}
+
 interface GeneratePdfSummaryResponse {
   summary: PdfDocumentSummaryResponse
 }
@@ -667,6 +673,23 @@ export async function listPdfDocumentChunks(
   return response.chunks.map(toDocumentChunk)
 }
 
+export async function getPdfDocumentChunk(
+  fileId: string,
+  chunkId: string,
+  signal?: AbortSignal,
+): Promise<PdfDocumentChunk> {
+  const response = await requestJson<PdfDocumentChunkResponse>(
+    `/api/pdf/files/${encodeURIComponent(fileId)}/chunks/${encodeURIComponent(chunkId)}`,
+    {},
+    {
+      ...defaultRequestOptions,
+      abortMessage: 'PDF evidence request cancelled.',
+      signal,
+    },
+  )
+  return toDocumentChunk(response)
+}
+
 export async function answerPdfQuestion(options: {
   question: string
   sessionId?: string
@@ -828,6 +851,25 @@ export async function listPdfChatSessionTurns(
     },
   )
   return response.turns.map(toPdfChatTurn)
+}
+
+export async function getPdfChatSessionSnapshot(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<PdfChatSessionSnapshot> {
+  const response = await requestJson<PdfChatSessionSnapshotResponse>(
+    `/api/pdf/chat/sessions/${encodeURIComponent(sessionId)}/snapshot`,
+    {},
+    {
+      ...defaultRequestOptions,
+      abortMessage: 'PDF chat history request cancelled.',
+      signal,
+    },
+  )
+  return {
+    session: toPdfChatSession(response.session),
+    turns: response.turns.map(toPdfChatTurn),
+  }
 }
 
 export async function renamePdfChatSession(

@@ -157,6 +157,19 @@ class PdfLibraryService:
         file = self.get_file(file_id, user_role=user_role)
         return self._repository.list_pdf_document_chunks(file.file_id)
 
+    def get_document_chunk(
+        self,
+        file_id: str,
+        chunk_id: str,
+        *,
+        user_role: UserRole,
+    ) -> PdfDocumentChunk:
+        file = self.get_file(file_id, user_role=user_role)
+        chunk = self._repository.get_pdf_document_chunk(file.file_id, chunk_id)
+        if chunk is None:
+            raise AssetNotFoundError("PDF document chunk was not found")
+        return chunk
+
     def _normalize_display_name(self, filename: str) -> str:
         normalized = Path(filename).name.strip()
         if not normalized:

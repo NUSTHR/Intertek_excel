@@ -7,6 +7,7 @@ import type { PdfRecentChat } from '../types'
 const props = defineProps<{
   chats: PdfRecentChat[]
   activeSessionId: string
+  pendingSessionId: string
   isSessionLoading: boolean
   isStartingNewChat: boolean
   isSelectionMode: boolean
@@ -124,7 +125,7 @@ onBeforeUnmount(() => {
           v-if="!isSelectionMode"
           type="button"
           aria-label="New PDF chat"
-          :disabled="isSessionLoading || isStartingNewChat"
+          :disabled="isStartingNewChat"
           @click="emit('newChat')"
         >
           <AppIcon name="add" />
@@ -133,7 +134,7 @@ onBeforeUnmount(() => {
           v-if="!isSelectionMode"
           type="button"
           aria-label="Select PDF chats"
-          :disabled="chats.length === 0 || isSessionLoading"
+          :disabled="chats.length === 0"
           @click="emit('beginSelection')"
         >
           <AppIcon name="checklist" />
@@ -208,6 +209,7 @@ onBeforeUnmount(() => {
         class="pdfkb-recent-chat chat-session-item"
         :class="{
           active: chat.id === activeSessionId,
+          pending: chat.id === pendingSessionId,
           pinned: Boolean(chat.pinnedAt),
           selected: selectedSessionIds.has(chat.id),
           'menu-open': openActionMenuId === chat.id,
@@ -217,33 +219,42 @@ onBeforeUnmount(() => {
         <button
           v-if="!isSelectionMode"
           type="button"
-          class="pdfkb-session-hitbox"
+          class="pdfkb-session-open"
           :aria-label="`Open chat ${chat.title}`"
-          :disabled="isSessionLoading || isBusy(chat)"
+          :aria-busy="chat.id === pendingSessionId"
+          :disabled="isBusy(chat)"
           @click="emit('openChat', chat.id)"
-        ></button>
+          @keydown.enter.space.prevent="emit('openChat', chat.id)"
+        >
+          <span class="session-glyph">
+            <AppIcon :name="chat.pinnedAt ? 'push_pin' : 'chat_bubble'" />
+          </span>
+          <span class="session-copy">
+            <strong :title="chat.title">{{ chat.title }}</strong>
+          </span>
+        </button>
         <button
           v-else
           type="button"
-          class="pdfkb-session-select"
+          class="pdfkb-session-selection"
           :aria-label="`${selectedSessionIds.has(chat.id) ? 'Deselect' : 'Select'} chat ${chat.title}`"
           :aria-pressed="selectedSessionIds.has(chat.id)"
           :disabled="isBatchPending || isBusy(chat)"
           @click="emit('toggleSelection', chat.id)"
+          @keydown.enter.space.prevent="emit('toggleSelection', chat.id)"
         >
           <AppIcon
             :name="selectedSessionIds.has(chat.id)
               ? 'check_box'
               : 'check_box_outline_blank'"
           />
+          <span class="session-glyph">
+            <AppIcon :name="chat.pinnedAt ? 'push_pin' : 'chat_bubble'" />
+          </span>
+          <span class="session-copy">
+            <strong :title="chat.title">{{ chat.title }}</strong>
+          </span>
         </button>
-
-        <span class="session-glyph">
-          <AppIcon :name="chat.pinnedAt ? 'push_pin' : 'chat_bubble'" />
-        </span>
-        <span class="session-copy">
-          <strong :title="chat.title">{{ chat.title }}</strong>
-        </span>
 
         <span
           v-if="!isSelectionMode"

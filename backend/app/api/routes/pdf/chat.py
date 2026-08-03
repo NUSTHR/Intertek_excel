@@ -25,6 +25,7 @@ from app.api.schema_models.pdf import (
     PdfChatRouteResponse,
     PdfChatSessionBatchRequest,
     PdfChatSessionBatchResponse,
+    PdfChatSessionSnapshotResponse,
     PdfChatTurnListResponse,
 )
 from app.api.schemas import CancelChatRequest, CancelChatResponse
@@ -114,6 +115,25 @@ def get_pdf_chat_session(
     if session is None:
         raise AssetNotFoundError("PDF chat session was not found")
     return to_session_response(session)
+
+
+@router.get(
+    "/chat/sessions/{session_id}/snapshot",
+    response_model=PdfChatSessionSnapshotResponse,
+)
+def get_pdf_chat_session_snapshot(
+    session_id: str,
+    service: PdfChatServiceDependency,
+    user: AuthenticatedDependency,
+) -> PdfChatSessionSnapshotResponse:
+    snapshot = service.get_session_snapshot(session_id, user_id=user.user_id)
+    if snapshot is None:
+        raise AssetNotFoundError("PDF chat session was not found")
+    session, turns = snapshot
+    return PdfChatSessionSnapshotResponse(
+        session=to_session_response(session),
+        turns=[to_pdf_chat_turn_response(turn) for turn in turns],
+    )
 
 
 @router.get(

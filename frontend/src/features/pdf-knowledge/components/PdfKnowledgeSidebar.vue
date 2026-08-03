@@ -12,6 +12,7 @@ defineProps<{
   selectedContextId: string
   isAdmin: boolean
   isSessionLoading: boolean
+  pendingSessionId: string
   isStartingNewChat: boolean
   activeSessionId: string
   tree: PdfKnowledgeNode[]
@@ -80,7 +81,7 @@ function handleDestination(itemId: string): void {
       <button
         type="button"
         class="pdfkb-new-chat new-chat-button"
-        :disabled="isSessionLoading"
+        :disabled="isStartingNewChat"
         @click="emit('newChat')"
       >
         <AppIcon name="add" />
@@ -169,6 +170,7 @@ function handleDestination(itemId: string): void {
         :chats="recentChats"
         :active-session-id="activeSessionId"
         :is-session-loading="isSessionLoading"
+        :pending-session-id="pendingSessionId"
         :is-starting-new-chat="isStartingNewChat"
         :is-selection-mode="isChatSelectionMode"
         :is-all-selected="isAllChatsSelected"

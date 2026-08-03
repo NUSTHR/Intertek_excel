@@ -878,7 +878,7 @@ function resizeChatInput(): void {
           >
             <div class="assistant-message-stack">
               <div class="assistant-title thinking-title">
-                <span class="assistant-bot-icon thinking-agent-icon">
+                <span class="assistant-bot-icon">
                   <AppIcon name="analytics" />
                 </span>
                 <strong>Thinking...</strong>

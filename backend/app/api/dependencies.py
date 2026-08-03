@@ -34,6 +34,7 @@ from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.excel_assets.upload_tasks import UploadTaskService, UploadTaskWorker
 from app.application.llm_preferences import WorkspaceLlmPreferenceService
+from app.application.operational.readiness import ReadinessService, WorkerReadinessProbe
 from app.application.pdf_knowledge import (
     PdfChatService,
     PdfKnowledgeService,
@@ -148,6 +149,59 @@ def get_pdf_summary_task_worker() -> PdfSummaryTaskWorker:
         repository=get_excel_repository(),
         pdf_knowledge=get_pdf_knowledge_service(),
         poll_interval_seconds=settings.pdf_summary_task_worker_poll_interval_seconds,
+    )
+
+
+def get_readiness_service(
+    repository: Annotated[
+        SQLiteExcelAssetRepository,
+        Depends(get_excel_repository),
+    ],
+) -> ReadinessService:
+    settings = get_settings()
+    return ReadinessService(
+        settings=settings,
+        sqlite_inspector=repository.inspect_runtime,
+        mineru_inspector=lambda: get_pdf_parser_status(settings),
+        workers={
+            "excel_upload_worker": WorkerReadinessProbe(
+                enabled=settings.upload_task_worker_enabled,
+                status_provider=get_upload_task_worker().runtime_status,
+                idle_stale_seconds=max(
+                    5.0,
+                    settings.upload_task_worker_poll_interval_seconds * 10,
+                ),
+                busy_stale_seconds=max(
+                    60.0,
+                    settings.upload_task_stale_processing_minutes * 60,
+                ),
+            ),
+            "pdf_upload_worker": WorkerReadinessProbe(
+                enabled=settings.pdf_upload_task_worker_enabled,
+                status_provider=get_pdf_upload_task_worker().runtime_status,
+                idle_stale_seconds=max(
+                    5.0,
+                    settings.pdf_upload_task_worker_poll_interval_seconds * 10,
+                ),
+                busy_stale_seconds=max(
+                    settings.pdf_upload_task_stale_processing_minutes * 60,
+                    settings.mineru_timeout_seconds + 60,
+                    settings.mineru_cloud_timeout_seconds + 60,
+                ),
+            ),
+            "pdf_summary_worker": WorkerReadinessProbe(
+                enabled=settings.pdf_summary_task_worker_enabled,
+                status_provider=get_pdf_summary_task_worker().runtime_status,
+                idle_stale_seconds=max(
+                    5.0,
+                    settings.pdf_summary_task_worker_poll_interval_seconds * 10,
+                ),
+                busy_stale_seconds=max(
+                    60.0,
+                    settings.pdf_summary_task_stale_running_minutes * 60,
+                ),
+            ),
+        },
     )
 
 

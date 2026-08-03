@@ -3,6 +3,10 @@ import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from app.application.operational.worker_status import (
+    WorkerRuntimeStatus,
+    WorkerRuntimeTracker,
+)
 from app.application.pdf_knowledge.service import PdfKnowledgeService
 from app.core.time import utc_now_iso
 from app.domain.models import PdfSummaryTask
@@ -25,11 +29,13 @@ class PdfSummaryTaskWorker:
         self._worker_id = f"pdf-summary-worker-{uuid.uuid4()}"
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._runtime = WorkerRuntimeTracker()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._runtime.mark_started()
         self._thread = threading.Thread(
             target=self._run,
             name="pdf-summary-task-worker",
@@ -41,6 +47,13 @@ class PdfSummaryTaskWorker:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=max(0.1, timeout_seconds))
+            if not self._thread.is_alive():
+                self._runtime.mark_stopped()
+
+    def runtime_status(self) -> WorkerRuntimeStatus:
+        return self._runtime.snapshot(
+            running=self._thread is not None and self._thread.is_alive(),
+        )
 
     def run_once(self) -> bool:
         task = self._repository.claim_next_pdf_summary_task(
@@ -49,7 +62,11 @@ class PdfSummaryTaskWorker:
         )
         if task is None:
             return False
-        self._process_task(task)
+        self._runtime.mark_task_started()
+        try:
+            self._process_task(task)
+        finally:
+            self._runtime.mark_task_finished()
         return True
 
     def mark_stale_running_tasks_failed(self, *, max_running_age_minutes: int) -> int:
@@ -61,14 +78,19 @@ class PdfSummaryTaskWorker:
         )
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                processed = self.run_once()
-            except Exception:
-                logger.exception("PDF summary task worker iteration failed")
-                processed = False
-            if not processed:
-                self._stop_event.wait(self._poll_interval_seconds)
+        try:
+            while not self._stop_event.is_set():
+                self._runtime.mark_poll()
+                try:
+                    processed = self.run_once()
+                except Exception:
+                    self._runtime.mark_loop_failure()
+                    logger.exception("PDF summary task worker iteration failed")
+                    processed = False
+                if not processed:
+                    self._stop_event.wait(self._poll_interval_seconds)
+        finally:
+            self._runtime.mark_stopped()
 
     def _process_task(self, task: PdfSummaryTask) -> None:
         try:

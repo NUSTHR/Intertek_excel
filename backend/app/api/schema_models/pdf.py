@@ -378,6 +378,11 @@ class PdfChatTurnListResponse(BaseModel):
     turns: list[PdfChatTurnResponse] = Field(default_factory=list)
 
 
+class PdfChatSessionSnapshotResponse(BaseModel):
+    session: "ChatSessionResponse"
+    turns: list[PdfChatTurnResponse] = Field(default_factory=list)
+
+
 class GeneratePdfSummaryResponse(BaseModel):
     summary: PdfDocumentSummaryResponse
 

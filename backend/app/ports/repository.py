@@ -369,6 +369,15 @@ class ChatSessionRepository(Protocol):
     ) -> list[ChatTurn]:
         ...
 
+    def get_session_with_turns(
+        self,
+        session_id: str,
+        *,
+        workspace: str = "excel",
+        user_id: str | None = None,
+    ) -> tuple[ChatSession, list[ChatTurn]] | None:
+        ...
+
 
 class PdfChatRepository(ChatSessionRepository, Protocol):
     def get_pdf_file(self, file_id: str) -> PdfFile | None:
@@ -381,6 +390,13 @@ class PdfChatRepository(ChatSessionRepository, Protocol):
         ...
 
     def list_pdf_document_chunks(self, file_id: str) -> list[PdfDocumentChunk]:
+        ...
+
+    def get_pdf_document_chunk(
+        self,
+        file_id: str,
+        chunk_id: str,
+    ) -> PdfDocumentChunk | None:
         ...
 
     def list_pdf_document_chunks_by_file_ids(
@@ -814,6 +830,13 @@ class PdfKnowledgeRepository(Protocol):
         ...
 
     def list_pdf_document_chunks(self, file_id: str) -> list[PdfDocumentChunk]:
+        ...
+
+    def get_pdf_document_chunk(
+        self,
+        file_id: str,
+        chunk_id: str,
+    ) -> PdfDocumentChunk | None:
         ...
 
     def list_pdf_model_settings(self) -> list[PdfModelSetting]:

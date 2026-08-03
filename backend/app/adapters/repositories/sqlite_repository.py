@@ -1,10 +1,18 @@
 import sqlite3
-import time
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Lock
 
-from app.adapters.repositories.sqlite.maintenance import SQLiteOperationalMaintenance
+from app.adapters.repositories.sqlite.auth import SQLiteAuthRepository
+from app.adapters.repositories.sqlite.database import SQLiteDatabase
+from app.adapters.repositories.sqlite.excel_upload_tasks import (
+    SQLiteExcelUploadTaskRepository,
+)
+from app.adapters.repositories.sqlite.health import (
+    SQLiteRuntimeHealthProbe,
+    SQLiteRuntimeInspection,
+)
+from app.adapters.repositories.sqlite.llm_preferences import (
+    SQLiteLlmPreferenceRepository,
+)
 from app.adapters.repositories.sqlite.migrations import SQLiteMigrationRunner
 from app.adapters.repositories.sqlite.policies import (
     AUTH_SESSION_RETENTION_DAYS,
@@ -57,7 +65,6 @@ from app.domain.models import (
     ExcelRowSearchMatch,
     ExcelSheet,
     ExcelUploadTask,
-    ExcelUploadTaskStatus,
     ExcelVersionStatus,
     LlmPreference,
     PasswordResetToken,
@@ -88,7 +95,6 @@ from app.domain.models import (
     SelectedDocument,
     SheetSummary,
     UserAccount,
-    UserRole,
 )
 
 __all__ = [
@@ -148,8 +154,6 @@ class SQLiteExcelAssetRepository:
         maintenance_policy: SQLiteMaintenancePolicy | None = None,
     ) -> None:
         self._database_path = database_path
-        self._last_maintenance_at = 0.0
-        self._maintenance_lock = Lock()
         self._connection_policy = connection_policy or SQLiteConnectionPolicy(
             maintenance_interval_seconds=maintenance_interval_seconds,
         )
@@ -157,12 +161,24 @@ class SQLiteExcelAssetRepository:
             auth_session_retention_days=auth_session_retention_days,
             password_reset_token_retention_days=password_reset_token_retention_days,
         )
-        self._maintenance = SQLiteOperationalMaintenance(self._maintenance_policy)
+        self._database = SQLiteDatabase(
+            self._database_path,
+            connection_policy=self._connection_policy,
+            maintenance_policy=self._maintenance_policy,
+        )
         self._migration_runner = SQLiteMigrationRunner(SCHEMA_MIGRATIONS)
+        self._runtime_health = SQLiteRuntimeHealthProbe(
+            self._database_path,
+            self._migration_runner,
+            busy_timeout_ms=self._connection_policy.busy_timeout_ms,
+        )
         self._row_search_index = SQLiteRowSearchIndex(
             connect=self._connect,
             dump_json=dump_json,
         )
+        self._auth = SQLiteAuthRepository(self._connect)
+        self._excel_upload_tasks = SQLiteExcelUploadTaskRepository(self._connect)
+        self._llm_preferences = SQLiteLlmPreferenceRepository(self._connect)
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +186,9 @@ class SQLiteExcelAssetRepository:
             self._migration_runner.initialize_schema(connection)
             self._backfill_pdf_content_fingerprints(connection)
         self.run_operational_maintenance()
+
+    def inspect_runtime(self) -> SQLiteRuntimeInspection:
+        return self._runtime_health.inspect()
 
     def _backfill_pdf_content_fingerprints(
         self,
@@ -631,27 +650,10 @@ class SQLiteExcelAssetRepository:
         )
 
     def create_upload_task(self, task: ExcelUploadTask) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO excel_upload_tasks
-                  (
-                    task_id, user_id, original_filename, staging_path,
-                    replace_existing, status, error_message, result_json,
-                    created_at, updated_at, started_at, finished_at, worker_id
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._upload_task_values(task),
-            )
+        self._excel_upload_tasks.create(task)
 
     def get_upload_task(self, task_id: str) -> ExcelUploadTask | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM excel_upload_tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        return self._to_upload_task(row)
+        return self._excel_upload_tasks.get(task_id)
 
     def claim_next_upload_task(
         self,
@@ -659,44 +661,10 @@ class SQLiteExcelAssetRepository:
         worker_id: str,
         started_at: str,
     ) -> ExcelUploadTask | None:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE excel_upload_tasks
-                SET status = ?,
-                    worker_id = ?,
-                    started_at = ?,
-                    updated_at = ?,
-                    error_message = NULL
-                WHERE task_id = (
-                  SELECT task_id
-                  FROM excel_upload_tasks
-                  WHERE status = ?
-                  ORDER BY created_at ASC
-                  LIMIT 1
-                )
-                """,
-                (
-                    ExcelUploadTaskStatus.PROCESSING.value,
-                    worker_id,
-                    started_at,
-                    started_at,
-                    ExcelUploadTaskStatus.QUEUED.value,
-                ),
-            )
-            if cursor.rowcount == 0:
-                return None
-            row = connection.execute(
-                """
-                SELECT * FROM excel_upload_tasks
-                WHERE worker_id = ?
-                  AND status = ?
-                ORDER BY started_at DESC
-                LIMIT 1
-                """,
-                (worker_id, ExcelUploadTaskStatus.PROCESSING.value),
-            ).fetchone()
-        return self._to_upload_task(row)
+        return self._excel_upload_tasks.claim_next(
+            worker_id=worker_id,
+            started_at=started_at,
+        )
 
     def complete_upload_task(
         self,
@@ -705,10 +673,8 @@ class SQLiteExcelAssetRepository:
         result: dict[str, object],
         finished_at: str,
     ) -> ExcelUploadTask | None:
-        return self._finish_upload_task(
+        return self._excel_upload_tasks.complete(
             task_id=task_id,
-            status=ExcelUploadTaskStatus.READY,
-            error_message=None,
             result=result,
             finished_at=finished_at,
         )
@@ -720,11 +686,9 @@ class SQLiteExcelAssetRepository:
         error_message: str,
         finished_at: str,
     ) -> ExcelUploadTask | None:
-        return self._finish_upload_task(
+        return self._excel_upload_tasks.fail(
             task_id=task_id,
-            status=ExcelUploadTaskStatus.FAILED,
             error_message=error_message,
-            result={},
             finished_at=finished_at,
         )
 
@@ -734,28 +698,10 @@ class SQLiteExcelAssetRepository:
         cutoff_started_at: str,
         failed_at: str,
     ) -> int:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE excel_upload_tasks
-                SET status = ?,
-                    error_message = ?,
-                    updated_at = ?,
-                    finished_at = ?
-                WHERE status = ?
-                  AND started_at IS NOT NULL
-                  AND started_at < ?
-                """,
-                (
-                    ExcelUploadTaskStatus.FAILED.value,
-                    "Upload processing was interrupted. Please upload the workbook again.",
-                    failed_at,
-                    failed_at,
-                    ExcelUploadTaskStatus.PROCESSING.value,
-                    cutoff_started_at,
-                ),
-            )
-        return max(0, cursor.rowcount)
+        return self._excel_upload_tasks.fail_stale_processing(
+            cutoff_started_at=cutoff_started_at,
+            failed_at=failed_at,
+        )
 
     def create_pdf_file(self, file: PdfFile) -> None:
         with self._connect() as connection:
@@ -2243,6 +2189,21 @@ class SQLiteExcelAssetRepository:
             ).fetchall()
         return [self._to_pdf_chunk(row) for row in rows]
 
+    def get_pdf_document_chunk(
+        self,
+        file_id: str,
+        chunk_id: str,
+    ) -> PdfDocumentChunk | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_document_chunks
+                WHERE file_id = ? AND chunk_id = ?
+                """,
+                (file_id, chunk_id),
+            ).fetchone()
+        return self._to_pdf_chunk(row) if row is not None else None
+
     def list_pdf_document_chunks_by_file_ids(
         self,
         file_ids: list[str],
@@ -2317,45 +2278,6 @@ class SQLiteExcelAssetRepository:
         if saved is None:
             raise RuntimeError("failed to save PDF model setting")
         return saved
-
-    def _finish_upload_task(
-        self,
-        *,
-        task_id: str,
-        status: ExcelUploadTaskStatus,
-        error_message: str | None,
-        result: dict[str, object],
-        finished_at: str,
-    ) -> ExcelUploadTask | None:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE excel_upload_tasks
-                SET status = ?,
-                    error_message = ?,
-                    result_json = ?,
-                    updated_at = ?,
-                    finished_at = ?
-                WHERE task_id = ?
-                  AND status = ?
-                """,
-                (
-                    status.value,
-                    error_message,
-                    dump_json(result),
-                    finished_at,
-                    finished_at,
-                    task_id,
-                    ExcelUploadTaskStatus.PROCESSING.value,
-                ),
-            )
-            if cursor.rowcount == 0:
-                return None
-            row = connection.execute(
-                "SELECT * FROM excel_upload_tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        return self._to_upload_task(row)
 
     def save_summary(self, summary: DocumentSummary) -> None:
         with self._connect() as connection:
@@ -3454,92 +3376,56 @@ class SQLiteExcelAssetRepository:
             ).fetchall()
         return [turn for row in rows if (turn := self._to_turn(row)) is not None]
 
-    def get_llm_preference(self, scope: str) -> LlmPreference | None:
+    def get_session_with_turns(
+        self,
+        session_id: str,
+        *,
+        workspace: str = ChatWorkspace.EXCEL.value,
+        user_id: str | None = None,
+    ) -> tuple[ChatSession, list[ChatTurn]] | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM llm_preferences WHERE scope = ?",
-                (scope,),
-            ).fetchone()
-        return self._to_llm_preference(row)
+            if user_id is None:
+                session_row = connection.execute(
+                    "SELECT * FROM chat_sessions WHERE session_id = ? AND workspace = ?",
+                    (session_id, workspace),
+                ).fetchone()
+            else:
+                session_row = connection.execute(
+                    """
+                    SELECT * FROM chat_sessions
+                    WHERE session_id = ? AND workspace = ? AND user_id = ?
+                    """,
+                    (session_id, workspace, user_id),
+                ).fetchone()
+            session = self._to_session(session_row)
+            if session is None:
+                return None
+            turn_rows = connection.execute(
+                """
+                SELECT * FROM chat_turns
+                WHERE session_id = ?
+                ORDER BY created_at ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return session, [
+            turn for row in turn_rows if (turn := self._to_turn(row)) is not None
+        ]
+
+    def get_llm_preference(self, scope: str) -> LlmPreference | None:
+        return self._llm_preferences.get(scope)
 
     def save_llm_preference(self, preference: LlmPreference) -> LlmPreference:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO llm_preferences
-                  (
-                    scope, summary_provider, summary_model, router_provider,
-                    router_model, answer_provider, answer_model, created_at, updated_at
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scope) DO UPDATE SET
-                  summary_provider = excluded.summary_provider,
-                  summary_model = excluded.summary_model,
-                  router_provider = excluded.router_provider,
-                  router_model = excluded.router_model,
-                  answer_provider = excluded.answer_provider,
-                  answer_model = excluded.answer_model,
-                  updated_at = excluded.updated_at
-                """,
-                (
-                    preference.scope,
-                    preference.summary_provider,
-                    preference.summary_model,
-                    preference.router_provider,
-                    preference.router_model,
-                    preference.answer_provider,
-                    preference.answer_model,
-                    preference.created_at,
-                    preference.updated_at,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM llm_preferences WHERE scope = ?",
-                (preference.scope,),
-            ).fetchone()
-        saved = self._to_llm_preference(row)
-        if saved is None:
-            raise RuntimeError("failed to persist llm preference")
-        return saved
+        return self._llm_preferences.save(preference)
 
     def create_user(self, user: UserAccount) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO user_accounts
-                  (
-                    user_id, email, password_hash, role, is_active,
-                    created_at, updated_at, last_login_at
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user.user_id,
-                    user.email,
-                    user.password_hash,
-                    user.role.value,
-                    1 if user.is_active else 0,
-                    user.created_at,
-                    user.updated_at,
-                    user.last_login_at,
-                ),
-            )
+        self._auth.create_user(user)
 
     def get_user(self, user_id: str) -> UserAccount | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM user_accounts WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-        return self._to_user(row)
+        return self._auth.get_user(user_id)
 
     def get_user_by_email(self, email: str) -> UserAccount | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM user_accounts WHERE email = ?",
-                (email,),
-            ).fetchone()
-        return self._to_user(row)
+        return self._auth.get_user_by_email(email)
 
     def update_user_password(
         self,
@@ -3547,181 +3433,45 @@ class SQLiteExcelAssetRepository:
         password_hash: str,
         updated_at: str,
     ) -> UserAccount | None:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE user_accounts
-                SET password_hash = ?, updated_at = ?
-                WHERE user_id = ?
-                """,
-                (password_hash, updated_at, user_id),
-            )
-            if cursor.rowcount == 0:
-                return None
-            row = connection.execute(
-                "SELECT * FROM user_accounts WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-        return self._to_user(row)
+        return self._auth.update_user_password(user_id, password_hash, updated_at)
 
     def record_user_login(self, user_id: str, last_login_at: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE user_accounts
-                SET last_login_at = ?, updated_at = ?
-                WHERE user_id = ?
-                """,
-                (last_login_at, last_login_at, user_id),
-            )
+        self._auth.record_user_login(user_id, last_login_at)
 
     def create_auth_session(self, session: AuthSession) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO auth_sessions
-                  (
-                    session_id, user_id, session_token_hash,
-                    created_at, expires_at, revoked_at
-                  )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session.session_id,
-                    session.user_id,
-                    session.session_token_hash,
-                    session.created_at,
-                    session.expires_at,
-                    session.revoked_at,
-                ),
-            )
+        self._auth.create_auth_session(session)
 
     def get_auth_session_by_token_hash(
         self,
         token_hash: str,
     ) -> tuple[AuthSession, UserAccount] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                  auth_sessions.session_id AS auth_session_id,
-                  auth_sessions.user_id AS auth_user_id,
-                  auth_sessions.session_token_hash,
-                  auth_sessions.created_at AS auth_created_at,
-                  auth_sessions.expires_at,
-                  auth_sessions.revoked_at,
-                  user_accounts.user_id,
-                  user_accounts.email,
-                  user_accounts.password_hash,
-                  user_accounts.role,
-                  user_accounts.is_active,
-                  user_accounts.created_at AS user_created_at,
-                  user_accounts.updated_at AS user_updated_at,
-                  user_accounts.last_login_at
-                FROM auth_sessions
-                JOIN user_accounts ON user_accounts.user_id = auth_sessions.user_id
-                WHERE auth_sessions.session_token_hash = ?
-                """,
-                (token_hash,),
-            ).fetchone()
-        if row is None:
-            return None
-        return self._to_auth_session(row), self._to_joined_user(row)
+        return self._auth.get_auth_session_by_token_hash(token_hash)
 
     def revoke_auth_session(self, token_hash: str, revoked_at: str) -> bool:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE auth_sessions
-                SET revoked_at = ?
-                WHERE session_token_hash = ? AND revoked_at IS NULL
-                """,
-                (revoked_at, token_hash),
-            )
-        return cursor.rowcount > 0
+        return self._auth.revoke_auth_session(token_hash, revoked_at)
 
     def create_password_reset_token(self, token: PasswordResetToken) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO password_reset_tokens
-                  (reset_token_id, user_id, token_hash, created_at, expires_at, used_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    token.reset_token_id,
-                    token.user_id,
-                    token.token_hash,
-                    token.created_at,
-                    token.expires_at,
-                    token.used_at,
-                ),
-            )
+        self._auth.create_password_reset_token(token)
 
     def get_password_reset_token_by_hash(
         self,
         token_hash: str,
     ) -> tuple[PasswordResetToken, UserAccount] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                  password_reset_tokens.reset_token_id,
-                  password_reset_tokens.user_id AS reset_user_id,
-                  password_reset_tokens.token_hash,
-                  password_reset_tokens.created_at AS reset_created_at,
-                  password_reset_tokens.expires_at,
-                  password_reset_tokens.used_at,
-                  user_accounts.user_id,
-                  user_accounts.email,
-                  user_accounts.password_hash,
-                  user_accounts.role,
-                  user_accounts.is_active,
-                  user_accounts.created_at AS user_created_at,
-                  user_accounts.updated_at AS user_updated_at,
-                  user_accounts.last_login_at
-                FROM password_reset_tokens
-                JOIN user_accounts ON user_accounts.user_id = password_reset_tokens.user_id
-                WHERE password_reset_tokens.token_hash = ?
-                """,
-                (token_hash,),
-            ).fetchone()
-        if row is None:
-            return None
-        return self._to_password_reset_token(row), self._to_joined_user(row)
+        return self._auth.get_password_reset_token_by_hash(token_hash)
 
     def mark_password_reset_token_used(
         self,
         reset_token_id: str,
         used_at: str,
     ) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE password_reset_tokens
-                SET used_at = ?
-                WHERE reset_token_id = ?
-                """,
-                (used_at, reset_token_id),
-            )
+        self._auth.mark_password_reset_token_used(reset_token_id, used_at)
 
     def get_login_rate_limit_retry_after(
         self,
         email: str,
         now: str,
     ) -> int | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT blocked_until
-                FROM auth_login_attempts
-                WHERE email = ?
-                """,
-                (email,),
-            ).fetchone()
-        if row is None:
-            return None
-        return _retry_after_seconds(row["blocked_until"], now)
+        return self._auth.get_login_rate_limit_retry_after(email, now)
 
     def record_login_rate_limit_failure(
         self,
@@ -3731,128 +3481,39 @@ class SQLiteExcelAssetRepository:
         max_failed_attempts: int,
         window_seconds: int,
     ) -> int | None:
-        bounded_max_attempts = max(1, max_failed_attempts)
-        bounded_window_seconds = max(1, window_seconds)
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT failures, first_failure_at, blocked_until
-                FROM auth_login_attempts
-                WHERE email = ?
-                """,
-                (email,),
-            ).fetchone()
-
-            if row is None or _iso_seconds_between(row["first_failure_at"], now) > (
-                bounded_window_seconds
-            ):
-                failures = 1
-                first_failure_at = now
-                blocked_until = now
-            else:
-                failures = int(row["failures"]) + 1
-                first_failure_at = str(row["first_failure_at"])
-                blocked_until = str(row["blocked_until"])
-
-            if failures >= bounded_max_attempts:
-                blocked_until = _add_seconds(first_failure_at, bounded_window_seconds)
-
-            connection.execute(
-                """
-                INSERT INTO auth_login_attempts
-                  (email, failures, first_failure_at, blocked_until)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(email) DO UPDATE SET
-                  failures = excluded.failures,
-                  first_failure_at = excluded.first_failure_at,
-                  blocked_until = excluded.blocked_until
-                """,
-                (email, failures, first_failure_at, blocked_until),
-            )
-        return _retry_after_seconds(blocked_until, now)
+        return self._auth.record_login_rate_limit_failure(
+            email,
+            now=now,
+            max_failed_attempts=max_failed_attempts,
+            window_seconds=window_seconds,
+        )
 
     def clear_login_rate_limit(self, email: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                DELETE FROM auth_login_attempts
-                WHERE email = ?
-                """,
-                (email,),
-            )
+        self._auth.clear_login_rate_limit(email)
 
     def run_operational_maintenance(self, now_iso: str | None = None) -> dict[str, int]:
-        with self._connect(run_maintenance=False) as connection:
-            result = self._run_connection_maintenance(connection, now_iso=now_iso)
-            self._last_maintenance_at = time.monotonic()
-        return result
+        return self._database.run_operational_maintenance(now_iso=now_iso)
 
-    def _connect(self, *, run_maintenance: bool = True) -> sqlite3.Connection:
-        connection = sqlite3.connect(
-            self._database_path,
-            timeout=self._connection_policy.timeout_seconds,
-            isolation_level="IMMEDIATE",
-        )
-        connection.row_factory = sqlite3.Row
-        self._configure_connection(connection)
-        if run_maintenance:
-            self._maybe_run_connection_maintenance(connection)
-        return connection
+    @property
+    def _last_maintenance_at(self) -> float:
+        """Compatibility seam for operational tests and diagnostics."""
+        return self._database._last_maintenance_at
 
-    def _configure_connection(self, connection: sqlite3.Connection) -> None:
-        connection.execute(f"PRAGMA busy_timeout = {self._connection_policy.busy_timeout_ms}")
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute(
-            f"PRAGMA wal_autocheckpoint = {self._connection_policy.wal_autocheckpoint_pages}"
-        )
-
-    def _maybe_run_connection_maintenance(self, connection: sqlite3.Connection) -> None:
-        now = time.monotonic()
-        if (
-            self._connection_policy.maintenance_interval_seconds > 0
-            and now - self._last_maintenance_at
-            < self._connection_policy.maintenance_interval_seconds
-        ):
-            return
-        if not self._maintenance_lock.acquire(blocking=False):
-            return
-        try:
-            now = time.monotonic()
-            if (
-                self._connection_policy.maintenance_interval_seconds > 0
-                and now - self._last_maintenance_at
-                < self._connection_policy.maintenance_interval_seconds
-            ):
-                return
-            self._run_connection_maintenance(connection)
-            self._last_maintenance_at = now
-        finally:
-            self._maintenance_lock.release()
+    @_last_maintenance_at.setter
+    def _last_maintenance_at(self, value: float) -> None:
+        self._database._last_maintenance_at = value
 
     def _run_connection_maintenance(
         self,
         connection: sqlite3.Connection,
-        *,
-        now_iso: str | None = None,
     ) -> dict[str, int]:
-        connection.execute("PRAGMA optimize")
-        connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        return self._cleanup_expired_operational_records(
-            connection,
-            now_iso=now_iso or utc_now_iso(),
-        )
+        """Delegate the legacy maintenance hook to the database owner."""
+        return self._database._run_connection_maintenance(connection)
 
-    def _cleanup_expired_operational_records(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        now_iso: str,
-    ) -> dict[str, int]:
-        return self._maintenance.cleanup_expired_operational_records(
-            connection,
-            now_iso=now_iso,
+    def _connect(self, *, run_maintenance: bool = True) -> sqlite3.Connection:
+        return self._database.connect(
+            run_maintenance=run_maintenance,
+            maintenance_runner=self._run_connection_maintenance,
         )
 
     def _to_file(self, row: sqlite3.Row | None) -> ExcelFile | None:
@@ -3924,42 +3585,6 @@ class SQLiteExcelAssetRepository:
             original_row_number=int(row["original_row_number"]),
             raw_csv_row_number=int(row["raw_csv_row_number"]),
             created_at=str(row["created_at"]),
-        )
-
-    def _upload_task_values(self, task: ExcelUploadTask) -> tuple[object, ...]:
-        return (
-            task.task_id,
-            task.user_id,
-            task.original_filename,
-            task.staging_path,
-            1 if task.replace_existing else 0,
-            task.status.value,
-            task.error_message,
-            dump_json(task.result),
-            task.created_at,
-            task.updated_at,
-            task.started_at,
-            task.finished_at,
-            task.worker_id,
-        )
-
-    def _to_upload_task(self, row: sqlite3.Row | None) -> ExcelUploadTask | None:
-        if row is None:
-            return None
-        return ExcelUploadTask(
-            task_id=str(row["task_id"]),
-            user_id=str(row["user_id"]),
-            original_filename=str(row["original_filename"]),
-            staging_path=str(row["staging_path"]),
-            replace_existing=bool(int(row["replace_existing"])),
-            status=ExcelUploadTaskStatus(str(row["status"])),
-            error_message=row["error_message"],
-            result=load_json_object(row_value(row, "result_json", "{}")),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-            started_at=row["started_at"],
-            finished_at=row["finished_at"],
-            worker_id=row["worker_id"],
         )
 
     def _pdf_file_values(self, file: PdfFile) -> tuple[object, ...]:
@@ -4474,52 +4099,6 @@ class SQLiteExcelAssetRepository:
             ),
         )
 
-    def _to_user(self, row: sqlite3.Row | None) -> UserAccount | None:
-        if row is None:
-            return None
-        return UserAccount(
-            user_id=str(row["user_id"]),
-            email=str(row["email"]),
-            password_hash=str(row["password_hash"]),
-            role=UserRole(str(row["role"])),
-            is_active=bool(int(row["is_active"])),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-            last_login_at=row["last_login_at"],
-        )
-
-    def _to_joined_user(self, row: sqlite3.Row) -> UserAccount:
-        return UserAccount(
-            user_id=str(row["user_id"]),
-            email=str(row["email"]),
-            password_hash=str(row["password_hash"]),
-            role=UserRole(str(row["role"])),
-            is_active=bool(int(row["is_active"])),
-            created_at=str(row["user_created_at"]),
-            updated_at=str(row["user_updated_at"]),
-            last_login_at=row["last_login_at"],
-        )
-
-    def _to_auth_session(self, row: sqlite3.Row) -> AuthSession:
-        return AuthSession(
-            session_id=str(row["auth_session_id"]),
-            user_id=str(row["auth_user_id"]),
-            session_token_hash=str(row["session_token_hash"]),
-            created_at=str(row["auth_created_at"]),
-            expires_at=str(row["expires_at"]),
-            revoked_at=row["revoked_at"],
-        )
-
-    def _to_password_reset_token(self, row: sqlite3.Row) -> PasswordResetToken:
-        return PasswordResetToken(
-            reset_token_id=str(row["reset_token_id"]),
-            user_id=str(row["reset_user_id"]),
-            token_hash=str(row["token_hash"]),
-            created_at=str(row["reset_created_at"]),
-            expires_at=str(row["expires_at"]),
-            used_at=row["used_at"],
-        )
-
     def _to_attached_document(
         self,
         row: sqlite3.Row | None,
@@ -4583,21 +4162,6 @@ class SQLiteExcelAssetRepository:
             ),
             warnings=load_string_list(row_value(row, "warnings_json", "[]")),
             request_id=row_value(row, "request_id", None),
-        )
-
-    def _to_llm_preference(self, row: sqlite3.Row | None) -> LlmPreference | None:
-        if row is None:
-            return None
-        return LlmPreference(
-            scope=str(row["scope"]),
-            summary_provider=str(row["summary_provider"]),
-            summary_model=str(row["summary_model"]),
-            router_provider=str(row["router_provider"]),
-            router_model=str(row["router_model"]),
-            answer_provider=str(row["answer_provider"]),
-            answer_model=str(row["answer_model"]),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
         )
 
     def _answer_blocks_payload(self, blocks: list[ChatAnswerBlock]) -> list[dict[str, object]]:
@@ -4753,13 +4317,6 @@ class SQLiteExcelAssetRepository:
         return f"deleted:{file_id}:{display_name}"
 
 
-def _retry_after_seconds(blocked_until: str, now: str) -> int | None:
-    remaining_seconds = _iso_seconds_between(now, blocked_until)
-    if remaining_seconds <= 0:
-        return None
-    return max(1, int(remaining_seconds))
-
-
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
@@ -4792,20 +4349,3 @@ def _safe_float(value: object, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _iso_seconds_between(start: str, end: str) -> float:
-    return (_parse_iso_datetime(end) - _parse_iso_datetime(start)).total_seconds()
-
-
-def _add_seconds(value: str, seconds: int) -> str:
-    return (_parse_iso_datetime(value) + timedelta(seconds=seconds)).isoformat(
-        timespec="seconds"
-    )
-
-
-def _parse_iso_datetime(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)

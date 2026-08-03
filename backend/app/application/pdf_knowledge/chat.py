@@ -222,6 +222,17 @@ class PdfChatService:
             return None
         return self._sessions.list_turns(session_id, workspace=PDF_CHAT_WORKSPACE)
 
+    def get_session_snapshot(
+        self,
+        session_id: str,
+        user_id: str | None = None,
+    ) -> tuple[ChatSession, list[ChatTurn]] | None:
+        return self._sessions.get_session_with_turns(
+            session_id,
+            workspace=PDF_CHAT_WORKSPACE,
+            user_id=user_id,
+        )
+
     def answer_question(
         self,
         *,

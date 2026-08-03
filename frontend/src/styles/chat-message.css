@@ -238,22 +238,6 @@
   color: #334155;
 }
 
-.thinking-agent-icon {
-  position: relative;
-  background: #0f172a;
-  overflow: visible;
-}
-
-.thinking-agent-icon::after {
-  position: absolute;
-  inset: -4px;
-  border: 2px solid #dbeafe;
-  border-top-color: #047857;
-  border-radius: 999px;
-  content: "";
-  animation: thinking-agent-spin 1s linear infinite;
-}
-
 .loading-bars {
   display: inline-flex;
   flex: 0 0 auto;
@@ -357,11 +341,5 @@
   50% {
     height: 22px;
     opacity: 1;
-  }
-}
-
-@keyframes thinking-agent-spin {
-  to {
-    transform: rotate(360deg);
   }
 }

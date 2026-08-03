@@ -14,9 +14,6 @@ import {
   searchExcelVersionRows,
   setExcelFileVisibility,
 } from '../api/excel-assets-api'
-import { getCurrentUser, logout as logoutSession } from '../api/auth-api'
-import { clearAuthToken } from '../api/auth-token'
-import { subscribeToSessionExpired } from '../api/session-events'
 import {
   generateDocumentSummary,
   getDocumentSummary,
@@ -27,6 +24,7 @@ import AppIcon from '../components/AppIcon.vue'
 import AuthPanel from '../components/AuthPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import SheetSearchResults from '../components/SheetSearchResults.vue'
+import WorkspaceDialogs from '../components/WorkspaceDialogs.vue'
 import WorkspaceNavigation from '../components/WorkspaceNavigation.vue'
 import {
   FileInsightPane,
@@ -41,10 +39,12 @@ import {
 import { PdfKnowledgeWorkspace, PdfParseDiagnosticsPage } from '../features/pdf-knowledge'
 import type { PdfWorkspaceMode } from '../features/pdf-knowledge/types'
 import { useTransientFeedback } from './use-transient-feedback'
+import { useAuthSession } from './composables/use-auth-session'
 import { useChatSessions } from './composables/use-chat-sessions'
 import { useFileLibrary } from './composables/use-file-library'
 import { useLlmPreferences } from './composables/use-llm-preferences'
 import { useWorkspaceResize } from './composables/use-workspace-resize'
+import { activeViewFromHash, activeViewHash } from './workspace-route'
 import {
   defaultExcelRowHeight,
   fallbackAllowedUploadExtensions,
@@ -63,7 +63,6 @@ import {
   rowDomId,
   toErrorMessage,
 } from './workspace-utils'
-import type { AuthResponse, AuthUser } from '../types/auth'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import type { DocumentSummary, DocumentSummaryUpdate } from '../types/document-summary'
 import type {
@@ -86,31 +85,21 @@ import type {
   UploadDialog,
 } from './workspace-types'
 
-function activeViewFromHash(hash: string): ActiveView {
-  if (hash === '#files') {
-    return 'files'
-  }
-  if (hash === '#pdf') {
-    return 'pdf'
-  }
-  if (hash === '#pdf-diagnostics') {
-    return 'pdf-diagnostics'
-  }
-  return 'chat'
-}
-
-function activeViewHash(view: ActiveView): string {
-  return `#${view}`
-}
-
 const initialActiveView: ActiveView =
   typeof window !== 'undefined' ? activeViewFromHash(window.location.hash) : 'chat'
 
 const activeView = ref<ActiveView>(initialActiveView)
 const pdfEntryMode = ref<PdfWorkspaceMode>('management')
-const currentUser = ref<AuthUser | null>(null)
-const isAuthChecking = ref<boolean>(true)
-const authErrorMessage = ref<string>('')
+const {
+  authErrorMessage,
+  currentUser,
+  handleAuthenticated,
+  isAdmin,
+  isAuthChecking,
+  signOut,
+  userEmail,
+  userRoleLabel,
+} = useAuthSession({ initializeWorkspace, resetWorkspaceState })
 const activeFileInsightTab = ref<FileInsightTab>('summary')
 const isFileInsightFullscreen = ref<boolean>(false)
 const files = ref<ExcelFile[]>([])
@@ -233,7 +222,6 @@ let sheetSearchRequestId = 0
 let previewAbortController: AbortController | null = null
 let sheetSearchAbortController: AbortController | null = null
 let rowLookupAbortController: AbortController | null = null
-let unsubscribeFromSessionExpired: (() => void) | null = null
 
 const selectedFile = computed(() => {
   return files.value.find((file) => file.file_id === selectedFileId.value) ?? null
@@ -425,8 +413,6 @@ const activeDocumentForChat = computed<SelectedDocument | null>(() => {
   }
 })
 
-const isAdmin = computed(() => currentUser.value?.role === 'admin')
-
 const visiblePrimaryNavItems = computed(() => {
   return primaryNavItems
     .filter((item) => item.id !== 'files' || isAdmin.value)
@@ -443,10 +429,6 @@ const excelChatNavigationItems = computed<WorkspaceNavigationItem[]>(() => [
   { id: 'pdf-chat', label: 'PDF Chat', icon: 'description' },
 ])
 
-const userEmail = computed(() => currentUser.value?.email ?? '')
-
-const userRoleLabel = computed(() => (isAdmin.value ? 'Administrator' : 'Workspace user'))
-
 const blocksWorkspaceMutation = computed(() => isChatAnswerPending.value)
 
 
@@ -458,8 +440,6 @@ onMounted(() => {
     document.addEventListener('pointerdown', handleDocumentPointerDown)
     document.addEventListener('keydown', handleDocumentKeyDown)
   }
-  unsubscribeFromSessionExpired = subscribeToSessionExpired(handleSessionExpired)
-  void restoreAuthentication()
 })
 
 onBeforeUnmount(() => {
@@ -470,8 +450,6 @@ onBeforeUnmount(() => {
     document.removeEventListener('pointerdown', handleDocumentPointerDown)
     document.removeEventListener('keydown', handleDocumentKeyDown)
   }
-  unsubscribeFromSessionExpired?.()
-  unsubscribeFromSessionExpired = null
   clearOperationFeedback()
   clearChatSessionFeedback()
   stopChatResize()
@@ -522,54 +500,6 @@ async function loadWorkspaceConfig(): Promise<void> {
     uploadMaxBytes.value = fallbackMaxUploadBytes
     uploadAllowedExtensions.value = [...fallbackAllowedUploadExtensions]
   }
-}
-
-async function restoreAuthentication(): Promise<void> {
-  authErrorMessage.value = ''
-  isAuthChecking.value = true
-  try {
-    currentUser.value = await getCurrentUser()
-  } catch (error: unknown) {
-    clearAuthToken()
-    currentUser.value = null
-    authErrorMessage.value = error instanceof ExcelWorkspaceApiError && error.statusCode === 401
-      ? ''
-      : toErrorMessage(error)
-  } finally {
-    isAuthChecking.value = false
-  }
-  if (currentUser.value) {
-    await initializeWorkspace()
-  }
-}
-
-function handleSessionExpired(): void {
-  if (!currentUser.value) {
-    return
-  }
-  clearAuthToken()
-  currentUser.value = null
-  authErrorMessage.value = 'Your session has expired. Please sign in again.'
-  void resetWorkspaceState()
-}
-
-async function handleAuthenticated(response: AuthResponse): Promise<void> {
-  clearAuthToken()
-  currentUser.value = response.user
-  authErrorMessage.value = ''
-  await resetWorkspaceState()
-  await initializeWorkspace()
-}
-
-async function signOut(): Promise<void> {
-  try {
-    await logoutSession()
-  } catch {
-    // Local state cleanup remains the fallback if the server session is already gone.
-  }
-  clearAuthToken()
-  currentUser.value = null
-  await resetWorkspaceState()
 }
 
 async function resetWorkspaceState(): Promise<void> {
@@ -762,6 +692,18 @@ async function confirmDeleteChatSession(session: ChatSession): Promise<void> {
   if (deleted) {
     confirmDialog.value = null
   }
+}
+
+function confirmDialogDeletion(): void {
+  const dialog = confirmDialog.value
+  if (!dialog) {
+    return
+  }
+  if (dialog.kind === 'file') {
+    void confirmDeleteFile()
+    return
+  }
+  void confirmDeleteChatSession(dialog.session)
 }
 
 async function toggleFileVisibility(file: ExcelFile): Promise<void> {
@@ -1992,6 +1934,16 @@ function getGridCellValue(row: string[], columnIndex: number): string {
             </template>
           </FileInsightPane>
         </div>
+
+        <button
+          type="button"
+          class="file-chat-fab"
+          aria-label="Open Excel chat"
+          title="Open Excel chat"
+          @click="setActiveView('chat')"
+        >
+          <AppIcon name="chat_bubble" />
+        </button>
       </section>
 
       <section
@@ -2335,88 +2287,17 @@ function getGridCellValue(row: string[], columnIndex: number): string {
       </section>
     </section>
 
-    <section
-      v-if="renameDialog"
-      class="dialog-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="rename-dialog-title"
-      @click.self="cancelDialog"
-      @keydown.esc="cancelDialog"
-    >
-      <form class="app-dialog" @submit.prevent="submitRenameDialog">
-        <div class="dialog-heading">
-          <div>
-            <p class="eyebrow">{{ renameDialog.kind === 'file' ? 'Workbook' : 'Chat Session' }}</p>
-            <h3 id="rename-dialog-title">Rename</h3>
-          </div>
-          <button type="button" class="dialog-icon-button" aria-label="Close" @click="cancelDialog">
-            <AppIcon name="close" />
-          </button>
-        </div>
-        <label class="dialog-field">
-          <span>Name</span>
-          <input v-model="renameDraft" type="text" autocomplete="off" autofocus />
-        </label>
-        <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
-        <div class="dialog-actions">
-          <button type="button" class="dialog-secondary" @click="cancelDialog">Cancel</button>
-          <button
-            type="submit"
-            class="dialog-primary"
-            :disabled="isWorkspaceBusy || isChatSessionLoading"
-          >
-            Save
-          </button>
-        </div>
-      </form>
-    </section>
-
-    <section
-      v-if="confirmDialog"
-      class="dialog-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="confirm-dialog-title"
-      @click.self="cancelDialog"
-      @keydown.esc="cancelDialog"
-    >
-      <div class="app-dialog">
-        <div class="dialog-heading">
-          <div>
-            <p class="eyebrow">{{ confirmDialog.kind === 'file' ? 'Workbook' : 'Chat Session' }}</p>
-            <h3 id="confirm-dialog-title">Delete</h3>
-          </div>
-          <button type="button" class="dialog-icon-button" aria-label="Close" @click="cancelDialog">
-            <AppIcon name="close" />
-          </button>
-        </div>
-        <p class="dialog-copy">
-          {{
-            confirmDialog.kind === 'file'
-              ? `Delete "${confirmDialog.file.display_name}" from file management? Active chats keep their existing context.`
-              : `Delete "${confirmDialog.session.title}"?`
-          }}
-        </p>
-        <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
-        <div class="dialog-actions">
-          <button type="button" class="dialog-secondary" @click="cancelDialog">Cancel</button>
-          <button
-            type="button"
-            class="dialog-danger"
-            autofocus
-            :disabled="isWorkspaceBusy || isChatSessionLoading"
-            @click="
-              confirmDialog.kind === 'file'
-                ? confirmDeleteFile()
-                : confirmDeleteChatSession(confirmDialog.session)
-            "
-          >
-            Delete
-          </button>
-        </div>
-      </div>
-    </section>
+    <WorkspaceDialogs
+      :rename-dialog="renameDialog"
+      :confirm-dialog="confirmDialog"
+      :rename-draft="renameDraft"
+      :error-message="dialogError"
+      :is-busy="isWorkspaceBusy || isChatSessionLoading"
+      @cancel="cancelDialog"
+      @confirm-delete="confirmDialogDeletion"
+      @submit-rename="submitRenameDialog"
+      @update-rename-draft="renameDraft = $event"
+    />
 
     <WorkbookUploadDialog
       v-if="uploadDialog"

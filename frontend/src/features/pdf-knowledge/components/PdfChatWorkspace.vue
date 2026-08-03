@@ -12,11 +12,13 @@ import PdfChatDataSources from './PdfChatDataSources.vue'
 
 const props = defineProps<{
   breadcrumbs: PdfBreadcrumbItem[]
+  activeSessionId: string
   contextLabel: string
   turns: PdfChatTurnView[]
   sourceDocuments: PdfChatSourceDocument[]
   activeCitationKey: string
   isAnswering: boolean
+  isSessionLoading: boolean
   enableDeepThinking: boolean
   errorMessage: string
 }>()
@@ -42,22 +44,44 @@ const contextPathTitle = computed(() => (
   visibleBreadcrumbs.value.map((item) => item.label).join(' / ')
 ))
 const contextPathLabel = computed(() => contextPathTitle.value)
+const markdownCache = new Map<string, string>()
+const markdownCacheLimit = 256
 
 watch(
   () => [
+    props.activeSessionId,
     props.turns.length,
     props.turns.at(-1)?.status,
     props.isAnswering,
   ],
-  () => {
+  (current, previous) => {
+    const switchedSession = current[0] !== previous?.[0]
     void nextTick(() => {
       chatHistory.value?.scrollTo({
         top: chatHistory.value.scrollHeight,
-        behavior: 'smooth',
+        behavior: switchedSession ? 'auto' : 'smooth',
       })
     })
   },
 )
+
+function renderMarkdownCached(source: string): string {
+  const cached = markdownCache.get(source)
+  if (cached !== undefined) {
+    markdownCache.delete(source)
+    markdownCache.set(source, cached)
+    return cached
+  }
+  const rendered = renderMarkdown(source)
+  markdownCache.set(source, rendered)
+  if (markdownCache.size > markdownCacheLimit) {
+    const oldestKey = markdownCache.keys().next().value
+    if (oldestKey !== undefined) {
+      markdownCache.delete(oldestKey)
+    }
+  }
+  return rendered
+}
 
 function submitQuestion(): void {
   const question = draftQuestion.value.trim()
@@ -101,6 +125,14 @@ function onTextareaKeydown(event: KeyboardEvent): void {
     </header>
 
     <section ref="chatHistory" class="pdfkb-chat-history" aria-label="Chat history">
+      <p
+        v-if="isSessionLoading"
+        class="pdfkb-chat-session-loading"
+        role="status"
+        aria-live="polite"
+      >
+        Loading chat history...
+      </p>
       <PdfChatDataSources
         :documents="sourceDocuments"
         @select-document="emit('selectSourceDocument', $event)"
@@ -152,12 +184,12 @@ function onTextareaKeydown(event: KeyboardEvent): void {
                 </summary>
                 <div
                   class="markdown-body pdfkb-thinking-markdown"
-                  v-html="renderMarkdown(block.reasoning)"
+                  v-html="renderMarkdownCached(block.reasoning)"
                 ></div>
               </details>
               <div
                 class="markdown-body pdfkb-answer-markdown"
-                v-html="renderMarkdown(block.text)"
+                v-html="renderMarkdownCached(block.text)"
               ></div>
               <div
                 v-if="block.citations.length || block.unresolvedCitationIds.length"
@@ -210,11 +242,36 @@ function onTextareaKeydown(event: KeyboardEvent): void {
         </article>
       </template>
 
-      <article v-if="isAnswering" class="pdfkb-message-row assistant muted">
-        <div class="pdfkb-typing-bubble" aria-label="AI is typing">
-          <span></span>
-          <span></span>
-          <span></span>
+      <article
+        v-if="isAnswering"
+        class="pdfkb-message-row assistant pdfkb-thinking-message"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+      >
+        <div class="pdfkb-assistant-heading pdfkb-thinking-title">
+          <span class="pdfkb-assistant-avatar">
+            <AppIcon name="auto_awesome" />
+          </span>
+          <span>Thinking...</span>
+        </div>
+        <div class="pdfkb-thinking-bubble">
+          <div class="pdfkb-thinking-bars" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div class="pdfkb-thinking-copy">
+            <strong>{{ enableDeepThinking ? 'Deep reasoning' : 'Tracing evidence' }}</strong>
+            <span>
+              {{
+                enableDeepThinking
+                  ? 'Comparing PDF evidence. Verifying citations. Composing.'
+                  : 'Checking PDF evidence. Verifying citations. Composing.'
+              }}
+            </span>
+          </div>
         </div>
       </article>
     </section>

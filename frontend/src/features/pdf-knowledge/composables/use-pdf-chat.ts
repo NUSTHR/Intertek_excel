@@ -6,19 +6,21 @@ import {
   cancelPdfChatRequest,
   createPdfChatSession,
   deletePdfChatSession,
+  getPdfChatSessionSnapshot,
+  getPdfDocumentChunk,
   getPdfChatSession,
   listPdfChatSessions,
-  listPdfChatSessionTurns,
-  listPdfDocumentChunks,
   renamePdfChatSession,
   setPdfChatSessionPinned,
 } from '../../../api/pdf-knowledge-api'
+import { ExcelWorkspaceApiError } from '../../../api/errors'
 import { createRequestCoordinator } from '../../../app/composables/use-request-coordinator'
 import type {
   PdfChatSession,
   PdfChatTurnView,
   PdfCitation,
   PdfCitationEvidenceDialogState,
+  PdfDocumentChunk,
   PdfRecentChat,
   PdfSelectedDocument,
 } from '../types'
@@ -51,12 +53,15 @@ export function usePdfChat() {
   const enableDeepThinking = ref(false)
   const isAnswering = ref(false)
   const isSessionLoading = ref(false)
+  const pendingSessionId = ref('')
   const errorMessage = ref('')
   const activeRequestId = ref('')
   const answerRequests = createRequestCoordinator()
   const sessionNavigationRequests = createRequestCoordinator()
   const sessionListRequests = createRequestCoordinator()
   const citationEvidenceRequests = createRequestCoordinator()
+  const citationEvidenceCache = new Map<string, PdfDocumentChunk>()
+  const citationEvidenceCacheLimit = 48
 
   const recentChats = computed<PdfRecentChat[]>(() => {
     return sessions.value.map((session) => ({
@@ -238,38 +243,35 @@ export function usePdfChat() {
   }
 
   async function loadCitationEvidence(citation: PdfCitation): Promise<void> {
+    const cacheKey = `${citation.fileId}:${citation.chunkId}`
+    const cachedChunk = citationEvidenceCache.get(cacheKey)
+    if (cachedChunk) {
+      citationEvidenceCache.delete(cacheKey)
+      citationEvidenceCache.set(cacheKey, cachedChunk)
+      commitCitationEvidence(citation, cachedChunk)
+      return
+    }
     const request = citationEvidenceRequests.begin()
     try {
-      const chunks = await listPdfDocumentChunks(citation.fileId, request.signal)
+      const chunk = await getPdfDocumentChunk(
+        citation.fileId,
+        citation.chunkId,
+        request.signal,
+      )
       if (
         !request.isCurrent()
         || citationEvidenceDialog.value?.citation.key !== citation.key
       ) {
         return
       }
-      const chunk = chunks.find((candidate) => candidate.id === citation.chunkId)
-      if (!chunk) {
-        citationEvidenceDialog.value = {
-          citation,
-          status: 'failed',
-          errorMessage: (
-            'This indexed evidence is no longer available. The PDF may have been reparsed.'
-          ),
+      citationEvidenceCache.set(cacheKey, chunk)
+      if (citationEvidenceCache.size > citationEvidenceCacheLimit) {
+        const oldestKey = citationEvidenceCache.keys().next().value
+        if (oldestKey) {
+          citationEvidenceCache.delete(oldestKey)
         }
-        return
       }
-      citationEvidenceDialog.value = {
-        citation,
-        status: 'ready',
-        evidence: {
-          citationKey: citation.key,
-          chunkId: chunk.id,
-          fileId: citation.fileId,
-          text: normalizePdfDisplayText(chunk.text),
-          title: normalizePdfDisplayText(chunk.title),
-          pageLabel: optionalTrimmedText(chunk.pageLabel),
-        },
-      }
+      commitCitationEvidence(citation, chunk)
     } catch (error: unknown) {
       if (
         request.isCurrent()
@@ -278,9 +280,34 @@ export function usePdfChat() {
         citationEvidenceDialog.value = {
           citation,
           status: 'failed',
-          errorMessage: toErrorMessage(error),
+          errorMessage: (
+            error instanceof ExcelWorkspaceApiError && error.statusCode === 404
+              ? 'This indexed evidence is no longer available. The PDF may have been reparsed.'
+              : toErrorMessage(error)
+          ),
         }
       }
+    }
+  }
+
+  function commitCitationEvidence(
+    citation: PdfCitation,
+    chunk: PdfDocumentChunk,
+  ): void {
+    if (citationEvidenceDialog.value?.citation.key !== citation.key) {
+      return
+    }
+    citationEvidenceDialog.value = {
+      citation,
+      status: 'ready',
+      evidence: {
+        citationKey: citation.key,
+        chunkId: chunk.id,
+        fileId: citation.fileId,
+        text: normalizePdfDisplayText(chunk.text),
+        title: normalizePdfDisplayText(chunk.title),
+        pageLabel: optionalTrimmedText(chunk.pageLabel),
+      },
     }
   }
 
@@ -299,13 +326,11 @@ export function usePdfChat() {
   }
 
   async function startNewChat(): Promise<void> {
-    if (isSessionLoading.value) {
-      return
-    }
     cancelAnswer()
     const request = sessionNavigationRequests.begin()
     errorMessage.value = ''
     isSessionLoading.value = true
+    pendingSessionId.value = 'new'
     try {
       const session = await createPdfChatSession(request.signal)
       if (!request.isCurrent()) {
@@ -323,23 +348,34 @@ export function usePdfChat() {
     } finally {
       if (request.isCurrent()) {
         isSessionLoading.value = false
+        pendingSessionId.value = ''
       }
     }
   }
 
   async function openSession(sessionId: string): Promise<void> {
+    if (sessionId === pendingSessionId.value) {
+      return
+    }
+    if (sessionId === activeSessionId.value) {
+      if (pendingSessionId.value) {
+        sessionNavigationRequests.cancel()
+        pendingSessionId.value = ''
+        isSessionLoading.value = false
+      }
+      return
+    }
     cancelAnswer()
     const request = sessionNavigationRequests.begin()
     errorMessage.value = ''
     isSessionLoading.value = true
+    pendingSessionId.value = sessionId
     try {
-      const [nextTurns, session] = await Promise.all([
-        listPdfChatSessionTurns(sessionId, request.signal),
-        getPdfChatSession(sessionId, request.signal),
-      ])
+      const snapshot = await getPdfChatSessionSnapshot(sessionId, request.signal)
       if (!request.isCurrent()) {
         return
       }
+      const { session, turns: nextTurns } = snapshot
       upsertSession(session)
       activeSessionId.value = sessionId
       turns.value = nextTurns.map(toChatTurnView)
@@ -353,6 +389,7 @@ export function usePdfChat() {
     } finally {
       if (request.isCurrent()) {
         isSessionLoading.value = false
+        pendingSessionId.value = ''
       }
     }
   }
@@ -425,6 +462,7 @@ export function usePdfChat() {
     cancelAnswer()
     sessionNavigationRequests.cancel()
     isSessionLoading.value = false
+    pendingSessionId.value = ''
     resetChatState()
     errorMessage.value = ''
   }
@@ -450,6 +488,7 @@ export function usePdfChat() {
     sessionNavigationRequests.cancel()
     clearCitationSelection()
     isSessionLoading.value = false
+    pendingSessionId.value = ''
   }
 
   function dispose(): void {
@@ -523,6 +562,7 @@ export function usePdfChat() {
     enableDeepThinking,
     isAnswering,
     isSessionLoading,
+    pendingSessionId,
     errorMessage,
     setContextFileIds,
     toggleDeepThinking,

@@ -10,6 +10,8 @@ from app.main import app
 
 def test_health_and_readiness_endpoints(tmp_path: Path) -> None:
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    repository.initialize()
+    (tmp_path / "storage").mkdir()
     app.dependency_overrides[get_excel_repository] = lambda: repository
     get_settings.cache_clear()
     try:
@@ -25,10 +27,27 @@ def test_health_and_readiness_endpoints(tmp_path: Path) -> None:
     assert health_response.status_code == 200
     assert health_response.json() == {"status": "ok"}
     assert ready_response.status_code == 200
-    assert ready_response.json() == {
-        "status": "ready",
-        "checks": {"storage": "ok", "database": "ok"},
+    payload = ready_response.json()
+    assert payload["status"] == "ready"
+    assert payload["checks"] == {
+        "storage": "ok",
+        "disk": "ok",
+        "database": "ok",
+        "migrations": "ok",
+        "mineru": "ok",
+        "excel_upload_worker": "ok",
+        "pdf_upload_worker": "ok",
+        "pdf_summary_worker": "ok",
     }
+    assert payload["details"]["migrations"]["metadata"] == {
+        "migration_table_exists": True,
+        "current_version": 28,
+        "expected_version": 28,
+        "missing_count": 0,
+        "unknown_count": 0,
+        "checksum_mismatch_count": 0,
+    }
+    assert payload["details"]["mineru"]["metadata"]["version"] == "mineru, version 3.4.0"
 
 
 class _temporary_settings_env:

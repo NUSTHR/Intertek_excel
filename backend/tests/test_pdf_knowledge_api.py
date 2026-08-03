@@ -2307,6 +2307,89 @@ def test_pdf_retrieval_endpoint_is_not_registered(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_pdf_session_snapshot_returns_owned_session_and_turns_without_mutation(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+    committed = client.post(
+        f"/api/pdf/chat/sessions/{session_id}/messages",
+        json={"question": "Summarize the available evidence.", "file_ids": []},
+    )
+    assert committed.status_code == 200
+    before = pdf_repository.get_session(session_id, workspace="pdf")
+    assert before is not None
+
+    response = client.get(f"/api/pdf/chat/sessions/{session_id}/snapshot")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session"]["session_id"] == session_id
+    assert [turn["question"] for turn in payload["turns"]] == [
+        "Summarize the available evidence."
+    ]
+    after = pdf_repository.get_session(session_id, workspace="pdf")
+    assert after == before
+
+
+def test_pdf_session_snapshot_hides_missing_foreign_and_excel_sessions(
+    client: TestClient,
+) -> None:
+    pdf_session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+    excel_session_id = client.post("/api/excel/chat/sessions").json()["session_id"]
+
+    assert client.get("/api/pdf/chat/sessions/missing/snapshot").status_code == 404
+    assert (
+        client.get(f"/api/pdf/chat/sessions/{excel_session_id}/snapshot").status_code
+        == 404
+    )
+
+    app.dependency_overrides[get_current_user] = member_user
+    try:
+        foreign_response = client.get(
+            f"/api/pdf/chat/sessions/{pdf_session_id}/snapshot"
+        )
+    finally:
+        app.dependency_overrides[get_current_user] = admin_user
+    assert foreign_response.status_code == 404
+
+
+def test_pdf_document_chunk_endpoint_enforces_file_and_visibility_scope(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_id = _upload_pdf(client, filename="chunk-evidence.pdf")
+    other_file_id = _upload_pdf(client, filename="other-evidence.pdf")
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+    assert worker.run_once() is True
+    chunk = pdf_repository.list_pdf_document_chunks(file_id)[0]
+
+    response = client.get(f"/api/pdf/files/{file_id}/chunks/{chunk.chunk_id}")
+    assert response.status_code == 200
+    assert response.json()["chunk_id"] == chunk.chunk_id
+    assert (
+        client.get(
+            f"/api/pdf/files/{other_file_id}/chunks/{chunk.chunk_id}"
+        ).status_code
+        == 404
+    )
+
+    hidden = client.patch(
+        f"/api/pdf/files/{file_id}/visibility",
+        json={"visible_to_members": False},
+    )
+    assert hidden.status_code == 200
+    app.dependency_overrides[get_current_user] = member_user
+    try:
+        hidden_response = client.get(
+            f"/api/pdf/files/{file_id}/chunks/{chunk.chunk_id}"
+        )
+    finally:
+        app.dependency_overrides[get_current_user] = admin_user
+    assert hidden_response.status_code == 404
+
+
 def test_pdf_route_is_side_effect_free_and_split_answer_commits_atomically(
     client: TestClient,
     pdf_repository: SQLiteExcelAssetRepository,

@@ -206,6 +206,11 @@ export interface PdfChatSession {
   revision: number
 }
 
+export interface PdfChatSessionSnapshot {
+  session: PdfChatSession
+  turns: PdfChatTurn[]
+}
+
 export interface PdfUploadTask {
   id: string
   batchId?: string

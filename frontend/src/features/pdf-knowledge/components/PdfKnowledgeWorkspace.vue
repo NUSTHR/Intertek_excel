@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { listPdfKnowledgeFiles } from '../../../api/pdf-knowledge-api'
 import { ExcelWorkspaceApiError } from '../../../api/errors'
@@ -49,6 +49,7 @@ const selectedContextId = ref('')
 const isStartingNewChat = ref(false)
 const managementFocusTarget = ref<PdfManagementFocusTarget>()
 let managementFocusRequestId = 0
+let knowledgeTreeLoadPromise: Promise<void> | null = null
 const pdfChat = usePdfChat()
 
 const knowledgeTree = computed<PdfKnowledgeNode[]>(() => {
@@ -148,14 +149,13 @@ function changeSidebarView(view: PdfSidebarView): void {
 }
 
 async function startNewChat(): Promise<void> {
-  if (isStartingNewChat.value || pdfChat.isSessionLoading.value) {
+  if (isStartingNewChat.value) {
     return
   }
   isStartingNewChat.value = true
   activeSidebarView.value = 'chats'
   workspaceMode.value = 'chat'
   try {
-    await refreshKnowledgeTreeIfNeeded()
     await pdfChat.startNewChat()
     sessionActions.cancelSelection()
     syncCitationPanelWithViewport()
@@ -167,15 +167,7 @@ async function startNewChat(): Promise<void> {
 async function openChat(chatId: string): Promise<void> {
   activeSidebarView.value = 'chats'
   workspaceMode.value = 'chat'
-  await refreshKnowledgeTreeIfNeeded()
   await pdfChat.openSession(chatId)
-  const restoredContextId = pdfChat.selectedContextFileIds.value[0] ?? ''
-  selectedContextId.value = fileLookup.value.has(restoredContextId)
-    ? restoredContextId
-    : ''
-  if (selectedContextId.value !== restoredContextId) {
-    pdfChat.setContextFileIds([])
-  }
   syncCitationPanelWithViewport()
 }
 
@@ -250,20 +242,47 @@ onBeforeUnmount(() => {
   }
 })
 
-async function loadKnowledgeTree(): Promise<void> {
-  try {
-    knowledgeFiles.value = await listPdfKnowledgeFiles()
-    knowledgeTreeError.value = ''
-    isKnowledgeTreeStale.value = false
-    if (selectedContextId.value && !fileLookup.value.has(selectedContextId.value)) {
-      selectChatContext('')
+watch(
+  [
+    () => pdfChat.selectedContextFileIds.value[0] ?? '',
+    () => knowledgeFiles.value,
+    () => isKnowledgeTreeStale.value,
+  ],
+  ([restoredContextId]) => {
+    if (!restoredContextId) {
+      selectedContextId.value = ''
+      return
     }
-  } catch (error: unknown) {
-    knowledgeFiles.value = []
-    knowledgeTreeError.value = toErrorMessage(error)
-    isKnowledgeTreeStale.value = true
-    selectChatContext('')
+    if (fileLookup.value.has(restoredContextId)) {
+      selectedContextId.value = restoredContextId
+      return
+    }
+    if (!isKnowledgeTreeStale.value) {
+      selectedContextId.value = ''
+      pdfChat.setContextFileIds([])
+    }
+  },
+  { immediate: true },
+)
+
+async function loadKnowledgeTree(): Promise<void> {
+  if (knowledgeTreeLoadPromise) {
+    return knowledgeTreeLoadPromise
   }
+  knowledgeTreeLoadPromise = (async () => {
+    try {
+      knowledgeFiles.value = await listPdfKnowledgeFiles()
+      knowledgeTreeError.value = ''
+      isKnowledgeTreeStale.value = false
+    } catch (error: unknown) {
+      knowledgeFiles.value = []
+      knowledgeTreeError.value = toErrorMessage(error)
+      isKnowledgeTreeStale.value = true
+    } finally {
+      knowledgeTreeLoadPromise = null
+    }
+  })()
+  return knowledgeTreeLoadPromise
 }
 
 async function refreshKnowledgeTreeIfNeeded(): Promise<void> {
@@ -317,6 +336,7 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
       :selected-context-id="selectedContextId"
       :is-admin="isAdmin"
       :is-session-loading="pdfChat.isSessionLoading.value"
+      :pending-session-id="pdfChat.pendingSessionId.value"
       :is-starting-new-chat="isStartingNewChat"
       :active-session-id="pdfChat.activeSessionId.value"
       :tree="knowledgeTree"
@@ -351,12 +371,14 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
     />
 
     <PdfChatWorkspace
+      :active-session-id="pdfChat.activeSessionId.value"
       :breadcrumbs="chatContextBreadcrumbs"
       :context-label="chatContextLabel"
       :turns="pdfChat.turns.value"
       :source-documents="chatSourceDocuments"
       :active-citation-key="pdfChat.activeCitationKey.value"
       :is-answering="pdfChat.isAnswering.value"
+      :is-session-loading="pdfChat.isSessionLoading.value"
       :enable-deep-thinking="pdfChat.enableDeepThinking.value"
       :error-message="pdfChat.errorMessage.value"
       @send-question="pdfChat.sendQuestion"
