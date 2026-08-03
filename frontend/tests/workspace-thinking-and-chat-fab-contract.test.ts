@@ -6,12 +6,19 @@ const excelWorkspaceSource = readFileSync(
   new URL('../src/app/ExcelWorkspaceApp.vue', import.meta.url),
   'utf8',
 )
-const workspaceFilesStyles = readFileSync(
-  new URL('../src/styles/workspace-files.css', import.meta.url),
+const globalSidebarSource = readFileSync(
+  new URL('../src/app/shell/GlobalWorkspaceSidebar.vue', import.meta.url),
   'utf8',
 )
-const workspaceChatStyles = readFileSync(
-  new URL('../src/styles/workspace-chat.css', import.meta.url),
+const workspaceConstantsSource = readFileSync(
+  new URL('../src/app/workspace-constants.ts', import.meta.url),
+  'utf8',
+)
+const pdfManagementSource = readFileSync(
+  new URL(
+    '../src/features/pdf-knowledge/components/PdfKnowledgeManagementWorkspace.vue',
+    import.meta.url,
+  ),
   'utf8',
 )
 const excelChatSource = readFileSync(
@@ -34,25 +41,14 @@ const pdfWorkspaceStyles = readFileSync(
   'utf8',
 )
 
-test('Excel file workspace exposes a semantic shortcut to the existing chat view', () => {
-  const fileViewStart = excelWorkspaceSource.indexOf(
-    '<section v-if="activeView === \'files\'" class="file-page">',
-  )
-  const chatViewStart = excelWorkspaceSource.indexOf(
-    '<section\n        v-show="activeView === \'chat\'"',
-    fileViewStart,
-  )
-  const shortcutPosition = excelWorkspaceSource.indexOf(
-    'aria-label="Open Excel chat"',
-    fileViewStart,
-  )
-
-  assert.ok(fileViewStart >= 0)
-  assert.ok(shortcutPosition > fileViewStart)
-  assert.ok(shortcutPosition < chatViewStart)
-  assert.ok(excelWorkspaceSource.includes('@click="setActiveView(\'chat\')"'))
-  assert.match(workspaceFilesStyles, /\.file-chat-fab\s*\{[^}]*position:\s*fixed;/s)
-  assert.doesNotMatch(workspaceChatStyles, /\.file-chat-fab\s*\{[^}]*display:\s*none;/s)
+test('the global shell owns cross-workspace navigation without file-page shortcuts', () => {
+  for (const label of ['Excel Chat', 'PDF Chat', 'Excel Files', 'PDF Files']) {
+    assert.ok(workspaceConstantsSource.includes(label))
+  }
+  assert.ok(excelWorkspaceSource.includes('<GlobalWorkspaceSidebar'))
+  assert.equal(excelWorkspaceSource.includes('aria-label="Open Excel chat"'), false)
+  assert.equal(pdfManagementSource.includes('aria-label="Open PDF chat"'), false)
+  assert.equal(excelWorkspaceSource.includes('Excel chat destinations'), false)
 })
 
 test('PDF answering state uses an accessible evidence-oriented thinking indicator', () => {

@@ -23,9 +23,9 @@ import { getWorkspaceConfig } from '../api/workspace-api'
 import AppIcon from '../components/AppIcon.vue'
 import AuthPanel from '../components/AuthPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
+import FileWorkspaceLayout from '../components/file-workspace/FileWorkspaceLayout.vue'
 import SheetSearchResults from '../components/SheetSearchResults.vue'
 import WorkspaceDialogs from '../components/WorkspaceDialogs.vue'
-import WorkspaceNavigation from '../components/WorkspaceNavigation.vue'
 import {
   FileInsightPane,
   FilePreviewPanel,
@@ -37,14 +37,22 @@ import {
   type FileSchemaColumn,
 } from '../features/file-management'
 import { PdfKnowledgeWorkspace, PdfParseDiagnosticsPage } from '../features/pdf-knowledge'
-import type { PdfWorkspaceMode } from '../features/pdf-knowledge/types'
+import GlobalWorkspaceSidebar from './shell/GlobalWorkspaceSidebar.vue'
 import { useTransientFeedback } from './use-transient-feedback'
 import { useAuthSession } from './composables/use-auth-session'
 import { useChatSessions } from './composables/use-chat-sessions'
 import { useFileLibrary } from './composables/use-file-library'
 import { useLlmPreferences } from './composables/use-llm-preferences'
 import { useWorkspaceResize } from './composables/use-workspace-resize'
-import { activeViewFromHash, activeViewHash } from './workspace-route'
+import { useWorkspaceSidebar } from './composables/use-workspace-sidebar'
+import {
+  activeViewFromHash,
+  activeViewHash,
+  canAccessWorkspaceDestination,
+  defaultWorkspaceDestination,
+  isCanonicalWorkspaceHash,
+  isPdfDestination,
+} from './workspace-route'
 import {
   defaultExcelRowHeight,
   fallbackAllowedUploadExtensions,
@@ -74,7 +82,6 @@ import type {
   SheetPreviewResponse,
   UploadTaskResponse,
 } from '../types/excel-assets'
-import type { WorkspaceNavigationItem } from '../types/workspace-navigation'
 import type {
   ActiveView,
   ConfirmDialog,
@@ -86,10 +93,14 @@ import type {
 } from './workspace-types'
 
 const initialActiveView: ActiveView =
-  typeof window !== 'undefined' ? activeViewFromHash(window.location.hash) : 'chat'
+  typeof window !== 'undefined' ? activeViewFromHash(window.location.hash) : 'excel-chat'
 
 const activeView = ref<ActiveView>(initialActiveView)
-const pdfEntryMode = ref<PdfWorkspaceMode>('management')
+const hasMountedPdfWorkspace = ref(isPdfDestination(initialActiveView))
+const {
+  isSidebarCollapsed: isGlobalSidebarCollapsed,
+  toggleSidebar: toggleGlobalSidebar,
+} = useWorkspaceSidebar()
 const {
   authErrorMessage,
   currentUser,
@@ -166,7 +177,6 @@ const {
   clearUploadTask,
   pollUploadTask,
 } = useUploadTaskPolling()
-const documentSearchTerm = ref<string>('')
 const sheetSearchTerm = ref<string>('')
 const sheetSearchResults = ref<SheetSearchMatch[]>([])
 const sheetSearchTotal = ref<number>(0)
@@ -415,19 +425,24 @@ const activeDocumentForChat = computed<SelectedDocument | null>(() => {
 
 const visiblePrimaryNavItems = computed(() => {
   return primaryNavItems
-    .filter((item) => item.id !== 'files' || isAdmin.value)
+    .filter((item) => !item.requiresAdmin || isAdmin.value)
     .map((item) => ({
       ...item,
       active: activeView.value === item.id,
     }))
 })
 
-const excelChatNavigationItems = computed<WorkspaceNavigationItem[]>(() => [
-  ...(isAdmin.value
-    ? [{ id: 'excel-files', label: 'Excel Files', icon: 'folder_open' }]
-    : []),
-  { id: 'pdf-chat', label: 'PDF Chat', icon: 'description' },
-])
+const globalChatNavigationItems = computed(() => (
+  visiblePrimaryNavItems.value.filter((item) => item.section === 'chat')
+))
+
+const globalFileNavigationItems = computed(() => (
+  visiblePrimaryNavItems.value.filter((item) => item.section === 'files')
+))
+
+const pdfWorkspaceMode = computed(() => (
+  activeView.value === 'pdf-chat' ? 'chat' : 'management'
+))
 
 const blocksWorkspaceMutation = computed(() => isChatAnswerPending.value)
 
@@ -470,9 +485,7 @@ async function initializeWorkspace(): Promise<void> {
   if (!currentUser.value) {
     return
   }
-  if (!isAdmin.value && (activeView.value === 'files' || activeView.value === 'pdf-diagnostics')) {
-    setActiveView('chat', true)
-  }
+  setActiveView(activeView.value, true)
   await Promise.allSettled([
     loadWorkspaceConfig(),
     loadLlmModelOptionsSafely(),
@@ -523,43 +536,37 @@ async function resetWorkspaceState(): Promise<void> {
 }
 
 function setActiveView(view: ActiveView, replaceHistory = false): void {
-  if ((view === 'files' || view === 'pdf-diagnostics') && !isAdmin.value) {
-    activeView.value = 'chat'
-    if (typeof window !== 'undefined' && window.location.hash !== activeViewHash('chat')) {
-      window.history.replaceState(null, '', activeViewHash('chat'))
-    }
-    return
-  }
+  const nextView = canAccessWorkspaceDestination(view, isAdmin.value)
+    ? view
+    : defaultWorkspaceDestination(view)
   closeActionMenus()
-  if (view !== 'files') {
+  closeNavigationDialogs()
+  if (nextView !== 'excel-files') {
     isFileInsightFullscreen.value = false
   }
-  activeView.value = view
-  if (typeof window !== 'undefined' && window.location.hash !== activeViewHash(view)) {
-    const method = replaceHistory ? 'replaceState' : 'pushState'
-    window.history[method](null, '', activeViewHash(view))
+  if (isPdfDestination(nextView)) {
+    hasMountedPdfWorkspace.value = true
   }
+  activeView.value = nextView
+  if (typeof window !== 'undefined' && window.location.hash !== activeViewHash(nextView)) {
+    const method = replaceHistory ? 'replaceState' : 'pushState'
+    window.history[method](null, '', activeViewHash(nextView))
+  }
+}
+
+function closeNavigationDialogs(): void {
+  renameDialog.value = null
+  confirmDialog.value = null
+  dialogError.value = ''
+  renameDraft.value = ''
 }
 
 function selectPrimaryNavItem(itemId: string): void {
   const item = primaryNavItems.find((candidate) => candidate.id === itemId)
-  if (!item || item.disabled || item.id === 'settings') {
+  if (!item || item.disabled || (item.requiresAdmin && !isAdmin.value)) {
     return
   }
   setActiveView(item.id)
-}
-
-function openPdfWorkspace(mode: PdfWorkspaceMode): void {
-  pdfEntryMode.value = mode
-  setActiveView('pdf')
-}
-
-function handleExcelChatNavigation(itemId: string): void {
-  if (itemId === 'excel-files') {
-    setActiveView('files')
-  } else if (itemId === 'pdf-chat') {
-    openPdfWorkspace('chat')
-  }
 }
 
 function syncActiveViewFromLocation(): void {
@@ -567,21 +574,11 @@ function syncActiveViewFromLocation(): void {
     return
   }
   const nextView = activeViewFromHash(window.location.hash)
-  if ((nextView === 'files' || nextView === 'pdf-diagnostics') && !isAdmin.value) {
-    setActiveView('chat', true)
+  const shouldReplaceHash = !isCanonicalWorkspaceHash(window.location.hash)
+  if (activeView.value === nextView && !shouldReplaceHash) {
     return
   }
-  if (activeView.value === nextView) {
-    return
-  }
-  if (nextView === 'pdf') {
-    pdfEntryMode.value = 'management'
-  }
-  closeActionMenus()
-  if (nextView !== 'files') {
-    isFileInsightFullscreen.value = false
-  }
-  activeView.value = nextView
+  setActiveView(nextView, shouldReplaceHash)
 }
 
 function setFileInsightTab(tab: FileInsightTab): void {
@@ -658,7 +655,7 @@ async function startNewChatSession(): Promise<void> {
   closeActionMenus()
   const session = await createAndActivateChatSession()
   if (session) {
-    setActiveView('chat')
+    setActiveView('excel-chat')
   }
 }
 
@@ -666,7 +663,7 @@ function selectChatSession(session: ChatSession): void {
   closeActionMenus()
   setActiveChatSession(session)
   latestAnswer.value = null
-  setActiveView('chat')
+  setActiveView('excel-chat')
 }
 
 async function renameChatSessionPrompt(session: ChatSession): Promise<void> {
@@ -1528,7 +1525,7 @@ async function handleCitationSelected(citation: ExcelCitation): Promise<void> {
   if (!ensureWorkspaceMutationAllowed()) {
     return
   }
-  setActiveView('chat')
+  setActiveView('excel-chat')
   clearWorkspaceError()
   const requestId = nextWorkspaceSelectionRequestId()
   try {
@@ -1572,7 +1569,7 @@ async function openReferencedDocument(document: SelectedDocument): Promise<void>
     return
   }
   const requestId = nextWorkspaceSelectionRequestId()
-  setActiveView('chat')
+  setActiveView('excel-chat')
   await runWorkspaceAction(async () => {
     const file = files.value.find((item) => item.file_id === document.file_id)
     if (file && selectedFileId.value !== file.file_id) {
@@ -1685,114 +1682,28 @@ function getGridCellValue(row: string[], columnIndex: number): string {
   />
   <main
     v-else
-    class="excelai-app"
+    class="excelai-app workspace-shell"
     :class="{
-      'chat-mode': activeView === 'chat',
-      'pdf-mode': activeView === 'pdf' || activeView === 'pdf-diagnostics',
+      'chat-mode': activeView === 'excel-chat',
+      'pdf-mode': isPdfDestination(activeView),
+      'sidebar-collapsed': isGlobalSidebarCollapsed,
     }"
   >
-    <aside class="app-sidebar">
-      <div class="brand-block">
-        <h1>ExcelAI</h1>
-        <p>Researcher Pro</p>
-      </div>
-
-      <WorkspaceNavigation
-        :items="visiblePrimaryNavItems"
-        aria-label="Excel workspace navigation"
-        @select="selectPrimaryNavItem"
-      />
-
-      <div class="sidebar-footer">
-        <button type="button" class="nav-item muted-nav support-link">
-          <span class="nav-glyph"><AppIcon name="help" /></span>
-          <span>Support</span>
-        </button>
-        <div class="user-mini">
-          <div class="avatar" :class="{ admin: isAdmin }" aria-hidden="true">
-            <AppIcon :name="isAdmin ? 'verified' : 'user'" />
-          </div>
-          <div>
-            <strong>{{ userRoleLabel }}</strong>
-            <span>{{ userEmail }}</span>
-          </div>
-          <button type="button" class="logout-button" aria-label="Logout" @click="signOut">
-            <AppIcon name="logout" />
-          </button>
-        </div>
-      </div>
-    </aside>
+    <GlobalWorkspaceSidebar
+      :chat-items="globalChatNavigationItems"
+      :file-items="globalFileNavigationItems"
+      :collapsed="isGlobalSidebarCollapsed"
+      :is-admin="isAdmin"
+      :user-email="userEmail"
+      :user-role-label="userRoleLabel"
+      @navigate="selectPrimaryNavItem"
+      @logout="signOut"
+      @toggle-collapse="toggleGlobalSidebar"
+    />
 
     <section class="app-main">
-      <header
-        v-if="activeView !== 'pdf'"
-        class="topbar"
-        :class="{ 'file-topbar': activeView === 'files' }"
-      >
-        <template v-if="activeView === 'files'">
-          <label class="search-field file-search-field">
-            <span class="search-icon"><AppIcon name="search" /></span>
-              <input
-                v-model="fileSearchTerm"
-                type="search"
-                aria-label="Search files"
-                placeholder="Search files..."
-              />
-          </label>
-          <div class="file-topbar-meta">
-            <strong class="workspace-topbar-title">Excel Workspace</strong>
-            <span class="topbar-divider"></span>
-            <button
-              type="button"
-              class="topbar-icon-button"
-              aria-label="Refresh files"
-              :disabled="isWorkspaceBusy || blocksWorkspaceMutation"
-              @click="refreshFiles"
-            >
-              <AppIcon name="refresh" />
-            </button>
-            <button
-              type="button"
-              class="topbar-icon-button"
-              aria-label="Notifications"
-              @click="showNotificationsNotice"
-            >
-              <AppIcon name="notifications" />
-            </button>
-            <div class="topbar-avatar" :class="{ admin: isAdmin }" aria-hidden="true">
-              <AppIcon :name="isAdmin ? 'verified' : 'user'" />
-            </div>
-          </div>
-        </template>
-        <template v-else-if="activeView === 'chat'">
-          <div>
-          <p class="eyebrow">Conversation</p>
-          <h2>Excel Analysis</h2>
-          </div>
-          <div class="topbar-actions">
-            <label class="search-field">
-              <span class="search-icon"><AppIcon name="search" /></span>
-              <input
-                v-model="documentSearchTerm"
-                type="search"
-                aria-label="Search documents"
-                placeholder="Search documents..."
-              />
-            </label>
-            <button
-              v-if="isAdmin"
-              type="button"
-              class="view-switch"
-              @click="setActiveView('files')"
-            >
-              Manage Files
-            </button>
-          </div>
-        </template>
-      </header>
-
       <div
-        v-if="activeView === 'files' && operationFeedback"
+        v-if="(activeView === 'excel-files' || activeView === 'pdf-files') && operationFeedback"
         class="floating-toast"
         :class="`tone-${operationFeedback.tone}`"
         role="status"
@@ -1800,7 +1711,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
         {{ operationFeedback.message }}
       </div>
       <div
-        v-if="activeView === 'chat' && chatSessionFeedback"
+        v-if="activeView === 'excel-chat' && chatSessionFeedback"
         class="floating-toast chat-session-toast"
         :class="`tone-${chatSessionFeedback.tone}`"
         role="status"
@@ -1809,23 +1720,51 @@ function getGridCellValue(row: string[], columnIndex: number): string {
       </div>
 
       <PdfKnowledgeWorkspace
-        v-if="activeView === 'pdf'"
-        :entry-mode="pdfEntryMode"
+        v-if="hasMountedPdfWorkspace"
+        v-show="activeView === 'pdf-chat' || activeView === 'pdf-files'"
+        :mode="pdfWorkspaceMode"
+        :active="activeView === 'pdf-chat' || activeView === 'pdf-files'"
         :is-admin="isAdmin"
-        :user-email="userEmail"
-        :user-role-label="userRoleLabel"
-        @open-excel-chat="setActiveView('chat')"
-        @open-diagnostics="setActiveView('pdf-diagnostics')"
-        @logout="signOut"
+        @navigate="setActiveView"
+        @notifications-requested="showNotificationsNotice"
       />
 
       <PdfParseDiagnosticsPage
         v-if="activeView === 'pdf-diagnostics'"
         :is-admin="isAdmin"
-        @open-pdf-workspace="openPdfWorkspace('management')"
+        @open-pdf-workspace="setActiveView('pdf-files')"
       />
 
-      <section v-if="activeView === 'files'" class="file-page">
+      <FileWorkspaceLayout
+        v-if="activeView === 'excel-files'"
+        title="Excel Workspace"
+        :search-term="fileSearchTerm"
+        search-label="Search files"
+        search-placeholder="Search files..."
+        :is-admin="isAdmin"
+        @search-term-change="fileSearchTerm = $event"
+      >
+        <template #actions>
+          <button
+            type="button"
+            class="topbar-icon-button"
+            aria-label="Refresh files"
+            :disabled="isWorkspaceBusy || blocksWorkspaceMutation"
+            @click="refreshFiles"
+          >
+            <AppIcon name="refresh" />
+          </button>
+          <button
+            type="button"
+            class="topbar-icon-button"
+            aria-label="Notifications"
+            @click="showNotificationsNotice"
+          >
+            <AppIcon name="notifications" />
+          </button>
+        </template>
+
+        <section class="file-page">
         <div class="file-management-shell">
           <section class="file-sources-pane">
             <FileSourcePanel
@@ -1934,20 +1873,11 @@ function getGridCellValue(row: string[], columnIndex: number): string {
             </template>
           </FileInsightPane>
         </div>
-
-        <button
-          type="button"
-          class="file-chat-fab"
-          aria-label="Open Excel chat"
-          title="Open Excel chat"
-          @click="setActiveView('chat')"
-        >
-          <AppIcon name="chat_bubble" />
-        </button>
-      </section>
+        </section>
+      </FileWorkspaceLayout>
 
       <section
-        v-show="activeView === 'chat'"
+        v-show="activeView === 'excel-chat'"
         class="analysis-page"
         :class="chatWorkspaceClasses"
         :style="chatWorkspaceStyle"
@@ -2046,25 +1976,6 @@ function getGridCellValue(row: string[], columnIndex: number): string {
             {{ chatSessionError }}
           </p>
 
-          <WorkspaceNavigation
-            :items="excelChatNavigationItems"
-            variant="rail"
-            aria-label="Excel chat destinations"
-            @select="handleExcelChatNavigation"
-          />
-
-          <div class="chat-rail-user">
-            <div class="avatar" :class="{ admin: isAdmin }" aria-hidden="true">
-              <AppIcon :name="isAdmin ? 'verified' : 'user'" />
-            </div>
-            <div>
-              <strong>{{ userEmail }}</strong>
-              <span>{{ userRoleLabel }}</span>
-            </div>
-            <button type="button" class="logout-button" aria-label="Logout" @click="signOut">
-              <AppIcon name="logout" />
-            </button>
-          </div>
         </aside>
 
         <section class="sheet-stage">

@@ -1695,8 +1695,7 @@
   background: #000000;
 }
 
-.pdfmgmt-upload-primary:not(:disabled):active,
-.pdfmgmt-chat-fab:active {
+.pdfmgmt-upload-primary:not(:disabled):active {
   transform: scale(0.97);
 }
 
@@ -3392,30 +3391,6 @@
   font-size: 16px;
 }
 
-.pdfmgmt-chat-fab {
-  position: fixed;
-  right: 28px;
-  bottom: 28px;
-  z-index: 5;
-  display: grid;
-  width: 52px;
-  height: 52px;
-  place-items: center;
-  color: #ffffff;
-  border-radius: 8px;
-  background: var(--pdfmgmt-primary);
-  box-shadow: 0 18px 32px rgb(15 23 42 / 0.18);
-  font-size: 25px;
-  transition:
-    background 160ms ease,
-    transform 160ms ease;
-}
-
-.pdfmgmt-chat-fab:hover {
-  background: var(--pdfmgmt-primary-hover);
-  transform: scale(1.04);
-}
-
 @keyframes pdfmgmt-pulse {
   0%,
   100% {
@@ -3606,11 +3581,4 @@
     padding: 20px;
   }
 
-  .pdfmgmt-chat-fab {
-    right: 18px;
-    bottom: 18px;
-    width: 54px;
-    height: 54px;
-    border-radius: 14px;
-  }
 }

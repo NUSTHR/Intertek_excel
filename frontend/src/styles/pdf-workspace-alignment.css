@@ -576,13 +576,6 @@
   border-radius: 10px;
 }
 
-.pdfmgmt-chat-fab {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  background: #0f172a;
-}
-
 .pdfkb {
   grid-template-columns: 280px minmax(0, 1fr) 320px;
   min-width: 1180px;

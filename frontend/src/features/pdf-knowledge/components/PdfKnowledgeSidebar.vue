@@ -1,7 +1,5 @@
 <script setup lang="ts">
 import AppIcon from '../../../components/AppIcon.vue'
-import WorkspaceNavigation from '../../../components/WorkspaceNavigation.vue'
-import type { WorkspaceNavigationItem } from '../../../types/workspace-navigation'
 import type { PdfKnowledgeNode, PdfRecentChat, PdfSidebarView } from '../types'
 import PdfKnowledgeTreeNode from './PdfKnowledgeTreeNode.vue'
 import PdfRecentChatList from './PdfRecentChatList.vue'
@@ -10,7 +8,6 @@ defineProps<{
   activeView: PdfSidebarView
   errorMessage: string
   selectedContextId: string
-  isAdmin: boolean
   isSessionLoading: boolean
   pendingSessionId: string
   isStartingNewChat: boolean
@@ -23,14 +20,10 @@ defineProps<{
   selectedSessionIds: Set<string>
   busySessionIds: Set<string>
   sessionActionError: string
-  userEmail: string
-  userRoleLabel: string
 }>()
 
 const emit = defineEmits<{
   changeView: [view: PdfSidebarView]
-  openExcelChat: []
-  openManagement: []
   newChat: []
   openChat: [chatId: string]
   beginChatSelection: [sessionId?: string]
@@ -44,21 +37,7 @@ const emit = defineEmits<{
   unpinSelectedChats: []
   deleteSelectedChats: []
   selectContext: [fileId: string]
-  logout: []
 }>()
-
-const pdfChatNavigationItems: WorkspaceNavigationItem[] = [
-  { id: 'pdf-files', label: 'PDF Files', icon: 'folder_open' },
-  { id: 'excel-chat', label: 'Excel Chat', icon: 'table_chart' },
-]
-
-function handleDestination(itemId: string): void {
-  if (itemId === 'pdf-files') {
-    emit('openManagement')
-  } else if (itemId === 'excel-chat') {
-    emit('openExcelChat')
-  }
-}
 
 </script>
 
@@ -117,13 +96,6 @@ function handleDestination(itemId: string): void {
           @click="emit('changeView', 'chats')"
         >
           <AppIcon name="chat_bubble" />
-        </button>
-      </div>
-
-      <div class="pdfkb-mobile-actions">
-        <button type="button" @click="emit('openManagement')">
-          <AppIcon name="folder_open" />
-          <span>Manage Files</span>
         </button>
       </div>
 
@@ -193,26 +165,5 @@ function handleDestination(itemId: string): void {
       />
     </div>
 
-    <div class="pdfkb-sidebar-footer">
-      <WorkspaceNavigation
-        :items="pdfChatNavigationItems"
-        variant="rail"
-        aria-label="PDF chat destinations"
-        @select="handleDestination"
-      />
-
-      <div class="pdfkb-profile chat-rail-user">
-        <div class="pdfkb-profile-avatar avatar" :class="{ admin: isAdmin }" aria-hidden="true">
-          <AppIcon :name="isAdmin ? 'verified' : 'user'" />
-        </div>
-        <div class="pdfkb-profile-copy">
-          <strong>{{ userEmail }}</strong>
-          <span>{{ userRoleLabel }}</span>
-        </div>
-        <button type="button" class="logout-button" aria-label="Logout" @click="emit('logout')">
-          <AppIcon name="logout" />
-        </button>
-      </div>
-    </div>
   </nav>
 </template>

@@ -1,10 +1,17 @@
 import type { ChatSession } from '../types/chat'
 import type { ExcelFile } from '../types/excel-assets'
 
-export type ActiveView = 'files' | 'chat' | 'pdf' | 'pdf-diagnostics'
+export type WorkspaceDestination =
+  | 'excel-chat'
+  | 'pdf-chat'
+  | 'excel-files'
+  | 'pdf-files'
+  | 'pdf-diagnostics'
+
+export type ActiveView = WorkspaceDestination
 export type FileInsightTab = 'summary' | 'preview' | 'schema'
 export type ModelStage = 'summary' | 'router' | 'answer'
-export type PrimaryNavKey = ActiveView | 'settings'
+export type PrimaryNavKey = Exclude<WorkspaceDestination, 'pdf-diagnostics'>
 
 export type RenameDialog =
   | { kind: 'file'; file: ExcelFile }
@@ -41,5 +48,7 @@ export interface PrimaryNavItem {
   id: PrimaryNavKey
   label: string
   icon: string
+  section: 'chat' | 'files'
+  requiresAdmin?: boolean
   disabled?: boolean
 }

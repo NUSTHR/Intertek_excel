@@ -5,7 +5,7 @@ import AppIcon from './AppIcon.vue'
 withDefaults(
   defineProps<{
     items: WorkspaceNavigationItem[]
-    variant?: 'primary' | 'rail'
+    variant?: 'primary' | 'rail' | 'global'
     ariaLabel?: string
   }>(),
   {
@@ -21,7 +21,11 @@ const emit = defineEmits<{
 
 <template>
   <nav
-    :class="variant === 'primary' ? 'primary-nav' : 'rail-system-links'"
+    :class="{
+      'primary-nav': variant === 'primary',
+      'rail-system-links': variant === 'rail',
+      'workspace-global-nav': variant === 'global',
+    }"
     :aria-label="ariaLabel"
   >
     <button
@@ -30,10 +34,12 @@ const emit = defineEmits<{
       type="button"
       :class="{
         'nav-item': variant === 'primary',
+        'workspace-global-nav__item': variant === 'global',
         active: item.active,
         'muted-nav': item.disabled,
       }"
       :disabled="item.disabled"
+      :title="item.label"
       :aria-current="item.active ? 'page' : undefined"
       :aria-disabled="item.disabled ? 'true' : undefined"
       @click="emit('select', item.id)"
@@ -41,8 +47,13 @@ const emit = defineEmits<{
       <span v-if="variant === 'primary'" class="nav-glyph">
         <AppIcon :name="item.icon" />
       </span>
+      <span v-else-if="variant === 'global'" class="workspace-global-nav__icon">
+        <AppIcon :name="item.icon" />
+      </span>
       <AppIcon v-else :name="item.icon" />
-      <span>{{ item.label }}</span>
+      <span :class="variant === 'global' ? 'workspace-global-nav__label' : 'workspace-nav-text'">
+        {{ item.label }}
+      </span>
     </button>
   </nav>
 </template>

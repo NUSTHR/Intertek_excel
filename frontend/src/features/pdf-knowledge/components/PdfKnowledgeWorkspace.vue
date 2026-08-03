@@ -25,19 +25,16 @@ import PdfKnowledgeSidebar from './PdfKnowledgeSidebar.vue'
 import PdfSourceCitations from './PdfSourceCitations.vue'
 
 const props = defineProps<{
-  entryMode: PdfWorkspaceMode
+  mode: PdfWorkspaceMode
+  active: boolean
   isAdmin: boolean
-  userEmail: string
-  userRoleLabel: string
 }>()
 
 const emit = defineEmits<{
-  openExcelChat: []
-  openDiagnostics: []
-  logout: []
+  navigate: [destination: 'pdf-chat' | 'pdf-files']
+  notificationsRequested: []
 }>()
 
-const workspaceMode = ref<PdfWorkspaceMode>(props.entryMode)
 const activeSidebarView = ref<PdfSidebarView>('knowledge')
 const isCitationPanelCollapsed = ref(false)
 const hasUserToggledCitationPanel = ref(false)
@@ -154,7 +151,6 @@ async function startNewChat(): Promise<void> {
   }
   isStartingNewChat.value = true
   activeSidebarView.value = 'chats'
-  workspaceMode.value = 'chat'
   try {
     await pdfChat.startNewChat()
     sessionActions.cancelSelection()
@@ -166,7 +162,6 @@ async function startNewChat(): Promise<void> {
 
 async function openChat(chatId: string): Promise<void> {
   activeSidebarView.value = 'chats'
-  workspaceMode.value = 'chat'
   await pdfChat.openSession(chatId)
   syncCitationPanelWithViewport()
 }
@@ -199,20 +194,7 @@ function openSourceDocument(document: PdfChatSourceDocument): void {
     requestId: managementFocusRequestId,
     fileId: document.fileId,
   }
-  void changeWorkspaceMode('management')
-}
-
-async function changeWorkspaceMode(mode: PdfWorkspaceMode): Promise<void> {
-  if (mode === 'management') {
-    pdfChat.cancelActiveOperations()
-  } else {
-    managementFocusTarget.value = undefined
-  }
-  workspaceMode.value = mode
-  if (mode === 'chat') {
-    await refreshKnowledgeTreeIfNeeded()
-    syncCitationPanelWithViewport()
-  }
+  emit('navigate', 'pdf-files')
 }
 
 function markKnowledgeTreeStale(): void {
@@ -241,6 +223,23 @@ onBeforeUnmount(() => {
     window.removeEventListener('resize', syncCitationPanelWithViewport)
   }
 })
+
+watch(
+  [() => props.mode, () => props.active],
+  ([mode, active]) => {
+    if (!active || mode !== 'chat') {
+      pdfChat.closeCitationEvidence()
+      sessionActions.closeRenameDialog()
+      sessionActions.closeDeleteDialog()
+      sessionActions.cancelSelection()
+      return
+    }
+    managementFocusTarget.value = undefined
+    void refreshKnowledgeTreeIfNeeded()
+    syncCitationPanelWithViewport()
+  },
+  { immediate: true },
+)
 
 watch(
   [
@@ -313,20 +312,18 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
 </script>
 
 <template>
-  <PdfKnowledgeManagementWorkspace
-    v-if="workspaceMode === 'management'"
-    :focus-target="managementFocusTarget"
-    :is-admin="isAdmin"
-    :user-email="userEmail"
-    :user-role-label="userRoleLabel"
-    @change-mode="changeWorkspaceMode"
-    @library-changed="markKnowledgeTreeStale"
-    @open-diagnostics="emit('openDiagnostics')"
-    @logout="emit('logout')"
-  />
+  <div class="pdf-workspace-host">
+    <PdfKnowledgeManagementWorkspace
+      v-show="mode === 'management'"
+      :active="active && mode === 'management'"
+      :focus-target="managementFocusTarget"
+      :is-admin="isAdmin"
+      @library-changed="markKnowledgeTreeStale"
+      @notifications-requested="emit('notificationsRequested')"
+    />
 
   <section
-    v-else
+    v-show="mode === 'chat'"
     class="pdfkb"
     :class="{ 'citation-panel-collapsed': isCitationPanelCollapsed }"
   >
@@ -334,7 +331,6 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
       :active-view="activeSidebarView"
       :error-message="knowledgeTreeError"
       :selected-context-id="selectedContextId"
-      :is-admin="isAdmin"
       :is-session-loading="pdfChat.isSessionLoading.value"
       :pending-session-id="pdfChat.pendingSessionId.value"
       :is-starting-new-chat="isStartingNewChat"
@@ -347,8 +343,6 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
       :selected-session-ids="sessionActions.selectedSessionIds.value"
       :busy-session-ids="sessionActions.busySessionIds.value"
       :session-action-error="sessionActions.batchError.value"
-      :user-email="userEmail"
-      :user-role-label="userRoleLabel"
       @change-view="changeSidebarView"
       @new-chat="startNewChat"
       @open-chat="openChat"
@@ -364,10 +358,7 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
       @delete-selected-chats="
         sessionActions.requestDelete(sessionActions.selectedChats.value)
       "
-      @open-excel-chat="emit('openExcelChat')"
-      @open-management="changeWorkspaceMode('management')"
       @select-context="selectChatContext"
-      @logout="emit('logout')"
     />
 
     <PdfChatWorkspace
@@ -398,13 +389,14 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
     />
 
     <PdfCitationEvidenceDialog
-      v-if="pdfChat.citationEvidenceDialog.value"
+      v-if="mode === 'chat' && pdfChat.citationEvidenceDialog.value"
       :dialog="pdfChat.citationEvidenceDialog.value"
       @close="closeCitationEvidence"
       @retry="pdfChat.retryCitationEvidence"
     />
 
     <PdfChatSessionDialogs
+      v-if="mode === 'chat'"
       :active-session-id="pdfChat.activeSessionId.value"
       :pending-rename-chat="sessionActions.pendingRenameChat.value"
       :rename-draft="sessionActions.renameDraft.value"
@@ -420,5 +412,6 @@ async function runSessionMutation(action: () => Promise<void>): Promise<void> {
       @close-delete="sessionActions.closeDeleteDialog"
       @confirm-delete="sessionActions.confirmDelete"
     />
-  </section>
+    </section>
+  </div>
 </template>

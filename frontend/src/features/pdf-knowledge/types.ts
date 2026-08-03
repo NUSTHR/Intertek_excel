@@ -272,13 +272,6 @@ export interface PdfUploadCreationResult {
   tasks: PdfUploadTask[]
 }
 
-export interface PdfManagementNavItem {
-  id: PdfWorkspaceMode | 'knowledge' | 'diagnostics'
-  label: string
-  icon: string
-  active?: boolean
-}
-
 export interface PdfModelSetting {
   id: string
   label: string
