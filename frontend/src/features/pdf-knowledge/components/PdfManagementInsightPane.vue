@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
+import FileWorkspaceInsightPane from '../../../components/file-workspace/FileWorkspaceInsightPane.vue'
 import type {
   PdfDocumentPreviewBlock,
   PdfDocumentSchemaItem,
@@ -126,9 +127,8 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
 </script>
 
 <template>
-  <section class="pdfmgmt-insight-pane file-insight-pane">
-    <header class="pdfmgmt-insight-tabs file-insight-tabs">
-      <div>
+  <FileWorkspaceInsightPane domain="pdf">
+    <template #tabs>
         <button
           type="button"
           :class="{ active: activeTab === 'summary' }"
@@ -150,8 +150,10 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
         >
           Schema
         </button>
-      </div>
-      <div class="pdfmgmt-insight-actions file-insight-tools">
+    </template>
+
+    <template #actions>
+      <div class="pdfmgmt-insight-actions">
         <button
           type="button"
           class="icon-only-button"
@@ -169,9 +171,8 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
           <AppIcon name="fullscreen" />
         </button>
       </div>
-    </header>
+    </template>
 
-    <div class="pdfmgmt-insight-scroll file-insight-scroll">
       <section class="pdfmgmt-panel">
         <button
           type="button"
@@ -411,6 +412,5 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
           </div>
         </div>
       </section>
-    </div>
-  </section>
+  </FileWorkspaceInsightPane>
 </template>

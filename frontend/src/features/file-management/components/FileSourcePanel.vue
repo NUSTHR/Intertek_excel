@@ -2,8 +2,15 @@
 import { computed } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
+import FileWorkspaceSourcePane from '../../../components/file-workspace/FileWorkspaceSourcePane.vue'
 import WorkbookUploadDropzone from './WorkbookUploadDropzone.vue'
 import { fileIcon, fileTypeLabel, formatDate } from '../../../app/workspace-utils'
+import {
+  fileLibraryCopy,
+  formatFileLibraryCount,
+  formatFileMetadata,
+  getFileLibraryEmptyState,
+} from '../../file-library/domain-presentation'
 
 import type { ExcelFile } from '../../../types/excel-assets'
 
@@ -41,15 +48,9 @@ function isFilePinned(fileId: string): boolean {
 
 const hasSearchQuery = computed(() => props.searchTerm.trim().length > 0)
 
-const emptyTitle = computed(() => (
-  hasSearchQuery.value ? 'No matching workbooks' : 'Upload a workbook to get started'
-))
-
-const emptyDetail = computed(() => {
-  return hasSearchQuery.value
-    ? 'Try another filename or clear the search.'
-    : 'Excel files will appear here after parsing is complete.'
-})
+const copy = fileLibraryCopy.excel
+const countLabel = computed(() => formatFileLibraryCount('excel', props.totalFileCount))
+const emptyState = computed(() => getFileLibraryEmptyState('excel', hasSearchQuery.value))
 
 function selectFile(file: ExcelFile): void {
   if (props.disabled) {
@@ -60,22 +61,28 @@ function selectFile(file: ExcelFile): void {
 </script>
 
 <template>
-  <section class="file-list-panel">
-    <div class="panel-heading">
-      <div>
-        <h3>File Sources</h3>
+  <FileWorkspaceSourcePane domain="excel">
+    <template #header>
+      <div class="panel-heading">
+        <div>
+          <h3>{{ copy.listTitle }}</h3>
+        </div>
+        <span class="files-found-label">{{ countLabel }}</span>
       </div>
-      <span class="files-found-label">{{ totalFileCount }} Files Found</span>
-    </div>
+    </template>
 
-    <WorkbookUploadDropzone
-      :accept="uploadAccept"
-      :disabled="disabled"
-      :help-text="uploadHelpText"
-      @select="emit('uploadSelected', $event)"
-    />
+    <template #upload>
+      <WorkbookUploadDropzone
+        :accept="uploadAccept"
+        :disabled="disabled"
+        :title="copy.uploadTitle"
+        :help-text="uploadHelpText"
+        @select="emit('uploadSelected', $event)"
+      />
+    </template>
 
-    <div class="file-card-list">
+    <template #list>
+      <div class="file-card-list">
       <article
         v-for="file in files"
         :key="file.file_id"
@@ -98,7 +105,7 @@ function selectFile(file: ExcelFile): void {
         <span class="file-card-main">
           <strong>{{ file.display_name }}</strong>
           <span class="file-meta-line">
-            {{ fileTypeLabel(file) }} - Modified {{ formatDate(file.updated_at) }}
+            {{ formatFileMetadata([fileTypeLabel(file), `Updated ${formatDate(file.updated_at)}`]) }}
           </span>
           <span
             v-if="!file.visible_to_members"
@@ -154,43 +161,46 @@ function selectFile(file: ExcelFile): void {
         <span class="empty-state-mark" aria-hidden="true">
           <AppIcon :name="hasSearchQuery ? 'search' : 'folder_open'" />
         </span>
-        <strong>{{ emptyTitle }}</strong>
-        <span>{{ emptyDetail }}</span>
+        <strong>{{ emptyState.title }}</strong>
+        <span>{{ emptyState.detail }}</span>
       </div>
-    </div>
+      </div>
+    </template>
 
-    <div class="file-pagination">
-      <button
-        type="button"
-        class="pagination-link"
-        :disabled="currentPage <= 1"
-        @click="emit('stepPage', -1)"
-      >
-        <AppIcon name="chevron_left" />
-        Previous
-      </button>
-      <div class="pagination-pages">
+    <template #pagination>
+      <div class="file-pagination">
         <button
-          v-for="pageNumber in visiblePages"
-          :key="pageNumber"
           type="button"
-          :class="{ active: pageNumber === currentPage }"
-          :aria-current="pageNumber === currentPage ? 'page' : undefined"
-          @click="emit('setPage', pageNumber)"
+          class="pagination-link"
+          :disabled="currentPage <= 1"
+          @click="emit('stepPage', -1)"
         >
-          {{ pageNumber }}
+          <AppIcon name="chevron_left" />
+          Previous
+        </button>
+        <div class="pagination-pages">
+          <button
+            v-for="pageNumber in visiblePages"
+            :key="pageNumber"
+            type="button"
+            :class="{ active: pageNumber === currentPage }"
+            :aria-current="pageNumber === currentPage ? 'page' : undefined"
+            @click="emit('setPage', pageNumber)"
+          >
+            {{ pageNumber }}
+          </button>
+        </div>
+        <span class="pagination-range">{{ paginationLabel }}</span>
+        <button
+          type="button"
+          class="pagination-link"
+          :disabled="currentPage >= pageCount"
+          @click="emit('stepPage', 1)"
+        >
+          Next
+          <AppIcon name="chevron_right" />
         </button>
       </div>
-      <span class="pagination-range">{{ paginationLabel }}</span>
-      <button
-        type="button"
-        class="pagination-link"
-        :disabled="currentPage >= pageCount"
-        @click="emit('stepPage', 1)"
-      >
-        Next
-        <AppIcon name="chevron_right" />
-      </button>
-    </div>
-  </section>
+    </template>
+  </FileWorkspaceSourcePane>
 </template>

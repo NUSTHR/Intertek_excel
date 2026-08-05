@@ -17,5 +17,6 @@ import './styles/pdf-management-alignment.css'
 import './styles/pdf-shared-alignment.css'
 import './styles/pdf-chat-sessions.css'
 import './styles/workspace-shell.css'
+import './styles/file-workspace-template.css'
 
 createApp(ExcelWorkspaceApp).mount('#app')

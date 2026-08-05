@@ -2,6 +2,7 @@
 import AppIcon from '../AppIcon.vue'
 
 defineProps<{
+  domain: 'excel' | 'pdf'
   title: string
   searchTerm: string
   searchLabel: string
@@ -15,7 +16,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section class="file-workspace-layout">
+  <section class="file-workspace-layout" :data-file-domain="domain">
     <header class="file-workspace-topbar topbar file-topbar">
       <label class="search-field file-search-field">
         <span class="search-icon"><AppIcon name="search" /></span>
@@ -39,7 +40,13 @@ const emit = defineEmits<{
     </header>
 
     <div class="file-workspace-content">
-      <slot></slot>
+      <section class="file-workspace-source-pane file-sources-pane">
+        <slot name="source"></slot>
+      </section>
+      <section class="file-workspace-insight-pane">
+        <slot name="insight"></slot>
+      </section>
     </div>
+    <slot name="overlay"></slot>
   </section>
 </template>

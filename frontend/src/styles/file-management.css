@@ -9,74 +9,6 @@
   overflow: hidden;
 }
 
-.excelai-app:not(.chat-mode) .file-page {
-  display: block;
-  flex: 1 1 auto;
-  min-height: 0;
-  height: auto;
-  width: 100%;
-  max-width: none;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-}
-
-.excelai-app:not(.chat-mode) .file-management-shell {
-  display: grid;
-  grid-template-columns: minmax(360px, 0.82fr) minmax(560px, 1.18fr);
-  min-height: 0;
-  height: 100%;
-  border-top: 1px solid #e2e8f0;
-  background: #f8fafc;
-  overflow: hidden;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane,
-.excelai-app:not(.chat-mode) .file-insight-pane {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-}
-
-.excelai-app:not(.chat-mode) .file-sources-pane {
-  gap: 16px;
-  border-right: 1px solid #e2e8f0;
-  padding: 24px;
-  background: #ffffff;
-}
-
-.excelai-app:not(.chat-mode) .file-insight-pane {
-  background: #f8fafc;
-}
-
-.excelai-app:not(.chat-mode) .file-insight-scroll {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding: 20px 22px 24px;
-}
-
-.excelai-app:not(.chat-mode) .file-list-panel {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 16px;
-  min-height: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.excelai-app:not(.chat-mode) .file-card-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  padding: 0 6px 96px 0;
-}
-
 .excelai-app:not(.chat-mode) .file-card-list > .file-empty-panel {
   grid-template-columns: 30px minmax(0, 1fr);
   column-gap: 12px;
@@ -844,24 +776,6 @@
     overflow: auto;
   }
 
-  .excelai-app:not(.chat-mode) .file-page {
-    height: auto;
-    overflow: visible;
-  }
-
-  .excelai-app:not(.chat-mode) .file-management-shell {
-    grid-template-columns: minmax(0, 1fr);
-    height: auto;
-    min-height: calc(100vh - 64px);
-    overflow: visible;
-  }
-
-  .excelai-app:not(.chat-mode) .file-sources-pane,
-  .excelai-app:not(.chat-mode) .file-insight-pane {
-    min-height: 520px;
-    height: auto;
-  }
-
   .excelai-app:not(.chat-mode) .file-preview-controls,
   .excelai-app:not(.chat-mode) .preview-metrics {
     grid-template-columns: minmax(0, 1fr);
@@ -937,17 +851,6 @@
     display: none;
   }
 
-  .excelai-app:not(.chat-mode) .file-sources-pane,
-  .excelai-app:not(.chat-mode) .file-insight-pane {
-    min-height: auto;
-  }
-
-  .excelai-app:not(.chat-mode) .file-sources-pane {
-    border-right: 0;
-    border-bottom: 1px solid #e2e8f0;
-    padding: 18px 16px;
-  }
-
   .excelai-app:not(.chat-mode) .file-sources-pane .file-library-card {
     grid-template-columns: 42px minmax(0, 1fr) 34px;
   }
@@ -964,7 +867,4 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .excelai-app:not(.chat-mode) .file-insight-scroll {
-    padding: 16px;
-  }
 }

@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
+import FileWorkspaceSourcePane from '../../../components/file-workspace/FileWorkspaceSourcePane.vue'
+import {
+  fileLibraryCopy,
+  formatFileLibraryCount,
+  formatFileMetadata,
+  formatPdfUploadDescription,
+  getFileLibraryEmptyState,
+} from '../../file-library/domain-presentation'
 import type {
   PdfBreadcrumbItem,
   PdfManagedFile,
@@ -25,6 +33,7 @@ const props = defineProps<{
   isUploading: boolean
   isLoading: boolean
   errorMessage: string
+  searchTerm: string
 }>()
 
 const emit = defineEmits<{
@@ -43,6 +52,14 @@ const isDirectoryTreeOpen = ref(false)
 const openActionMenuId = ref('')
 const directoryOverlay = ref<HTMLElement | null>(null)
 const directoryTrigger = ref<HTMLButtonElement | null>(null)
+const copy = fileLibraryCopy.pdf
+const hasSearchQuery = computed(() => props.searchTerm.trim().length > 0)
+const countLabel = computed(() => formatFileLibraryCount('pdf', props.totalFileCount))
+const emptyState = computed(() => getFileLibraryEmptyState('pdf', hasSearchQuery.value))
+const uploadDescription = computed(() => formatPdfUploadDescription(
+  props.scopeBreadcrumbs.at(-1)?.label ?? 'Knowledge Base',
+  '50 MB',
+))
 
 function iconForFileKind(kind: PdfManagedFileKind): string {
   if (kind === 'folder') {
@@ -131,6 +148,9 @@ function isFileRowSelected(file: PdfManagedFile): boolean {
 
 function fileMetaLabel(file: PdfManagedFile): string {
   const details = [file.sizeLabel, file.modifiedLabel].filter(Boolean)
+  if (details.length > 1) {
+    details[1] = `Updated ${details[1]}`
+  }
   if (file.status !== 'ready' && file.status !== 'indexed') {
     details.push(statusLabel(file.status))
   }
@@ -138,7 +158,7 @@ function fileMetaLabel(file: PdfManagedFile): string {
   if (quality) {
     details.push(quality)
   }
-  return details.join(' / ')
+  return formatFileMetadata(details)
 }
 
 function openDirectoryTree(): void {
@@ -273,43 +293,42 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="pdfmgmt-file-pane file-sources-pane">
-    <div
-      ref="directoryOverlay"
-      class="pdfmgmt-directory-overlay"
-      :class="{ open: isDirectoryTreeOpen }"
-      role="dialog"
-      aria-label="Directory Tree"
-      aria-modal="true"
-      :aria-hidden="!isDirectoryTreeOpen"
-      :tabindex="isDirectoryTreeOpen ? 0 : -1"
-    >
-      <header class="pdfmgmt-directory-overlay-header">
-        <strong>Directory Tree</strong>
-        <button type="button" aria-label="Close directory tree" @click="closeDirectoryTree()">
-          <AppIcon name="close" />
-        </button>
-      </header>
-      <PdfManagementDirectoryTree
-        :files="directoryFiles"
-        :selected-scope-id="selectedScopeId"
-        :selected-file-id="selectedFileId"
-        @select-scope="handleDirectoryScopeSelect"
-        @select-file="handleDirectoryFileSelect"
-      />
-      <footer class="pdfmgmt-directory-overlay-footer">
-        <span>Quick Actions</span>
-        <button type="button" disabled>
-          <AppIcon name="create_new_folder" />
-          <span>New Folder</span>
-        </button>
-      </footer>
-    </div>
+  <FileWorkspaceSourcePane domain="pdf" :overlay-open="isDirectoryTreeOpen">
+    <template #overlay>
+      <div
+        ref="directoryOverlay"
+        class="pdfmgmt-directory-overlay"
+        :class="{ open: isDirectoryTreeOpen }"
+        role="dialog"
+        aria-label="Directory Tree"
+        aria-modal="true"
+        :aria-hidden="!isDirectoryTreeOpen"
+        :tabindex="isDirectoryTreeOpen ? 0 : -1"
+      >
+        <header class="pdfmgmt-directory-overlay-header">
+          <strong>Directory Tree</strong>
+          <button type="button" aria-label="Close directory tree" @click="closeDirectoryTree()">
+            <AppIcon name="close" />
+          </button>
+        </header>
+        <PdfManagementDirectoryTree
+          :files="directoryFiles"
+          :selected-scope-id="selectedScopeId"
+          :selected-file-id="selectedFileId"
+          @select-scope="handleDirectoryScopeSelect"
+          @select-file="handleDirectoryFileSelect"
+        />
+        <footer class="pdfmgmt-directory-overlay-footer">
+          <span>Quick Actions</span>
+          <button type="button" disabled>
+            <AppIcon name="create_new_folder" />
+            <span>New Folder</span>
+          </button>
+        </footer>
+      </div>
+    </template>
 
-    <div
-      class="pdfmgmt-file-scroll file-list-panel"
-      :inert="isDirectoryTreeOpen ? true : undefined"
-    >
+    <template #header>
       <div class="pdfmgmt-breadcrumb-row panel-heading">
         <div class="pdfmgmt-breadcrumb-group">
           <nav aria-label="Knowledge path">
@@ -340,9 +359,11 @@ onBeforeUnmount(() => {
             <AppIcon name="account_tree" />
           </button>
         </div>
-        <span class="pdfmgmt-count-pill">{{ totalFileCount }} Items Found</span>
+        <span class="pdfmgmt-count-pill">{{ countLabel }}</span>
       </div>
+    </template>
 
+    <template #upload>
       <button
         v-if="isAdmin"
         type="button"
@@ -354,13 +375,17 @@ onBeforeUnmount(() => {
           <AppIcon name="upload_file" />
         </span>
         <span>
-          <strong>{{ isUploading ? 'Preparing upload tasks...' : 'Choose PDF files to upload' }}</strong>
-          <small>Uploads to {{ scopeBreadcrumbs.at(-1)?.label ?? 'Knowledge Base' }} / Max 50MB per PDF</small>
+          <strong>{{ isUploading ? copy.uploadPendingTitle : copy.uploadTitle }}</strong>
+          <small>{{ uploadDescription }}</small>
         </span>
       </button>
+    </template>
 
+    <template #status>
       <p v-if="errorMessage" class="pdfmgmt-inline-error">{{ errorMessage }}</p>
+    </template>
 
+    <template #list>
       <div class="pdfmgmt-file-table" role="list" aria-label="Knowledge files">
         <div v-if="files.length > 0" class="pdfmgmt-file-header" aria-hidden="true">
           <span>Type</span>
@@ -377,8 +402,8 @@ onBeforeUnmount(() => {
 
         <div v-else-if="files.length === 0" class="pdfmgmt-file-empty">
           <AppIcon name="folder_open" />
-          <strong>No files match this view</strong>
-          <span>Upload a folder or adjust the search term.</span>
+          <strong>{{ emptyState.title }}</strong>
+          <span>{{ emptyState.detail }}</span>
         </div>
 
         <article
@@ -476,7 +501,9 @@ onBeforeUnmount(() => {
           </button>
         </article>
       </div>
+    </template>
 
+    <template #pagination>
       <div class="pdfmgmt-pagination file-pagination">
         <button
           type="button"
@@ -485,7 +512,7 @@ onBeforeUnmount(() => {
           @click="emit('pageStep', -1)"
         >
           <AppIcon name="chevron_left" />
-          Prev
+          Previous
         </button>
         <div class="pagination-pages">
           <button
@@ -508,6 +535,6 @@ onBeforeUnmount(() => {
           <AppIcon name="chevron_right" />
         </button>
       </div>
-    </div>
-  </section>
+    </template>
+  </FileWorkspaceSourcePane>
 </template>

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import FileWorkspaceLayout from '../../../components/file-workspace/FileWorkspaceLayout.vue'
+import { fileLibraryCopy } from '../../file-library/domain-presentation'
 import { usePdfDocumentInsight } from '../composables/use-pdf-document-insight'
 import { usePdfKnowledgeLibrary } from '../composables/use-pdf-knowledge-library'
 import type { PdfManagedFile, PdfManagementFocusTarget } from '../types'
@@ -151,9 +152,11 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
 
 <template>
   <FileWorkspaceLayout
-    title="PDF Workspace"
-    search-label="Search PDF knowledge base"
-    search-placeholder="Search knowledge base..."
+    class="pdfmgmt"
+    domain="pdf"
+    :title="fileLibraryCopy.pdf.workspaceTitle"
+    :search-label="fileLibraryCopy.pdf.searchLabel"
+    :search-placeholder="fileLibraryCopy.pdf.searchPlaceholder"
     :is-admin="isAdmin"
     :search-term="library.searchTerm.value"
     @search-term-change="library.setSearchTerm"
@@ -178,8 +181,7 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
       </button>
     </template>
 
-    <section class="pdfmgmt pdfmgmt-embedded">
-      <main class="pdfmgmt-main">
+    <template #source>
         <PdfManagementFilePane
           :is-admin="isAdmin"
           :files="library.paginatedFiles.value"
@@ -195,6 +197,7 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           :is-uploading="library.isUploading.value"
           :is-loading="library.isLoading.value"
           :error-message="library.errorMessage.value"
+          :search-term="library.searchTerm.value"
           @select-file="library.selectFile"
           @select-scope="library.selectScope"
           @open-scope="library.openScope"
@@ -205,6 +208,9 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           @page-change="library.setFilePage"
           @page-step="library.stepFilePage"
         />
+    </template>
+
+    <template #insight>
         <PdfManagementInsightPane
           :is-admin="isAdmin"
           :active-tab="insight.activeTab.value"
@@ -226,14 +232,15 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           @retry-summary-task="insight.retrySummaryTask"
           @model-setting-change="insight.updateModelPreference"
         />
-      </main>
+    </template>
 
+    <template #overlay>
       <input
         ref="fileInput"
         class="pdfmgmt-file-input"
         type="file"
         accept=".pdf,application/pdf"
-        aria-label="Choose PDF files"
+        :aria-label="fileLibraryCopy.pdf.uploadTitle"
         multiple
         @change="handleUploadInputChange"
       />
@@ -291,6 +298,6 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           </div>
         </div>
       </section>
-    </section>
+    </template>
   </FileWorkspaceLayout>
 </template>

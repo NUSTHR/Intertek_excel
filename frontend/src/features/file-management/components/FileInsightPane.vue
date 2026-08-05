@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import AppIcon from '../../../components/AppIcon.vue'
+import FileWorkspaceInsightPane from '../../../components/file-workspace/FileWorkspaceInsightPane.vue'
 
 import type { FileInsightTab } from '../../../app/workspace-types'
 
@@ -23,8 +24,8 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section class="file-insight-pane" :class="{ fullscreen }">
-    <div class="file-insight-tabs">
+  <FileWorkspaceInsightPane domain="excel" :fullscreen="fullscreen">
+    <template #tabs>
       <button
         v-for="tab in tabs"
         :key="tab.key"
@@ -35,7 +36,9 @@ const emit = defineEmits<{
       >
         {{ tab.label }}
       </button>
-      <div class="file-insight-tools">
+    </template>
+
+    <template #actions>
         <button
           type="button"
           class="icon-only-button"
@@ -53,12 +56,10 @@ const emit = defineEmits<{
         >
           <AppIcon :name="fullscreen ? 'fullscreen_exit' : 'fullscreen'" />
         </button>
-      </div>
-    </div>
-    <div class="file-insight-scroll">
-      <slot v-if="activeTab === 'summary'" name="summary"></slot>
-      <slot v-else-if="activeTab === 'preview'" name="preview"></slot>
-      <slot v-else name="schema"></slot>
-    </div>
-  </section>
+    </template>
+
+    <slot v-if="activeTab === 'summary'" name="summary"></slot>
+    <slot v-else-if="activeTab === 'preview'" name="preview"></slot>
+    <slot v-else name="schema"></slot>
+  </FileWorkspaceInsightPane>
 </template>

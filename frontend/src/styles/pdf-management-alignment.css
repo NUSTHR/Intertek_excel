@@ -8,22 +8,6 @@
   font-weight: 700;
 }
 
-.pdfmgmt-main {
-  grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
-  border-top: 0;
-  background: #fcf8fa;
-}
-
-.pdfmgmt-file-pane {
-  border-right: 1px solid #c6c6cd;
-  background: #fcf8fa;
-}
-
-.pdfmgmt-file-scroll {
-  padding: 24px;
-  background: #fcf8fa;
-}
-
 .pdfmgmt-directory-overlay {
   z-index: 30;
   border-right: 1px solid #c6c6cd;
@@ -598,17 +582,9 @@
     min-width: 0;
     grid-template-columns: 260px minmax(0, 1fr);
   }
-
-  .pdfmgmt-main {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 760px) {
-  .pdfmgmt-main {
-    border-top: 0;
-  }
-
   .pdfmgmt-model-row {
     grid-template-columns: minmax(0, 1fr);
   }

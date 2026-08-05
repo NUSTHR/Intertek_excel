@@ -1,0 +1,347 @@
+/*
+ * Shared structural contract for Excel and PDF file workspaces.
+ * Domain styles may decorate content inside these regions, but must not own
+ * their grid, height, padding, or scroll behavior.
+ */
+
+.file-workspace-layout {
+  display: grid;
+  grid-template-rows: 64px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.file-workspace-layout.pdfmgmt {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.file-workspace-topbar.file-topbar {
+  grid-row: 1;
+  min-width: 0;
+  height: 64px;
+}
+
+.file-workspace-content {
+  display: grid;
+  grid-row: 2;
+  grid-template-columns: minmax(360px, 0.82fr) minmax(560px, 1.18fr);
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid #e2e8f0;
+}
+
+.file-workspace-source-pane,
+.file-workspace-insight-pane {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.file-workspace-source-pane.file-sources-pane {
+  display: block;
+  gap: 0;
+  padding: 0;
+  border-right: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.file-workspace-insight-pane {
+  background: #f8fafc;
+}
+
+.file-workspace-source-content {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.file-workspace-source-main {
+  display: grid;
+  grid-template-areas:
+    'header'
+    'upload'
+    'status'
+    'list'
+    'pagination';
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 16px;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 24px;
+  background: #ffffff;
+}
+
+.file-workspace-source-header,
+.file-workspace-source-upload,
+.file-workspace-source-status,
+.file-workspace-source-pagination {
+  min-width: 0;
+}
+
+.file-workspace-source-upload:empty,
+.file-workspace-source-status:empty,
+.file-workspace-source-pagination:empty {
+  display: none;
+}
+
+.file-workspace-source-header {
+  grid-area: header;
+}
+
+.file-workspace-source-upload {
+  grid-area: upload;
+}
+
+.file-workspace-source-status {
+  grid-area: status;
+}
+
+.file-workspace-source-list {
+  grid-area: list;
+}
+
+.file-workspace-source-pagination {
+  grid-area: pagination;
+}
+
+.file-workspace-source-header .panel-heading,
+.file-workspace-source-header .pdfmgmt-breadcrumb-row {
+  min-height: 28px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.file-workspace-source-header .panel-heading h3 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 800;
+}
+
+.file-workspace-source-header .files-found-label,
+.file-workspace-source-header .pdfmgmt-count-pill {
+  color: #475569;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.file-workspace-source-upload .file-upload-zone,
+.file-workspace-source-upload .pdfmgmt-dropzone.file-upload-zone {
+  width: 100%;
+  height: 154px;
+  min-height: 154px;
+  max-height: 154px;
+  margin: 0;
+}
+
+.file-workspace-source-list {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  outline: none;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+.file-workspace-source-list:focus-visible {
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 2px rgb(15 118 110 / 0.28);
+}
+
+.file-workspace-source-list > .file-card-list,
+.file-workspace-source-list > .pdfmgmt-file-table {
+  display: grid;
+  align-content: start;
+  grid-auto-rows: min-content;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  overflow: visible;
+  padding: 0 6px 0 0;
+}
+
+.file-workspace-layout .file-workspace-source-list .file-library-card {
+  min-height: 78px;
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.file-workspace-layout .file-workspace-source-list .file-empty-panel,
+.file-workspace-layout .file-workspace-source-list .pdfmgmt-file-empty {
+  min-height: 104px;
+}
+
+.file-workspace-source-pagination {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 16px;
+  background: #ffffff;
+}
+
+.file-workspace-source-pagination > .file-pagination,
+.file-workspace-source-pagination > .pdfmgmt-pagination.file-pagination {
+  position: static;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.file-workspace-insight-content.file-insight-pane,
+.file-workspace-insight-content.pdfmgmt-insight-pane {
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.file-workspace-insight-tabs.file-insight-tabs,
+.file-workspace-insight-tabs.pdfmgmt-insight-tabs {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 52px;
+  min-height: 52px;
+  margin: 0;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0 22px;
+  background: #ffffff;
+}
+
+.file-workspace-insight-tab-list {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.file-workspace-insight-tab-list > button {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  border-radius: 0;
+  padding: 0 16px;
+}
+
+.file-workspace-insight-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.file-workspace-insight-tools .pdfmgmt-insight-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-workspace-insight-scroll.file-insight-scroll,
+.file-workspace-insight-scroll.pdfmgmt-insight-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  overflow: auto;
+  padding: 20px 22px 24px;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+@media (max-width: 960px) {
+  .excelai-app.workspace-shell:not(.chat-mode) {
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .file-workspace-content {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(520px, 1fr) minmax(620px, 1.2fr);
+    overflow-y: auto;
+  }
+
+  .file-workspace-source-pane.file-sources-pane {
+    min-height: 520px;
+    border-right: 0;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .file-workspace-insight-pane {
+    min-height: 620px;
+  }
+}
+
+@media (max-width: 760px) {
+  .file-workspace-topbar.file-topbar {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    min-height: 64px;
+    padding: 0 16px;
+  }
+
+  .file-workspace-topbar .file-search-field {
+    min-width: 0;
+    width: min(360px, 55vw);
+  }
+
+  .file-workspace-source-main {
+    padding: 18px 16px;
+  }
+
+  .file-workspace-insight-tabs.file-insight-tabs,
+  .file-workspace-insight-tabs.pdfmgmt-insight-tabs {
+    overflow-x: auto;
+    padding: 0 12px;
+  }
+
+  .file-workspace-insight-tab-list > button {
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+
+  .file-workspace-insight-scroll.file-insight-scroll,
+  .file-workspace-insight-scroll.pdfmgmt-insight-scroll {
+    padding: 16px;
+  }
+}

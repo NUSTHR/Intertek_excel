@@ -59,20 +59,6 @@
   margin: 0;
 }
 
-.pdfmgmt-file-pane.file-sources-pane {
-  gap: 0;
-  padding: 24px;
-}
-
-.pdfmgmt-file-pane.file-sources-pane .pdfmgmt-file-table {
-  flex-shrink: 0;
-}
-
-.pdfmgmt-file-scroll.file-list-panel {
-  gap: 16px;
-  padding: 0;
-}
-
 .pdfmgmt .pdfmgmt-dropzone.file-upload-zone {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -249,11 +235,6 @@
     grid-row: auto;
     height: auto;
     padding: 14px 18px;
-  }
-
-  .pdfmgmt-main {
-    grid-row: auto;
-    min-width: 0;
   }
 
   .pdfmgmt .pdfmgmt-file-row.file-library-card {

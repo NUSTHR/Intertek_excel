@@ -241,30 +241,6 @@
   background: #f1f5f9;
 }
 
-.pdfmgmt-main {
-  grid-template-columns: minmax(380px, 0.82fr) minmax(560px, 1.18fr);
-  border-top: 1px solid #e2e8f0;
-  background: #f8fafc;
-}
-
-.pdfmgmt-file-pane {
-  border-color: #e2e8f0;
-  background: #ffffff;
-}
-
-.pdfmgmt-insight-pane {
-  background: #f8fafc;
-}
-
-.pdfmgmt-file-scroll {
-  padding: 24px;
-}
-
-.pdfmgmt-insight-scroll {
-  gap: 16px;
-  padding: 20px 22px 24px;
-}
-
 .pdfmgmt-breadcrumb-row {
   margin-bottom: 16px;
   border-bottom: 0;

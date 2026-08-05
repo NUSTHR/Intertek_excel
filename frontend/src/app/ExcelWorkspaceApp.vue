@@ -36,6 +36,10 @@ import {
   useUploadTaskPolling,
   type FileSchemaColumn,
 } from '../features/file-management'
+import {
+  fileLibraryCopy,
+  formatExcelUploadDescription,
+} from '../features/file-library/domain-presentation'
 import { PdfKnowledgeWorkspace, PdfParseDiagnosticsPage } from '../features/pdf-knowledge'
 import GlobalWorkspaceSidebar from './shell/GlobalWorkspaceSidebar.vue'
 import { useTransientFeedback } from './use-transient-feedback'
@@ -367,7 +371,10 @@ const sheetSearchSummary = computed(() => {
 const uploadAcceptValue = computed(() => buildUploadAcceptValue(uploadAllowedExtensions.value))
 
 const uploadHelpText = computed(() => {
-  return `Supports ${formatSupportedExtensions(uploadAllowedExtensions.value)} (Max ${formatBytes(uploadMaxBytes.value)})`
+  return formatExcelUploadDescription(
+    uploadAllowedExtensions.value,
+    formatBytes(uploadMaxBytes.value),
+  )
 })
 
 const schemaColumns = computed<FileSchemaColumn[]>(() => {
@@ -1737,10 +1744,11 @@ function getGridCellValue(row: string[], columnIndex: number): string {
 
       <FileWorkspaceLayout
         v-if="activeView === 'excel-files'"
-        title="Excel Workspace"
+        domain="excel"
+        :title="fileLibraryCopy.excel.workspaceTitle"
         :search-term="fileSearchTerm"
-        search-label="Search files"
-        search-placeholder="Search files..."
+        :search-label="fileLibraryCopy.excel.searchLabel"
+        :search-placeholder="fileLibraryCopy.excel.searchPlaceholder"
         :is-admin="isAdmin"
         @search-term-change="fileSearchTerm = $event"
       >
@@ -1764,9 +1772,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
           </button>
         </template>
 
-        <section class="file-page">
-        <div class="file-management-shell">
-          <section class="file-sources-pane">
+        <template #source>
             <FileSourcePanel
               :current-page="normalizedFilePage"
               :disabled="isWorkspaceBusy || blocksWorkspaceMutation"
@@ -1791,8 +1797,9 @@ function getGridCellValue(row: string[], columnIndex: number): string {
               @toggle-visibility="toggleFileVisibility"
               @upload-selected="handleUploadFileSelected"
             />
-          </section>
+        </template>
 
+        <template #insight>
           <FileInsightPane
             :active-tab="activeFileInsightTab"
             :fullscreen="isFileInsightFullscreen"
@@ -1872,8 +1879,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
               />
             </template>
           </FileInsightPane>
-        </div>
-        </section>
+        </template>
       </FileWorkspaceLayout>
 
       <section

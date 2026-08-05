@@ -26,6 +26,9 @@
 
 - Reuse existing visual language before adding new patterns: white cards, subtle borders, compact section headers, restrained shadows, and stable grid dimensions.
 - Keep file-management inspection surfaces visually aligned: Summary, Data Preview, and Schema should use the same card density, header treatment, metrics, and list row styling.
+- Build every file-management page through `FileWorkspaceLayout`, `FileWorkspaceSourcePane`, and `FileWorkspaceInsightPane`. The shared components own the topbar, columns, pane padding, fixed rows, and scroll boundaries; domain components only supply content and events through slots.
+- Keep file-workspace geometry in `frontend/src/styles/file-workspace-template.css`. Excel/PDF styles may decorate domain content, but must not override the shared layout's `display`, grid tracks, height, structural padding, or overflow.
+- Keep pagination outside the file-list scroll region. The source pane reserves explicit grid areas for header, upload, status, list, and pagination so optional content cannot move later rows.
 - Keep controls explicit and close to the data they affect. Provider/model selectors save workspace preferences; chat history loads by active session.
 - Avoid global CSS changes when a narrower file-workspace override can satisfy the request.
 
@@ -34,4 +37,5 @@
 - Backend persistence changes require repository/API tests for migration, write, read, and compatibility behavior.
 - Chat changes must test both real-time answer responses and history reload responses.
 - Frontend changes must pass `vue-tsc` and production build checks.
+- File-workspace changes must verify Excel/PDF pane geometry at the same viewport and confirm that only the source list and insight content scroll.
 - After each completed task round, restart backend and frontend dev servers so the latest behavior is available for manual inspection.

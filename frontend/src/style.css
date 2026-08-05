@@ -654,18 +654,9 @@ h3 {
   top: 28px;
 }
 
-.file-page,
 .analysis-page {
   min-height: 0;
   overflow: auto;
-}
-
-.file-page {
-  display: grid;
-  gap: 20px;
-  width: min(1080px, 100%);
-  margin: 0 auto;
-  padding: 24px 32px 32px;
 }
 
 .file-table-card,

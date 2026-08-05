@@ -2092,39 +2092,6 @@
   box-shadow: 0 0 0 1px var(--pdfmgmt-border);
 }
 
-.pdfmgmt-main {
-  display: grid;
-  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.pdfmgmt-file-pane,
-.pdfmgmt-insight-pane {
-  min-width: 0;
-  min-height: 0;
-}
-
-.pdfmgmt-file-pane {
-  position: relative;
-  overflow: hidden;
-  border-right: 1px solid var(--pdfmgmt-border);
-  background: var(--pdfmgmt-surface);
-}
-
-.pdfmgmt-file-scroll,
-.pdfmgmt-insight-scroll {
-  height: 100%;
-  overflow: auto;
-}
-
-.pdfmgmt-file-scroll {
-  display: flex;
-  flex-direction: column;
-  padding: 24px 28px 22px;
-}
-
 .pdfmgmt-breadcrumb-row {
   display: flex;
   align-items: center;
@@ -3417,26 +3384,6 @@
     padding-inline: 18px;
   }
 
-  .pdfmgmt-main {
-    grid-template-columns: minmax(0, 1fr);
-    overflow: auto;
-  }
-
-  .pdfmgmt-file-pane,
-  .pdfmgmt-insight-pane {
-    min-height: 620px;
-  }
-
-  .pdfmgmt-file-pane {
-    border-right: 0;
-    border-bottom: 1px solid var(--pdfmgmt-border);
-  }
-
-  .pdfmgmt-file-scroll,
-  .pdfmgmt-insight-scroll {
-    height: auto;
-    overflow: visible;
-  }
 }
 
 @media (max-width: 760px) {
@@ -3495,15 +3442,6 @@
 
   .pdfmgmt-topbar-meta > strong {
     margin-right: auto;
-  }
-
-  .pdfmgmt-main {
-    grid-row: auto;
-  }
-
-  .pdfmgmt-file-scroll,
-  .pdfmgmt-insight-scroll {
-    padding: 18px;
   }
 
   .pdfmgmt-breadcrumb-row {

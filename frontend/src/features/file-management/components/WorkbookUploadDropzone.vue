@@ -6,6 +6,7 @@ import AppIcon from '../../../components/AppIcon.vue'
 const props = defineProps<{
   accept: string
   disabled: boolean
+  title: string
   helpText: string
 }>()
 
@@ -85,7 +86,7 @@ function handleDrop(event: DragEvent): void {
     <span class="file-upload-icon">
       <AppIcon name="upload_file" />
     </span>
-    <strong>Click or drag files to upload</strong>
+    <strong>{{ title }}</strong>
     <span>{{ helpText }}</span>
   </button>
 </template>
