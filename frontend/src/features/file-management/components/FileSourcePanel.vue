@@ -140,7 +140,7 @@ function handleAction(model: BaseFileRowViewModel, action: FileActionId): void {
         :is-disabled="disabled"
         :max-size-bytes="uploadMaxBytes"
         :prompt-label="copy.uploadTitle"
-        @files-selected="emit('uploadSelected', $event[0] ?? null)"
+        @files-selected="emit('uploadSelected', $event[0]?.file ?? null)"
         @validation-error="emit('uploadValidationError', $event)"
       />
     </template>

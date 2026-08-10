@@ -1,4 +1,5 @@
 import type { FileDomain } from './file-card-contract'
+import type { FileUploadSelection } from '../../types/file-upload'
 
 export interface BaseDropzoneProps {
   accept: string
@@ -8,10 +9,13 @@ export interface BaseDropzoneProps {
   maxSizeBytes: number
   domain: FileDomain
   promptLabel: string
+  fileActionLabel?: string
+  allowDirectories?: boolean
+  directoryLabel?: string
 }
 
 export interface BaseDropzoneEmits {
-  filesSelected: [files: File[]]
+  filesSelected: [selections: FileUploadSelection[]]
   validationError: [message: string]
   pickerOpened: []
 }

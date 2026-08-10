@@ -28,6 +28,7 @@ import type {
   PdfManagedFileKind,
   PdfManagedFileStatus,
 } from '../types'
+import type { FileUploadSelection } from '../../../types/file-upload'
 import PdfManagementDirectoryTree from './PdfManagementDirectoryTree.vue'
 
 const props = defineProps<{
@@ -44,6 +45,7 @@ const props = defineProps<{
   visiblePages: number[]
   isUploading: boolean
   isLoading: boolean
+  loadErrorMessage: string
   errorMessage: string
   searchTerm: string
 }>()
@@ -52,7 +54,7 @@ const emit = defineEmits<{
   selectFile: [file: PdfManagedFile]
   selectScope: [scopeId: string]
   openScope: [scopeId: string]
-  uploadFiles: [files: File[]]
+  uploadFiles: [selections: FileUploadSelection[]]
   uploadValidationError: [message: string]
   renameFile: [file: PdfManagedFile]
   toggleVisibility: [file: PdfManagedFile]
@@ -75,7 +77,7 @@ const uploadDescription = computed(() => formatPdfUploadDescription(
   '50 MB',
 ))
 const fatalError = computed(() => !props.isLoading && props.files.length === 0
-  ? props.errorMessage
+  ? props.loadErrorMessage
   : '')
 const paginationModel = computed(() => buildFilePaginationViewModel({
   totalCount: props.totalFileCount,
@@ -288,6 +290,8 @@ onBeforeUnmount(() => {
         domain="pdf"
         accept=".pdf,application/pdf"
         multiple
+        allow-directories
+        directory-label="Choose folder"
         :help-text="uploadDescription"
         :is-disabled="isUploading"
         :max-size-bytes="pdfMaxUploadBytes"

@@ -52,6 +52,10 @@ const fileWorkspaceTemplateStyleSource = readFileSync(
   new URL('../src/styles/file-workspace-template.css', import.meta.url),
   'utf8',
 )
+const pdfKnowledgeStyleSource = readFileSync(
+  new URL('../src/styles/pdf-knowledge.css', import.meta.url),
+  'utf8',
+)
 const excelFileSourcePanelSource = readFileSync(
   new URL(
     '../src/features/file-management/components/FileSourcePanel.vue',
@@ -221,6 +225,19 @@ test('legacy styles no longer own file-workspace geometry', () => {
     assert.equal(source.includes('.pdfmgmt-file-pane'), false)
     assert.equal(source.includes('.pdfmgmt-file-scroll'), false)
   }
+})
+
+test('legacy PDF control resets stay below shared component styles', () => {
+  assert.ok(pdfKnowledgeStyleSource.includes('.pdfmgmt :where(button, input, select)'))
+  assert.ok(pdfKnowledgeStyleSource.includes('.pdfmgmt :where(button)'))
+  assert.equal(
+    pdfKnowledgeStyleSource.includes('.pdfmgmt button,\n.pdfmgmt input,\n.pdfmgmt select'),
+    false,
+  )
+  assert.equal(
+    pdfKnowledgeStyleSource.includes('.pdfmgmt button {\n  border: 0;'),
+    false,
+  )
 })
 
 test('Excel and PDF file topbars expose the same compact actions', () => {

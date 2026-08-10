@@ -18,6 +18,7 @@ import { sortPdfFilesByNewest } from '../utils/pdf-file-order'
 import { usePdfTaskPolling } from './use-pdf-task-polling'
 import { FILE_WORKSPACE_PAGE_SIZE } from '../../../shared/file-workspace/file-pagination-contract'
 import { PDF_FILES_ROOT_LABEL } from '../../file-library/domain-presentation'
+import type { FileUploadSelection } from '../../../types/file-upload'
 
 const pdfFilePageSize = FILE_WORKSPACE_PAGE_SIZE
 
@@ -37,6 +38,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
   const filePage = ref<number>(1)
   const isLoading = ref<boolean>(false)
   const isUploading = ref<boolean>(false)
+  const loadErrorMessage = ref<string>('')
   const errorMessage = ref<string>('')
   let focusedUploadFileId = ''
   let navigationRevision = 0
@@ -139,6 +141,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
 
   async function loadLibrary(): Promise<void> {
     isLoading.value = true
+    loadErrorMessage.value = ''
     errorMessage.value = ''
     try {
       await refreshFilesAndTasks()
@@ -154,21 +157,23 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
       syncSelectionWithCurrentView()
       startTaskPollingIfNeeded()
     } catch (error: unknown) {
-      errorMessage.value = toErrorMessage(error)
+      const message = toErrorMessage(error)
+      loadErrorMessage.value = message
+      errorMessage.value = message
     } finally {
       isLoading.value = false
     }
   }
 
-  async function uploadFiles(nextFiles: File[]): Promise<void> {
-    if (nextFiles.length === 0) {
+  async function uploadFiles(selections: FileUploadSelection[]): Promise<void> {
+    if (selections.length === 0) {
       return
     }
     const targetScopeId = selectedScopeId.value
     isUploading.value = true
     errorMessage.value = ''
     try {
-      const result = await createPdfUploadTask(nextFiles, targetScopeId || undefined)
+      const result = await createPdfUploadTask(selections, targetScopeId || undefined)
       if (result.batch) {
         uploadBatches.value = [result.batch, ...uploadBatches.value]
       }
@@ -525,6 +530,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
     uploadTaskSummary,
     isLoading,
     isUploading,
+    loadErrorMessage,
     errorMessage,
     loadLibrary,
     uploadFiles,

@@ -435,10 +435,12 @@
 /* Dropzone primitive ----------------------------------------------------- */
 
 .file-workspace-base-dropzone {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  column-gap: 14px;
+  row-gap: 12px;
   width: 100%;
   height: 154px;
   padding: 20px;
@@ -446,12 +448,31 @@
   border-radius: 12px;
   background: var(--file-workspace-surface, #ffffff);
   color: var(--file-workspace-text, #0f172a);
-  text-align: left;
-  cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease;
 }
 
+.file-workspace-base-dropzone-main,
+.file-workspace-base-dropzone-directory {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 116px;
+  min-height: 32px;
+  border-radius: 8px;
+  padding: 6px 11px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
 .file-workspace-base-dropzone-icon {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  align-self: start;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -469,6 +490,8 @@
 }
 
 .file-workspace-base-dropzone-copy {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -481,14 +504,72 @@
   line-height: 20px;
 }
 
+.file-workspace-base-dropzone-actions {
+  grid-column: 2;
+  grid-row: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  width: max-content;
+  max-width: 100%;
+  gap: 8px;
+}
+
 .file-workspace-base-dropzone[data-dragging="true"] {
   background: var(--file-workspace-accent-soft, #f1f5f9);
   border-color: var(--file-workspace-accent, #0f172a);
 }
 
-.file-workspace-base-dropzone:disabled {
-  cursor: not-allowed;
+.file-workspace-base-dropzone[data-disabled="true"] {
   opacity: 0.5;
+}
+
+.file-workspace-base-dropzone-main:disabled,
+.file-workspace-base-dropzone-directory:disabled {
+  cursor: not-allowed;
+}
+
+.file-workspace-base-dropzone-main:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--file-workspace-accent) 28%, transparent);
+  outline-offset: 2px;
+}
+
+.file-workspace-base-dropzone-main,
+.file-workspace-base-dropzone-directory {
+  border: 1px solid var(--file-workspace-accent);
+  border-radius: 8px;
+  background: var(--file-workspace-accent);
+  color: var(--file-workspace-accent-on);
+}
+
+.file-workspace-base-dropzone-main:hover:not(:disabled),
+.file-workspace-base-dropzone-directory:hover:not(:disabled) {
+  background: var(--file-workspace-accent-strong);
+  color: var(--file-workspace-accent-on);
+}
+
+.file-workspace-base-dropzone-main .app-icon,
+.file-workspace-base-dropzone-directory .app-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.file-workspace-base-dropzone-directory:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--file-workspace-accent) 28%, transparent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 420px) {
+  .file-workspace-base-dropzone {
+    grid-template-columns: 40px minmax(0, 1fr);
+    column-gap: 11px;
+    padding: 16px;
+  }
+
+  .file-workspace-base-dropzone-icon {
+    width: 40px;
+    height: 40px;
+  }
 }
 
 .file-workspace-base-dropzone-help {

@@ -38,6 +38,8 @@ import type {
   PdfUploadTask,
   PdfUploadTaskStatus,
 } from '../features/pdf-knowledge/types'
+import type { FileUploadSelection } from '../types/file-upload'
+import { buildPdfUploadFormData } from './pdf-upload-form-data'
 
 interface PdfFileResponse {
   file_id: string
@@ -511,16 +513,10 @@ export async function getPdfUploadBatch(batchId: string): Promise<PdfUploadCreat
 }
 
 export async function createPdfUploadTask(
-  files: File[],
+  selections: FileUploadSelection[],
   parentId?: string,
 ): Promise<PdfUploadCreationResult> {
-  const body = new FormData()
-  if (parentId?.trim()) {
-    body.append('parent_id', parentId.trim())
-  }
-  files.forEach((file) => {
-    body.append('files', file, uploadPathForFile(file))
-  })
+  const body = buildPdfUploadFormData(selections, parentId)
   const response = await requestJson<CreatePdfUploadTasksResponse>(
     '/api/pdf/files/upload-tasks',
     {
@@ -1042,11 +1038,6 @@ function toParserProfile(profile: PdfParserProfileResponse): PdfParserProfile {
     isDefault: profile.is_default,
     isSelected: profile.is_selected,
   }
-}
-
-function uploadPathForFile(file: File): string {
-  const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath
-  return relativePath?.trim() || file.name
 }
 
 function toUploadTask(task: PdfUploadTaskResponse): PdfUploadTask {

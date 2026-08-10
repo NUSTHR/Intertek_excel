@@ -1610,24 +1610,20 @@
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.pdfmgmt button,
-.pdfmgmt input,
-.pdfmgmt select {
+.pdfmgmt :where(button, input, select) {
   font: inherit;
 }
 
-.pdfmgmt button {
+.pdfmgmt :where(button) {
   border: 0;
 }
 
-.pdfmgmt button:disabled {
+.pdfmgmt :where(button:disabled) {
   cursor: not-allowed;
   opacity: 0.55;
 }
 
-.pdfmgmt button:focus-visible,
-.pdfmgmt input:focus-visible,
-.pdfmgmt select:focus-visible {
+.pdfmgmt :where(button:focus-visible, input:focus-visible, select:focus-visible) {
   outline: 0;
   box-shadow: 0 0 0 3px rgb(15 23 42 / 0.12);
 }

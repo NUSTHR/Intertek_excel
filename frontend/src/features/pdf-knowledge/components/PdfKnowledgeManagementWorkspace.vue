@@ -8,6 +8,7 @@ import { fileLibraryCopy } from '../../file-library/domain-presentation'
 import { usePdfDocumentInsight } from '../composables/use-pdf-document-insight'
 import { usePdfKnowledgeLibrary } from '../composables/use-pdf-knowledge-library'
 import type { PdfManagedFile, PdfManagementFocusTarget } from '../types'
+import type { FileUploadSelection } from '../../../types/file-upload'
 import PdfManagementFilePane from './PdfManagementFilePane.vue'
 import PdfManagementInsightPane from './PdfManagementInsightPane.vue'
 
@@ -91,8 +92,8 @@ function applyFocusTarget(): void {
   }
 }
 
-function handleUploadFiles(files: File[]): void {
-  void library.uploadFiles(files)
+function handleUploadFiles(selections: FileUploadSelection[]): void {
+  void library.uploadFiles(selections)
 }
 
 function handleUploadValidationError(message: string): void {
@@ -224,6 +225,7 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           :visible-pages="library.visibleFilePages.value"
           :is-uploading="library.isUploading.value"
           :is-loading="library.isLoading.value"
+          :load-error-message="library.loadErrorMessage.value"
           :error-message="library.errorMessage.value"
           :search-term="library.searchTerm.value"
           @select-file="library.selectFile"

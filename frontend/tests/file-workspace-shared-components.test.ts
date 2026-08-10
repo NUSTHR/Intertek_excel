@@ -21,6 +21,10 @@ const sharedSummaryCard = source(
 const sharedPagination = source(
   '../src/shared/file-workspace/components/BaseFilePagination.vue',
 )
+const sharedDropzone = source(
+  '../src/shared/file-workspace/components/BaseFileDropzone.vue',
+)
+const pdfUploadFormData = source('../src/api/pdf-upload-form-data.ts')
 const pdfManagement = source('../src/features/pdf-knowledge/components/PdfKnowledgeManagementWorkspace.vue')
 const excelDialogs = source('../src/components/WorkspaceDialogs.vue')
 const pdfLibrary = source('../src/features/pdf-knowledge/composables/use-pdf-knowledge-library.ts')
@@ -90,6 +94,16 @@ test('empty file libraries do not invent a page-one control', () => {
   assert.equal(excelFiles.includes('props.visiblePages : [1]'), false)
   assert.equal(pdfFiles.includes('props.visiblePages : [1]'), false)
   assert.ok(sharedPagination.includes('model.showNavigation'))
+})
+
+test('PDF restores folder upload without changing the Excel upload contract', () => {
+  assert.ok(pdfFiles.includes('allow-directories'))
+  assert.equal(excelFiles.includes('allow-directories'), false)
+  assert.ok(sharedDropzone.includes('webkitdirectory'))
+  assert.ok(sharedDropzone.includes('collectDroppedEntry'))
+  assert.ok(pdfUploadFormData.includes('selection.relativePath'))
+  assert.ok(pdfLibrary.includes('loadErrorMessage'))
+  assert.ok(pdfFiles.includes('props.loadErrorMessage'))
 })
 
 test('shared design tokens and component styles are part of the application bundle', () => {

@@ -3,25 +3,56 @@ import { computed, ref } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import { matchesAccept, parseAccept, type AcceptClause } from '../file-accept'
+import { toFileUploadSelection } from '../file-upload-selection'
 import type {
   BaseDropzoneEmits,
   BaseDropzoneProps,
   DropzoneValidationError,
   DropzoneValidationErrorCode,
 } from '../file-dropzone-contract'
+import type { FileUploadSelection } from '../../../types/file-upload'
+
+interface DroppedFileSystemEntry {
+  isFile: boolean
+  isDirectory: boolean
+  name: string
+  file?: (
+    successCallback: (file: File) => void,
+    errorCallback?: (error: DOMException) => void,
+  ) => void
+  createReader?: () => DroppedDirectoryReader
+}
+
+interface DroppedDirectoryReader {
+  readEntries: (
+    successCallback: (entries: DroppedFileSystemEntry[]) => void,
+    errorCallback?: (error: DOMException) => void,
+  ) => void
+}
+
+type DataTransferItemWithEntry = DataTransferItem & {
+  webkitGetAsEntry?: () => DroppedFileSystemEntry | null
+}
 
 const props = withDefaults(defineProps<BaseDropzoneProps>(), {
   multiple: false,
   isDisabled: false,
   promptLabel: 'Upload',
+  fileActionLabel: '',
+  allowDirectories: false,
+  directoryLabel: 'Choose folder',
 })
 
 const emit = defineEmits<BaseDropzoneEmits>()
 
 const fileInput = ref<HTMLInputElement | null>(null)
+const directoryInput = ref<HTMLInputElement | null>(null)
 const isDragging = ref(false)
 
 const acceptList = computed<AcceptClause[]>(() => parseAccept(props.accept))
+const resolvedFileActionLabel = computed(() => (
+  props.fileActionLabel.trim() || (props.multiple ? 'Choose files' : 'Choose file')
+))
 
 const fileTypeMatcher = computed<(file: File) => boolean>(() => {
   const accepted = acceptList.value
@@ -31,7 +62,7 @@ const fileTypeMatcher = computed<(file: File) => boolean>(() => {
   return (file) => matchesAccept(file, accepted)
 })
 
-function openPicker(): void {
+function openFilePicker(): void {
   if (props.isDisabled) {
     return
   }
@@ -42,34 +73,50 @@ function openPicker(): void {
   fileInput.value?.click()
 }
 
-function emitFiles(files: File[]): void {
-  if (files.length === 0) {
+function openDirectoryPicker(): void {
+  if (props.isDisabled || !props.allowDirectories) {
     return
   }
-  if (!props.multiple && files.length > 1) {
+  if (isDragging.value) {
+    isDragging.value = false
+  }
+  emit('pickerOpened')
+  directoryInput.value?.click()
+}
+
+function emitSelections(selections: FileUploadSelection[]): void {
+  if (selections.length === 0) {
+    return
+  }
+  if (!props.multiple && selections.length > 1) {
     emit('validationError', 'Only one file can be uploaded at a time.')
     return
   }
-  const validated: File[] = []
-  let firstError: DropzoneValidationError | null = null
-  for (const file of files) {
-    const error = validateFile(file)
+  const validated: FileUploadSelection[] = []
+  const errors: DropzoneValidationError[] = []
+  for (const selection of selections) {
+    const error = validateFile(selection.file)
     if (error) {
-      if (!firstError) {
-        firstError = error
-      }
+      errors.push(error)
       continue
     }
-    validated.push(file)
+    validated.push(selection)
     if (!props.multiple) {
       break
     }
   }
-  if (firstError) {
-    emit('validationError', firstError.message)
+  if (validated.length === 0) {
+    emit('validationError', errors[0]?.message || 'No supported files were found.')
     return
   }
   emit('filesSelected', validated)
+  if (errors.length > 0) {
+    const noun = errors.length === 1 ? 'file was' : 'files were'
+    emit(
+      'validationError',
+      `${errors.length} ${noun} skipped. ${errors[0]?.message ?? ''}`.trim(),
+    )
+  }
 }
 
 function handleFileChange(event: Event): void {
@@ -77,7 +124,16 @@ function handleFileChange(event: Event): void {
   if (!(input instanceof HTMLInputElement)) {
     return
   }
-  emitFiles(Array.from(input.files ?? []))
+  emitSelections(Array.from(input.files ?? []).map((file) => toFileUploadSelection(file)))
+  input.value = ''
+}
+
+function handleDirectoryChange(event: Event): void {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement)) {
+    return
+  }
+  emitSelections(Array.from(input.files ?? []).map((file) => toFileUploadSelection(file)))
   input.value = ''
 }
 
@@ -108,7 +164,7 @@ function handleDragOver(event: DragEvent): void {
   event.preventDefault()
 }
 
-function handleDrop(event: DragEvent): void {
+async function handleDrop(event: DragEvent): Promise<void> {
   isDragging.value = false
   if (props.isDisabled) {
     return
@@ -118,30 +174,101 @@ function handleDrop(event: DragEvent): void {
   if (!transfer) {
     return
   }
-  // Prefer `items` so we can reliably resolve Folders vs Files in modern
-  // browsers; fall back to `files` otherwise.
-  const files = resolveDataTransferFiles(transfer)
-  emitFiles(files)
+  try {
+    const selections = await resolveDataTransferSelections(transfer)
+    if (selections.length === 0) {
+      emit(
+        'validationError',
+        props.allowDirectories
+          ? 'No supported files were found in the dropped items.'
+          : 'Folders cannot be uploaded here.',
+      )
+      return
+    }
+    emitSelections(selections)
+  } catch (error: unknown) {
+    emit(
+      'validationError',
+      error instanceof Error ? error.message : 'The dropped folder could not be read.',
+    )
+  }
 }
 
-function resolveDataTransferFiles(transfer: DataTransfer): File[] {
+async function resolveDataTransferSelections(
+  transfer: DataTransfer,
+): Promise<FileUploadSelection[]> {
   if (transfer.items && transfer.items.length > 0) {
-    const files: File[] = []
+    const selections: FileUploadSelection[] = []
     for (let index = 0; index < transfer.items.length; index += 1) {
       const item = transfer.items[index]
       if (item.kind !== 'file') {
         continue
       }
+      const entry = (item as DataTransferItemWithEntry).webkitGetAsEntry?.() ?? null
+      if (entry) {
+        if (entry.isDirectory && !props.allowDirectories) {
+          continue
+        }
+        selections.push(...await collectDroppedEntry(entry, ''))
+        continue
+      }
       const file = item.getAsFile()
       if (file) {
-        files.push(file)
+        selections.push(toFileUploadSelection(file))
       }
     }
-    if (files.length > 0) {
-      return files
+    if (selections.length > 0) {
+      return selections.sort((left, right) => left.relativePath.localeCompare(right.relativePath))
     }
   }
-  return Array.from(transfer.files ?? [])
+  return Array.from(transfer.files ?? []).map((file) => toFileUploadSelection(file))
+}
+
+async function collectDroppedEntry(
+  entry: DroppedFileSystemEntry,
+  parentPath: string,
+): Promise<FileUploadSelection[]> {
+  const relativePath = [parentPath, entry.name].filter(Boolean).join('/')
+  if (entry.isFile && entry.file) {
+    const file = await readDroppedFile(entry)
+    return [toFileUploadSelection(file, relativePath)]
+  }
+  if (!entry.isDirectory || !entry.createReader) {
+    return []
+  }
+
+  const children = await readAllDirectoryEntries(entry.createReader())
+  const nested = await Promise.all(
+    children.map((child) => collectDroppedEntry(child, relativePath)),
+  )
+  return nested.flat()
+}
+
+function readDroppedFile(entry: DroppedFileSystemEntry): Promise<File> {
+  return new Promise((resolve, reject) => {
+    entry.file?.(
+      resolve,
+      () => reject(new Error(`Could not read ${entry.name}.`)),
+    )
+  })
+}
+
+async function readAllDirectoryEntries(
+  reader: DroppedDirectoryReader,
+): Promise<DroppedFileSystemEntry[]> {
+  const entries: DroppedFileSystemEntry[] = []
+  while (true) {
+    const batch = await new Promise<DroppedFileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(
+        resolve,
+        () => reject(new Error('The dropped folder could not be read.')),
+      )
+    })
+    if (batch.length === 0) {
+      return entries
+    }
+    entries.push(...batch)
+  }
 }
 
 function validateFile(file: File): DropzoneValidationError | null {
@@ -185,13 +312,24 @@ function errorFor(
     :multiple="multiple"
     @change="handleFileChange"
   />
+  <input
+    v-if="allowDirectories"
+    ref="directoryInput"
+    hidden
+    type="file"
+    aria-hidden="true"
+    tabindex="-1"
+    :accept="accept"
+    multiple
+    webkitdirectory
+    @change="handleDirectoryChange"
+  />
 
-  <button
-    type="button"
+  <div
     class="file-workspace-base-dropzone"
     :data-dragging="isDragging"
-    :disabled="isDisabled"
-    @click="openPicker"
+    :data-disabled="isDisabled"
+    :data-directory-enabled="allowDirectories"
     @dragenter.prevent="handleDragEnter"
     @dragover.prevent="handleDragOver"
     @dragleave.prevent="handleDragLeave"
@@ -204,5 +342,26 @@ function errorFor(
       <strong>{{ promptLabel }}</strong>
       <small class="file-workspace-base-dropzone-help">{{ helpText }}</small>
     </span>
-  </button>
+    <span class="file-workspace-base-dropzone-actions">
+    <button
+      type="button"
+      class="file-workspace-base-dropzone-main"
+      :disabled="isDisabled"
+      @click="openFilePicker"
+    >
+      <AppIcon name="upload_file" />
+      {{ resolvedFileActionLabel }}
+    </button>
+    <button
+      v-if="allowDirectories"
+      type="button"
+      class="file-workspace-base-dropzone-directory"
+      :disabled="isDisabled"
+      @click="openDirectoryPicker"
+    >
+      <AppIcon name="folder_open" />
+      {{ directoryLabel }}
+    </button>
+    </span>
+  </div>
 </template>
