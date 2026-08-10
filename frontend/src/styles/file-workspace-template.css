@@ -285,6 +285,16 @@
   padding: 20px 22px 24px;
   scrollbar-width: thin;
   scrollbar-color: #cbd5e1 transparent;
+  scrollbar-gutter: stable;
+}
+
+.file-workspace-insight-content.file-insight-pane.fullscreen {
+  position: fixed;
+  inset: 64px 0 0 var(--workspace-sidebar-width, 260px);
+  width: auto;
+  z-index: 45;
+  border-left: 1px solid #e2e8f0;
+  box-shadow: -20px 0 50px rgb(15 23 42 / 0.16);
 }
 
 @media (max-width: 960px) {
@@ -308,6 +318,10 @@
 
   .file-workspace-insight-pane {
     min-height: 620px;
+  }
+
+  .file-workspace-insight-content.file-insight-pane.fullscreen {
+    inset: 0;
   }
 }
 

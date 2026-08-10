@@ -13,6 +13,7 @@ withDefaults(
 <template>
   <section
     class="file-workspace-insight-content file-insight-pane"
+    :data-domain="domain"
     :class="{ fullscreen, 'pdfmgmt-insight-pane': domain === 'pdf' }"
   >
     <header

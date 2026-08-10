@@ -16,8 +16,10 @@ import {
 import type { PdfBreadcrumbItem, PdfManagedFile, PdfUploadBatch, PdfUploadTask } from '../types'
 import { sortPdfFilesByNewest } from '../utils/pdf-file-order'
 import { usePdfTaskPolling } from './use-pdf-task-polling'
+import { FILE_WORKSPACE_PAGE_SIZE } from '../../../shared/file-workspace/file-pagination-contract'
+import { PDF_FILES_ROOT_LABEL } from '../../file-library/domain-presentation'
 
-const pdfFilePageSize = 4
+const pdfFilePageSize = FILE_WORKSPACE_PAGE_SIZE
 
 interface PdfKnowledgeLibraryOptions {
   onLibraryChanged?: () => void
@@ -57,7 +59,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
 
   const scopeBreadcrumbs = computed<PdfBreadcrumbItem[]>(() => {
     if (!selectedScopeId.value) {
-      return [{ id: '', label: 'Knowledge Base', active: true }]
+      return [{ id: '', label: PDF_FILES_ROOT_LABEL, active: true }]
     }
 
     const path: PdfBreadcrumbItem[] = []
@@ -68,7 +70,7 @@ export function usePdfKnowledgeLibrary(options: PdfKnowledgeLibraryOptions = {})
       visited.add(currentFile.id)
       currentFile = currentFile.parentId ? fileLookup.value.get(currentFile.parentId) : undefined
     }
-    const crumbs = [{ id: '', label: 'Knowledge Base' }, ...path]
+    const crumbs = [{ id: '', label: PDF_FILES_ROOT_LABEL }, ...path]
     return crumbs.map((crumb, index) => ({
       ...crumb,
       active: index === crumbs.length - 1,

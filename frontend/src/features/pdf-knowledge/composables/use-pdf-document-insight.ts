@@ -210,9 +210,18 @@ export function usePdfDocumentInsight(
     if (!currentSetting) {
       return
     }
-    const nextSetting = {
+    let nextSetting = {
       ...currentSetting,
       [field]: value,
+    }
+    if (field === 'selectedProvider') {
+      const supportedModels = nextSetting.providerModels?.[value] ?? []
+      if (!supportedModels.includes(nextSetting.selectedModel)) {
+        nextSetting = {
+          ...nextSetting,
+          selectedModel: supportedModels[0] ?? '',
+        }
+      }
     }
     modelSettings.value = modelSettings.value.map((setting) =>
       setting.id === settingId ? nextSetting : setting,

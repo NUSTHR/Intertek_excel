@@ -6,10 +6,22 @@ import FileWorkspaceSourcePane from '../../../components/file-workspace/FileWork
 import {
   fileLibraryCopy,
   formatFileLibraryCount,
-  formatFileMetadata,
   formatPdfUploadDescription,
   getFileLibraryEmptyState,
 } from '../../file-library/domain-presentation'
+import BaseFileDropzone from '../../../shared/file-workspace/components/BaseFileDropzone.vue'
+import BaseFileLibraryHeading from '../../../shared/file-workspace/components/BaseFileLibraryHeading.vue'
+import BaseFilePagination from '../../../shared/file-workspace/components/BaseFilePagination.vue'
+import BaseFileRow from '../../../shared/file-workspace/components/BaseFileRow.vue'
+import BaseFileState from '../../../shared/file-workspace/components/BaseFileState.vue'
+import { buildFilePaginationViewModel } from '../../../shared/file-workspace/composables/use-pagination-label'
+import type {
+  BaseFileRowViewModel,
+  FileActionId,
+  FileWorkspaceIconName,
+} from '../../../shared/file-workspace/file-card-contract'
+import type { FileActionItem } from '../../../shared/file-workspace/file-action-menu-contract'
+import { fileWorkspaceCopy } from '../../../shared/file-workspace/copy'
 import type {
   PdfBreadcrumbItem,
   PdfManagedFile,
@@ -40,7 +52,8 @@ const emit = defineEmits<{
   selectFile: [file: PdfManagedFile]
   selectScope: [scopeId: string]
   openScope: [scopeId: string]
-  requestUpload: []
+  uploadFiles: [files: File[]]
+  uploadValidationError: [message: string]
   renameFile: [file: PdfManagedFile]
   toggleVisibility: [file: PdfManagedFile]
   deleteFile: [file: PdfManagedFile]
@@ -48,6 +61,7 @@ const emit = defineEmits<{
   pageStep: [direction: -1 | 1]
 }>()
 
+const pdfMaxUploadBytes = 50 * 1024 * 1024
 const isDirectoryTreeOpen = ref(false)
 const openActionMenuId = ref('')
 const directoryOverlay = ref<HTMLElement | null>(null)
@@ -57,218 +71,135 @@ const hasSearchQuery = computed(() => props.searchTerm.trim().length > 0)
 const countLabel = computed(() => formatFileLibraryCount('pdf', props.totalFileCount))
 const emptyState = computed(() => getFileLibraryEmptyState('pdf', hasSearchQuery.value))
 const uploadDescription = computed(() => formatPdfUploadDescription(
-  props.scopeBreadcrumbs.at(-1)?.label ?? 'Knowledge Base',
+  props.scopeBreadcrumbs.at(-1)?.label ?? copy.listTitle,
   '50 MB',
 ))
+const fatalError = computed(() => !props.isLoading && props.files.length === 0
+  ? props.errorMessage
+  : '')
+const paginationModel = computed(() => buildFilePaginationViewModel({
+  totalCount: props.totalFileCount,
+  currentPage: props.currentPage,
+}))
 
-function iconForFileKind(kind: PdfManagedFileKind): string {
-  if (kind === 'folder') {
-    return 'folder'
-  }
-  if (kind === 'csv') {
-    return 'table_chart'
-  }
-  if (kind === 'xlsx') {
-    return 'table_rows'
-  }
+function iconForFileKind(kind: PdfManagedFileKind): FileWorkspaceIconName {
+  if (kind === 'folder') return 'folder'
+  if (kind === 'csv') return 'table_chart'
+  if (kind === 'xlsx') return 'table_rows'
   return 'picture_as_pdf'
 }
 
 function statusLabel(status: PdfManagedFileStatus): string {
-  if (status === 'indexed') {
-    return 'Indexed'
+  const labels: Record<PdfManagedFileStatus, string> = {
+    indexed: 'Indexed',
+    ready: 'Ready',
+    uploading: 'Uploading',
+    queued: 'Queued',
+    parsing: 'Parsing',
+    indexing: 'Indexing',
+    partial: 'Partial',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
   }
-  if (status === 'parsing') {
-    return 'Parsing'
-  }
-  if (status === 'uploading') {
-    return 'Uploading'
-  }
-  if (status === 'indexing') {
-    return 'Indexing'
-  }
-  if (status === 'partial') {
-    return 'Partial'
-  }
-  if (status === 'queued') {
-    return 'Queued'
-  }
-  if (status === 'failed') {
-    return 'Failed'
-  }
-  if (status === 'cancelled') {
-    return 'Cancelled'
-  }
-  return 'Ready'
-}
-
-function qualityLabel(file: PdfManagedFile): string {
-  if (!file.qualityStatus) {
-    return ''
-  }
-  if (file.qualityStatus === 'good') {
-    return 'Good'
-  }
-  if (file.qualityStatus === 'warning') {
-    return 'Warning'
-  }
-  if (file.qualityStatus === 'partial') {
-    return 'Partial'
-  }
-  if (file.qualityStatus === 'failed') {
-    return 'Failed'
-  }
-  return 'Unknown'
+  return labels[status]
 }
 
 function qualitySummary(file: PdfManagedFile): string {
-  const label = qualityLabel(file)
-  if (!label) {
-    return ''
-  }
-  const details: string[] = []
-  if (typeof file.coverageRatio === 'number') {
-    details.push(`${Math.round(file.coverageRatio * 100)}%`)
-  }
-  if (file.failedPageCount) {
-    details.push(`${file.failedPageCount} failed`)
-  } else if (file.warningCount) {
-    details.push(`${file.warningCount} warning${file.warningCount > 1 ? 's' : ''}`)
-  }
-  return details.length ? `${label} / ${details.join(' / ')}` : label
+  if (!file.qualityStatus) return ''
+  const label = file.qualityStatus.charAt(0).toUpperCase() + file.qualityStatus.slice(1)
+  if (typeof file.coverageRatio === 'number') return `${label} / ${Math.round(file.coverageRatio * 100)}%`
+  if (file.failedPageCount) return `${label} / ${file.failedPageCount} failed`
+  if (file.warningCount) return `${label} / ${file.warningCount} warning${file.warningCount === 1 ? '' : 's'}`
+  return label
 }
 
-function progressForFile(file: PdfManagedFile): number {
-  return file.progress ?? (file.status === 'parsing' || file.status === 'indexing' ? 48 : 100)
-}
-
-function isFileRowSelected(file: PdfManagedFile): boolean {
-  return props.selectedFileIds.has(file.id)
-}
-
-function fileMetaLabel(file: PdfManagedFile): string {
-  const details = [file.sizeLabel, file.modifiedLabel].filter(Boolean)
-  if (details.length > 1) {
-    details[1] = `Updated ${details[1]}`
-  }
-  if (file.status !== 'ready' && file.status !== 'indexed') {
-    details.push(statusLabel(file.status))
-  }
+function rowModel(file: PdfManagedFile): BaseFileRowViewModel {
+  const isProgressing = ['uploading', 'queued', 'parsing', 'indexing'].includes(file.status)
+  const metaParts = [file.sizeLabel, file.modifiedLabel ? `Updated ${file.modifiedLabel}` : '']
+  if (file.status !== 'ready' && file.status !== 'indexed') metaParts.push(statusLabel(file.status))
   const quality = qualitySummary(file)
-  if (quality) {
-    details.push(quality)
+  if (quality) metaParts.push(quality)
+  return {
+    id: file.id,
+    domain: 'pdf',
+    kind: file.kind === 'folder' ? 'folder' : 'file',
+    displayName: file.name,
+    metaParts: metaParts.filter(Boolean),
+    iconName: iconForFileKind(file.kind),
+    isSelected: props.selectedFileIds.has(file.id),
+    isPinned: false,
+    isMultiSelectable: true,
+    isChecked: props.selectedFileIds.has(file.id),
+    isProgressing,
+    progressPercent: file.progress ?? (isProgressing ? 48 : 100),
+    isFolderOpenable: file.kind === 'folder',
+    visibilityChip: file.visibleToMembers ? undefined : 'Admin only',
   }
-  return formatFileMetadata(details)
+}
+
+function rowActions(file: PdfManagedFile): FileActionItem[] {
+  if (!props.isAdmin) return []
+  return [
+    { id: 'rename', label: fileWorkspaceCopy.actions.rename, iconName: 'edit' },
+    {
+      id: file.visibleToMembers ? 'hide' : 'show',
+      label: file.visibleToMembers
+        ? fileWorkspaceCopy.actions.hide
+        : fileWorkspaceCopy.actions.show,
+      iconName: file.visibleToMembers ? 'visibility_off' : 'visibility',
+    },
+    { id: 'delete', label: fileWorkspaceCopy.actions.delete, iconName: 'delete', tone: 'danger' },
+  ]
+}
+
+function fileById(id: string): PdfManagedFile | undefined {
+  return props.files.find((file) => file.id === id)
+}
+
+function handleAction(model: BaseFileRowViewModel, action: FileActionId): void {
+  const file = fileById(model.id)
+  if (!file) return
+  openActionMenuId.value = ''
+  if (action === 'rename') emit('renameFile', file)
+  else if (action === 'hide' || action === 'show') emit('toggleVisibility', file)
+  else if (action === 'delete') emit('deleteFile', file)
 }
 
 function openDirectoryTree(): void {
   isDirectoryTreeOpen.value = true
-  void nextTick(() => {
-    focusFirstDirectoryControl()
-  })
+  void nextTick(() => focusableDirectoryControls()[0]?.focus())
 }
 
 function closeDirectoryTree(restoreFocus = true): void {
   isDirectoryTreeOpen.value = false
-  if (restoreFocus) {
-    void nextTick(() => directoryTrigger.value?.focus())
-  }
-}
-
-function handleDirectoryScopeSelect(scopeId: string): void {
-  emit('selectScope', scopeId)
-  closeDirectoryTree()
-}
-
-function handleDirectoryFileSelect(file: PdfManagedFile): void {
-  emit('selectFile', file)
-  closeDirectoryTree()
-}
-
-function toggleActionMenu(fileId: string): void {
-  openActionMenuId.value = openActionMenuId.value === fileId ? '' : fileId
-}
-
-function closeActionMenu(): void {
-  openActionMenuId.value = ''
-}
-
-function renameFromMenu(file: PdfManagedFile): void {
-  closeActionMenu()
-  emit('renameFile', file)
-}
-
-function toggleVisibilityFromMenu(file: PdfManagedFile): void {
-  closeActionMenu()
-  emit('toggleVisibility', file)
-}
-
-function deleteFromMenu(file: PdfManagedFile): void {
-  closeActionMenu()
-  emit('deleteFile', file)
-}
-
-function handleDocumentPointerDown(event: PointerEvent): void {
-  if (isDirectoryTreeOpen.value) {
-    const target = event.target
-    if (
-      target instanceof Node &&
-      !directoryOverlay.value?.contains(target) &&
-      !directoryTrigger.value?.contains(target)
-    ) {
-      closeDirectoryTree(false)
-    }
-  }
-  if (!openActionMenuId.value) {
-    return
-  }
-  const target = event.target
-  if (
-    target instanceof Element &&
-    target.closest('.item-action-menu, .menu-trigger')
-  ) {
-    return
-  }
-  closeActionMenu()
-}
-
-function handleDocumentKeyDown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
-    if (isDirectoryTreeOpen.value) {
-      event.preventDefault()
-      closeDirectoryTree()
-      return
-    }
-    closeActionMenu()
-    return
-  }
-  if (event.key === 'Tab' && isDirectoryTreeOpen.value) {
-    trapDirectoryFocus(event)
-  }
+  if (restoreFocus) void nextTick(() => directoryTrigger.value?.focus())
 }
 
 function focusableDirectoryControls(): HTMLElement[] {
-  if (!directoryOverlay.value) {
-    return []
-  }
-  return Array.from(
-    directoryOverlay.value.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])',
-    ),
-  )
+  if (!directoryOverlay.value) return []
+  return Array.from(directoryOverlay.value.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])',
+  ))
 }
 
-function focusFirstDirectoryControl(): void {
-  focusableDirectoryControls()[0]?.focus()
+function handleDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target
+  if (
+    isDirectoryTreeOpen.value &&
+    target instanceof Node &&
+    !directoryOverlay.value?.contains(target) &&
+    !directoryTrigger.value?.contains(target)
+  ) closeDirectoryTree(false)
 }
 
-function trapDirectoryFocus(event: KeyboardEvent): void {
-  const controls = focusableDirectoryControls()
-  if (controls.length === 0) {
+function handleDocumentKeyDown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && isDirectoryTreeOpen.value) {
     event.preventDefault()
-    directoryOverlay.value?.focus()
+    closeDirectoryTree()
     return
   }
+  if (event.key !== 'Tab' || !isDirectoryTreeOpen.value) return
+  const controls = focusableDirectoryControls()
   const first = controls[0]
   const last = controls.at(-1)
   if (event.shiftKey && document.activeElement === first) {
@@ -289,7 +220,6 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
   document.removeEventListener('keydown', handleDocumentKeyDown)
 })
-
 </script>
 
 <template>
@@ -300,7 +230,7 @@ onBeforeUnmount(() => {
         class="pdfmgmt-directory-overlay"
         :class="{ open: isDirectoryTreeOpen }"
         role="dialog"
-        aria-label="Directory Tree"
+        aria-label="Directory tree"
         aria-modal="true"
         :aria-hidden="!isDirectoryTreeOpen"
         :tabindex="isDirectoryTreeOpen ? 0 : -1"
@@ -315,226 +245,112 @@ onBeforeUnmount(() => {
           :files="directoryFiles"
           :selected-scope-id="selectedScopeId"
           :selected-file-id="selectedFileId"
-          @select-scope="handleDirectoryScopeSelect"
-          @select-file="handleDirectoryFileSelect"
+          @select-scope="emit('selectScope', $event); closeDirectoryTree()"
+          @select-file="emit('selectFile', $event); closeDirectoryTree()"
         />
-        <footer class="pdfmgmt-directory-overlay-footer">
-          <span>Quick Actions</span>
-          <button type="button" disabled>
-            <AppIcon name="create_new_folder" />
-            <span>New Folder</span>
-          </button>
-        </footer>
       </div>
     </template>
 
     <template #header>
-      <div class="pdfmgmt-breadcrumb-row panel-heading">
-        <div class="pdfmgmt-breadcrumb-group">
-          <nav aria-label="Knowledge path">
-            <template v-for="(crumb, index) in scopeBreadcrumbs" :key="`${crumb}-${index}`">
-              <button
-                type="button"
-                class="pdfmgmt-breadcrumb-button"
-                :class="{ active: crumb.active }"
-                :aria-current="crumb.active ? 'page' : undefined"
-                @click="emit('openScope', crumb.id)"
+      <BaseFileLibraryHeading :title="copy.listTitle" :count-label="countLabel">
+        <template #navigation>
+          <div class="file-workspace-base-breadcrumb-group">
+            <nav v-if="scopeBreadcrumbs.length > 1" aria-label="PDF Files path">
+              <template
+                v-for="(crumb, index) in scopeBreadcrumbs.slice(1)"
+                :key="`${crumb.id}-${index}`"
               >
-                {{ crumb.label }}
-              </button>
-              <AppIcon
-                v-if="index < scopeBreadcrumbs.length - 1"
-                name="chevron_right"
-                class="pdfmgmt-breadcrumb-separator"
-              />
-            </template>
-          </nav>
-          <button
-            ref="directoryTrigger"
-            type="button"
-            class="pdfmgmt-directory-trigger"
-            aria-label="View directory tree"
-            @click="openDirectoryTree"
-          >
-            <AppIcon name="account_tree" />
-          </button>
-        </div>
-        <span class="pdfmgmt-count-pill">{{ countLabel }}</span>
-      </div>
+                <AppIcon name="chevron_right" />
+                <button
+                  type="button"
+                  class="file-workspace-base-breadcrumb"
+                  :data-active="crumb.active"
+                  :aria-current="crumb.active ? 'page' : undefined"
+                  @click="emit('openScope', crumb.id)"
+                >{{ crumb.label }}</button>
+              </template>
+            </nav>
+            <button
+              ref="directoryTrigger"
+              type="button"
+              class="file-workspace-base-directory-trigger"
+              aria-label="View PDF Files directory tree"
+              @click="openDirectoryTree"
+            ><AppIcon name="account_tree" /></button>
+          </div>
+        </template>
+      </BaseFileLibraryHeading>
     </template>
 
     <template #upload>
-      <button
+      <BaseFileDropzone
         v-if="isAdmin"
-        type="button"
-        class="pdfmgmt-dropzone file-upload-zone"
-        :disabled="isUploading"
-        @click="emit('requestUpload')"
-      >
-        <span class="pdfmgmt-dropzone-icon file-upload-icon">
-          <AppIcon name="upload_file" />
-        </span>
-        <span>
-          <strong>{{ isUploading ? copy.uploadPendingTitle : copy.uploadTitle }}</strong>
-          <small>{{ uploadDescription }}</small>
-        </span>
-      </button>
+        domain="pdf"
+        accept=".pdf,application/pdf"
+        multiple
+        :help-text="uploadDescription"
+        :is-disabled="isUploading"
+        :max-size-bytes="pdfMaxUploadBytes"
+        :prompt-label="isUploading ? copy.uploadPendingTitle : copy.uploadTitle"
+        @files-selected="emit('uploadFiles', $event)"
+        @validation-error="emit('uploadValidationError', $event)"
+      />
     </template>
 
     <template #status>
-      <p v-if="errorMessage" class="pdfmgmt-inline-error">{{ errorMessage }}</p>
+      <p v-if="errorMessage && !fatalError" class="file-workspace-base-inline-error" role="status">
+        {{ errorMessage }}
+      </p>
     </template>
 
     <template #list>
-      <div class="pdfmgmt-file-table" role="list" aria-label="Knowledge files">
-        <div v-if="files.length > 0" class="pdfmgmt-file-header" aria-hidden="true">
-          <span>Type</span>
-          <span>Name</span>
-          <span>Size</span>
-          <span>Status</span>
-          <span></span>
-        </div>
-
-        <div v-if="isLoading" class="pdfmgmt-file-empty">
-          <AppIcon name="refresh" />
-          <strong>Loading knowledge files</strong>
-        </div>
-
-        <div v-else-if="files.length === 0" class="pdfmgmt-file-empty">
-          <AppIcon name="folder_open" />
-          <strong>{{ emptyState.title }}</strong>
-          <span>{{ emptyState.detail }}</span>
-        </div>
-
-        <article
-          v-else
+      <div class="file-workspace-base-list" role="list" aria-label="PDF files">
+        <BaseFileState
+          v-if="isLoading && files.length === 0"
+          domain="pdf"
+          tone="loading"
+          icon-name="refresh"
+          title="Loading PDF files"
+          detail="Refreshing the current knowledge directory."
+        />
+        <BaseFileState
+          v-else-if="fatalError"
+          domain="pdf"
+          tone="error"
+          icon-name="description"
+          title="PDF files could not be loaded"
+          :detail="fatalError"
+        />
+        <BaseFileState
+          v-else-if="files.length === 0"
+          domain="pdf"
+          :icon-name="hasSearchQuery ? 'search' : 'folder_open'"
+          :title="emptyState.title"
+          :detail="emptyState.detail"
+        />
+        <BaseFileRow
           v-for="file in files"
+          v-else
           :key="file.id"
-          class="pdfmgmt-file-row"
-          :class="[
-            'file-library-card',
-            {
-              selected: isFileRowSelected(file),
-              active: isFileRowSelected(file),
-              parsing: file.status === 'parsing' || file.status === 'indexing',
-              'menu-open': openActionMenuId === file.id,
-            },
-          ]"
-          role="listitem"
-        >
-          <input
-            class="pdfmgmt-file-check"
-            type="checkbox"
-            :checked="isFileRowSelected(file)"
-            :aria-label="`Select ${file.name}`"
-            @click.stop="emit('selectFile', file)"
-            @change.prevent
-          />
-          <button
-            type="button"
-            class="pdfmgmt-file-row-hitbox"
-            :aria-label="`Select ${file.name}`"
-            @click="emit('selectFile', file)"
-          ></button>
-          <button
-            type="button"
-            class="pdfmgmt-file-main"
-            @click="emit('selectFile', file)"
-          >
-            <span class="pdfmgmt-file-icon file-badge large" :class="file.kind">
-              <AppIcon :name="iconForFileKind(file.kind)" />
-            </span>
-            <span class="pdfmgmt-file-name file-card-main">
-              <strong>{{ file.name }}</strong>
-              <small class="file-meta-line">{{ fileMetaLabel(file) }}</small>
-            </span>
-            <span
-              v-if="['uploading', 'queued', 'parsing', 'indexing'].includes(file.status)"
-              class="pdfmgmt-progress-track"
-            >
-              <span
-                class="pdfmgmt-progress-fill"
-                :style="{ width: `${progressForFile(file)}%` }"
-              ></span>
-            </span>
-          </button>
-          <div v-if="isAdmin" class="pdfmgmt-row-menu file-card-actions" @click.stop>
-            <button
-              type="button"
-              class="pdfmgmt-row-menu-trigger menu-trigger"
-              :class="{ active: openActionMenuId === file.id }"
-              :aria-label="`Actions for ${file.name}`"
-              :aria-expanded="openActionMenuId === file.id"
-              @click="toggleActionMenu(file.id)"
-            >
-              <AppIcon name="more_vert" />
-            </button>
-            <div
-              v-if="openActionMenuId === file.id"
-              class="pdfmgmt-row-menu-popover item-action-menu file-card-menu"
-            >
-              <button type="button" @click="renameFromMenu(file)">
-                <AppIcon name="edit" />
-                <span>Rename</span>
-              </button>
-              <button type="button" @click="toggleVisibilityFromMenu(file)">
-                <AppIcon :name="file.visibleToMembers ? 'visibility_off' : 'visibility'" />
-                <span>
-                  {{ file.visibleToMembers ? 'Hide from members' : 'Show to members' }}
-                </span>
-              </button>
-              <button type="button" class="danger" @click="deleteFromMenu(file)">
-                <AppIcon name="delete" />
-                <span>Delete</span>
-              </button>
-            </div>
-          </div>
-          <button
-            v-if="file.kind === 'folder'"
-            type="button"
-            class="pdfmgmt-folder-open"
-            :aria-label="`Open folder ${file.name}`"
-            title="Open folder"
-            @click.stop="emit('openScope', file.id)"
-          >
-            <AppIcon name="chevron_right" />
-          </button>
-        </article>
+          :model="rowModel(file)"
+          :actions="rowActions(file)"
+          :menu-open="openActionMenuId === file.id"
+          @select="emit('selectFile', file)"
+          @toggle-check="emit('selectFile', file)"
+          @open-folder="emit('openScope', file.id)"
+          @toggle-menu="openActionMenuId = openActionMenuId === file.id ? '' : file.id"
+          @close-menu="openActionMenuId = ''"
+          @request-action="handleAction"
+        />
       </div>
     </template>
 
     <template #pagination>
-      <div class="pdfmgmt-pagination file-pagination">
-        <button
-          type="button"
-          class="pagination-link"
-          :disabled="currentPage <= 1"
-          @click="emit('pageStep', -1)"
-        >
-          <AppIcon name="chevron_left" />
-          Previous
-        </button>
-        <div class="pagination-pages">
-          <button
-            v-for="page in visiblePages"
-            :key="page"
-            type="button"
-            :class="{ active: page === currentPage }"
-            @click="emit('pageChange', page)"
-          >
-            {{ page }}
-          </button>
-        </div>
-        <button
-          type="button"
-          class="pagination-link"
-          :disabled="currentPage >= pageCount"
-          @click="emit('pageStep', 1)"
-        >
-          Next
-          <AppIcon name="chevron_right" />
-        </button>
-      </div>
+      <BaseFilePagination
+        :model="paginationModel"
+        @set-page="emit('pageChange', $event)"
+        @step-page="emit('pageStep', $event)"
+      />
     </template>
   </FileWorkspaceSourcePane>
 </template>

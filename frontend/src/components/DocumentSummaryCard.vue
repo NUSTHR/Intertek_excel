@@ -7,6 +7,8 @@ import type {
   SheetSummaryUpdate,
 } from '../types/document-summary'
 import AppIcon from './AppIcon.vue'
+import BaseDocumentSummaryCard from '../shared/file-workspace/components/BaseDocumentSummaryCard.vue'
+import { summaryEmptyCopy } from '../shared/file-workspace/copy'
 
 const props = defineProps<{
   summary: DocumentSummary | null
@@ -35,6 +37,7 @@ const newTagText = ref('')
 const newTagInput = ref<HTMLInputElement | null>(null)
 
 const primaryTags = computed(() => props.summary?.key_topics ?? [])
+const emptyCopy = summaryEmptyCopy('excel')
 
 const isSavingSummary = computed(() => props.isSaving || isSavePending.value)
 
@@ -268,27 +271,14 @@ function isSameText(first: string, second: string): boolean {
 </script>
 
 <template>
-  <article class="document-summary-card">
-    <header class="document-summary-head">
-      <div class="document-summary-title">
-        <span class="summary-icon"><AppIcon name="auto_awesome" /></span>
-        <div>
-          <h3>AI Executive Summary</h3>
-          <p v-if="summary" :title="summary.document_title || summary.business_domain">
-            {{ summaryTitle }}
-          </p>
-        </div>
-      </div>
-      <div class="summary-head-actions">
-        <button
-          type="button"
-          class="summary-action-button primary"
-          :disabled="isGenerating || isSavingSummary || !canGenerate"
-          @click="emit('generate')"
-        >
-          <AppIcon :name="summary ? 'refresh' : 'bolt'" />
-          {{ generateLabel }}
-        </button>
+  <BaseDocumentSummaryCard
+    :subtitle="summary ? summaryTitle : ''"
+    :action-label="generateLabel"
+    :action-icon="summary ? 'refresh' : 'bolt'"
+    :action-disabled="isGenerating || isSavingSummary || !canGenerate"
+    @generate="emit('generate')"
+  >
+    <template #actions>
         <button
           v-if="summary && !isEditing"
           type="button"
@@ -301,8 +291,7 @@ function isSameText(first: string, second: string): boolean {
           <AppIcon name="edit" />
           <span>Edit</span>
         </button>
-      </div>
-    </header>
+    </template>
 
     <div v-if="summary && !isEditing" class="summary-view-layout">
       <section class="summary-main-panel">
@@ -505,11 +494,11 @@ function isSameText(first: string, second: string): boolean {
 
     <div v-else class="insight-empty-state document-summary-empty">
       <div class="insight-icon"><AppIcon name="auto_awesome" /></div>
-      <h4>No summary generated</h4>
-      <p>Select a file and generate a summary to see workbook-level routing context.</p>
+      <h4>{{ emptyCopy.title }}</h4>
+      <p>{{ emptyCopy.detail }}</p>
       <button
         type="button"
-        class="summary-action-button primary"
+        class="summary-action-button primary file-workspace-base-primary-action"
         :disabled="isGenerating || !canGenerate"
         @click="emit('generate')"
       >
@@ -517,5 +506,5 @@ function isSameText(first: string, second: string): boolean {
         {{ isGenerating ? 'Generating...' : 'Generate Summary' }}
       </button>
     </div>
-  </article>
+  </BaseDocumentSummaryCard>
 </template>

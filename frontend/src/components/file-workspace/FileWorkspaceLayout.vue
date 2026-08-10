@@ -16,7 +16,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section class="file-workspace-layout" :data-file-domain="domain">
+  <section class="file-workspace-layout" :data-file-domain="domain" :data-domain="domain">
     <header class="file-workspace-topbar topbar file-topbar">
       <label class="search-field file-search-field">
         <span class="search-icon"><AppIcon name="search" /></span>

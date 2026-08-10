@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
+import { PDF_FILES_ROOT_LABEL } from '../../file-library/domain-presentation'
 import type { PdfManagedFile, PdfManagedFileKind } from '../types'
 
 interface DirectoryTreeRow {
@@ -40,7 +41,7 @@ const treeRows = computed<DirectoryTreeRow[]>(() => {
   return [
     {
       id: '',
-      name: 'Knowledge Base',
+      name: PDF_FILES_ROOT_LABEL,
       kind: 'root',
       depth: 0,
       childCount: childrenByParent.get('')?.length ?? 0,

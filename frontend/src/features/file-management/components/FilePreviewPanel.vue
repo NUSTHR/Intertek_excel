@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import AppIcon from '../../../components/AppIcon.vue'
 import SheetSearchResults from '../../../components/SheetSearchResults.vue'
+import BaseInsightSectionCard from '../../../shared/file-workspace/components/BaseInsightSectionCard.vue'
+import BaseFileState from '../../../shared/file-workspace/components/BaseFileState.vue'
 import { rowDomId, shortId } from '../../../app/workspace-utils'
 
 import type {
@@ -58,6 +60,12 @@ function readInputValue(event: Event): string {
 </script>
 
 <template>
+  <BaseInsightSectionCard
+    title="Data Preview"
+    icon-name="description"
+    :meta="previewRangeLabel"
+    tone="premium"
+  >
   <section class="file-preview-panel">
     <div class="file-preview-controls">
       <label>
@@ -213,9 +221,13 @@ function readInputValue(event: Event): string {
           </tbody>
         </table>
       </div>
-      <div v-else class="empty-state">
-        Upload or select a workbook to preview its rows.
-      </div>
+      <BaseFileState
+        v-else
+        domain="excel"
+        icon-name="description"
+        title="No preview available"
+        detail="Upload or select a workbook to preview its rows."
+      />
     </section>
 
     <div class="sheet-tabs compact" aria-label="Workbook sheets">
@@ -231,4 +243,5 @@ function readInputValue(event: Event): string {
       </button>
     </div>
   </section>
+  </BaseInsightSectionCard>
 </template>

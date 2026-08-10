@@ -3,6 +3,14 @@ import { computed, ref } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import FileWorkspaceInsightPane from '../../../components/file-workspace/FileWorkspaceInsightPane.vue'
+import BaseFileInsightTabs from '../../../shared/file-workspace/components/BaseFileInsightTabs.vue'
+import BaseFileInsightToolbar from '../../../shared/file-workspace/components/BaseFileInsightToolbar.vue'
+import BaseModelConfiguration from '../../../shared/file-workspace/components/BaseModelConfiguration.vue'
+import BaseDocumentSummaryCard from '../../../shared/file-workspace/components/BaseDocumentSummaryCard.vue'
+import BaseInsightSectionCard from '../../../shared/file-workspace/components/BaseInsightSectionCard.vue'
+import BaseFileState from '../../../shared/file-workspace/components/BaseFileState.vue'
+import type { BaseModelStageViewModel } from '../../../shared/file-workspace/model-configuration-contract'
+import { fileWorkspaceCopy, summaryEmptyCopy } from '../../../shared/file-workspace/copy'
 import type {
   PdfDocumentPreviewBlock,
   PdfDocumentSchemaItem,
@@ -43,8 +51,13 @@ const emit = defineEmits<{
   ]
 }>()
 
-const isModelConfigOpen = ref(true)
-const isSummaryOpen = ref(true)
+const isFullscreen = ref(false)
+const tabs: Array<{ key: PdfManagementInsightTab; label: string }> = [
+  { key: 'summary', label: fileWorkspaceCopy.tabs.summary },
+  { key: 'preview', label: fileWorkspaceCopy.tabs.preview },
+  { key: 'schema', label: fileWorkspaceCopy.tabs.schema },
+]
+const summaryEmpty = summaryEmptyCopy('pdf')
 const selectedCount = computed(() => props.selectedFiles.length)
 const selectedFolderCount = computed(
   () => props.selectedFiles.filter((file) => file.kind === 'folder').length,
@@ -55,7 +68,7 @@ const isBatchSummarySelection = computed(
 )
 const selectionSummaryLabel = computed(() => {
   if (selectedCount.value === 0) {
-    return 'No sources selected'
+    return ''
   }
   if (selectedCount.value === 1) {
     const selected = props.selectedFiles[0]
@@ -74,18 +87,38 @@ const generateSummaryLabel = computed(() => {
   }
   return props.summary?.status === 'ready' ? 'Regenerate' : 'Generate Summary'
 })
-const generateSummaryIcon = computed(() => (props.summary?.status === 'ready' ? 'refresh' : 'bolt'))
+const generateSummaryIcon = computed<'refresh' | 'bolt'>(() => (
+  props.summary?.status === 'ready' ? 'refresh' : 'bolt'
+))
+const summaryTags = computed(() => Array.from(new Set([
+  ...(props.summary?.keyTopics ?? []),
+  ...props.contextTags,
+])))
+const routingSignals = computed(() => Array.from(new Set([
+  ...(props.summary?.positiveRoutingTerms ?? []),
+  ...(props.summary?.exactIdentifiers ?? []),
+  ...(props.summary?.negativeRoutingTerms ?? []),
+])))
 const modelSettingError = (
   settingId: string,
   field: keyof PdfModelSettingFieldErrors,
 ): string => props.modelSettingErrors[settingId]?.[field] ?? ''
-const hasModelSettingError = (settingId: string): boolean =>
-  Boolean(
-    modelSettingError(settingId, 'selectedProvider') ||
-      modelSettingError(settingId, 'selectedModel'),
-  )
-const isModelSupported = (setting: PdfModelSetting, model: string): boolean =>
-  setting.providerModels?.[setting.selectedProvider]?.includes(model) ?? false
+const normalizedModelStages = computed<BaseModelStageViewModel[]>(() => props.modelSettings.map((setting) => ({
+  id: setting.id,
+  label: setting.label.replace(/Engine$/, 'Model'),
+  provider: setting.selectedProvider,
+  model: setting.selectedModel,
+  providers: setting.providers.map((provider) => ({
+    value: provider,
+    label: providerLabel(provider),
+  })),
+  models: (setting.providerModels?.[setting.selectedProvider] ?? []).map((model) => ({
+    value: model,
+    label: model,
+  })),
+  errorMessage: modelSettingError(setting.id, 'selectedProvider')
+    || modelSettingError(setting.id, 'selectedModel'),
+})))
 const summaryTaskResultLabel = computed(() => {
   const tasks = props.summaryTasks
   if (tasks.length === 0) {
@@ -124,185 +157,118 @@ function canCancelSummaryTask(task: PdfSummaryTask): boolean {
 function canRetrySummaryTask(task: PdfSummaryTask): boolean {
   return task.status === 'failed' || task.status === 'cancelled'
 }
+
+function handleModelSettingChange(
+  settingId: string,
+  field: 'provider' | 'model',
+  value: string,
+): void {
+  emit(
+    'modelSettingChange',
+    settingId,
+    field === 'provider' ? 'selectedProvider' : 'selectedModel',
+    value,
+  )
+}
 </script>
 
 <template>
-  <FileWorkspaceInsightPane domain="pdf">
+  <FileWorkspaceInsightPane domain="pdf" :fullscreen="isFullscreen">
     <template #tabs>
-        <button
-          type="button"
-          :class="{ active: activeTab === 'summary' }"
-          @click="emit('tabChange', 'summary')"
-        >
-          Summary
-        </button>
-        <button
-          type="button"
-          :class="{ active: activeTab === 'preview' }"
-          @click="emit('tabChange', 'preview')"
-        >
-          Data Preview
-        </button>
-        <button
-          type="button"
-          :class="{ active: activeTab === 'schema' }"
-          @click="emit('tabChange', 'schema')"
-        >
-          Schema
-        </button>
+      <BaseFileInsightTabs
+        :active-tab="activeTab"
+        :tabs="tabs"
+        @change="emit('tabChange', $event)"
+      />
     </template>
 
     <template #actions>
-      <div class="pdfmgmt-insight-actions">
-        <button
-          type="button"
-          class="icon-only-button"
-          aria-label="Download unavailable"
-          disabled
-        >
-          <AppIcon name="download" />
-        </button>
-        <button
-          type="button"
-          class="icon-only-button"
-          aria-label="Fullscreen unavailable"
-          disabled
-        >
-          <AppIcon name="fullscreen" />
-        </button>
-      </div>
+      <BaseFileInsightToolbar
+        :show-download-preview="false"
+        show-fullscreen
+        :can-download-preview="false"
+        :is-fullscreen="isFullscreen"
+        :is-downloading="false"
+        :is-toggling-fullscreen="false"
+        download-label="Download preview"
+        :fullscreen-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
+        @toggle-fullscreen="isFullscreen = !isFullscreen"
+      />
     </template>
 
-      <section class="pdfmgmt-panel">
-        <button
-          type="button"
-          class="pdfmgmt-panel-header"
-          :aria-expanded="isModelConfigOpen"
-          @click="isModelConfigOpen = !isModelConfigOpen"
+      <section v-if="activeTab === 'summary'" class="file-summary-stack">
+        <BaseModelConfiguration
+          v-if="modelSettings.length > 0"
+          :stages="normalizedModelStages"
+          :disabled="!isAdmin"
+          @change="handleModelSettingChange"
+        />
+
+        <BaseDocumentSummaryCard
+          :subtitle="selectionSummaryLabel"
+          :action-label="generateSummaryLabel"
+          :action-icon="generateSummaryIcon"
+          :action-disabled="!canGenerateSummary || isSummaryGenerating"
+          @generate="emit('generateSummary')"
         >
-          <span>
-            <AppIcon name="tune" />
-            <strong>Model Configuration</strong>
-          </span>
-          <AppIcon
-            name="keyboard_arrow_down"
-            class="pdfmgmt-panel-chevron"
-            :class="{ open: isModelConfigOpen }"
-          />
-        </button>
-
-        <div v-if="isModelConfigOpen" class="pdfmgmt-model-grid">
-          <div v-for="setting in modelSettings" :key="setting.id" class="pdfmgmt-model-row">
-            <label>{{ setting.label }}</label>
-            <div class="pdfmgmt-model-control">
-              <select
-                :value="setting.selectedProvider"
-                aria-label="Provider"
-                :aria-invalid="hasModelSettingError(setting.id)"
-                :class="{ 'pdfmgmt-field-invalid': hasModelSettingError(setting.id) }"
-                :disabled="!isAdmin"
-                @change="
-                  emit(
-                    'modelSettingChange',
-                    setting.id,
-                    'selectedProvider',
-                    ($event.target as HTMLSelectElement).value,
-                  )
-                "
-              >
-                <option v-for="provider in setting.providers" :key="provider" :value="provider">
-                  {{ providerLabel(provider) }}
-                </option>
-              </select>
-            </div>
-            <div class="pdfmgmt-model-control">
-              <select
-                :value="setting.selectedModel"
-                aria-label="Model"
-                :aria-invalid="hasModelSettingError(setting.id)"
-                :class="{ 'pdfmgmt-field-invalid': hasModelSettingError(setting.id) }"
-                :disabled="!isAdmin"
-                @change="
-                  emit(
-                    'modelSettingChange',
-                    setting.id,
-                    'selectedModel',
-                    ($event.target as HTMLSelectElement).value,
-                  )
-                "
-              >
-                <option
-                  v-for="model in setting.models"
-                  :key="model"
-                  :disabled="!isModelSupported(setting, model)"
-                >
-                  {{ model }}
-                </option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section v-if="activeTab === 'summary'" class="pdfmgmt-panel premium">
-        <div class="pdfmgmt-panel-header split">
-          <button
-            type="button"
-            class="pdfmgmt-panel-title-button"
-            :aria-expanded="isSummaryOpen"
-            @click="isSummaryOpen = !isSummaryOpen"
-          >
-            <span>
-              <AppIcon name="auto_awesome" />
-              <strong>AI Executive Summary</strong>
-              <AppIcon
-                name="keyboard_arrow_down"
-                class="pdfmgmt-panel-chevron"
-                :class="{ open: isSummaryOpen }"
-              />
-            </span>
-          </button>
-          <span class="pdfmgmt-summary-actions">
-            <button
-              type="button"
-              :disabled="!canGenerateSummary || isSummaryGenerating"
-              @click="emit('generateSummary')"
-            >
-              <AppIcon :name="generateSummaryIcon" />
-              {{ generateSummaryLabel }}
-            </button>
-            <button type="button" aria-label="Edit summary unavailable" disabled>
-              <AppIcon name="edit" />
-            </button>
-          </span>
-        </div>
-
-        <div v-if="isSummaryOpen" class="pdfmgmt-summary-body">
           <p v-if="errorMessage" class="pdfmgmt-inline-error">{{ errorMessage }}</p>
-          <p class="pdfmgmt-selection-summary">{{ selectionSummaryLabel }}</p>
 
-          <div v-if="!isBatchSummarySelection && summary?.status === 'ready'" class="pdfmgmt-ready-summary">
-            <span>
-              <AppIcon name="auto_awesome" />
-            </span>
-            <p>{{ summary.content }}</p>
-            <small>{{ summary.updatedLabel }}</small>
+          <div
+            v-if="!isBatchSummarySelection && summary?.status === 'ready'"
+            class="summary-view-layout"
+          >
+            <section class="summary-main-panel">
+              <div class="summary-section-head">
+                <div><span>Summary</span></div>
+              </div>
+              <div class="summary-scroll-panel summary-text-panel">
+                <p>{{ summary.content }}</p>
+                <small v-if="summary.updatedLabel">Updated {{ summary.updatedLabel }}</small>
+              </div>
+            </section>
+
+            <aside class="summary-side-panel">
+              <section class="summary-tags-panel">
+                <div class="summary-section-head">
+                  <div>
+                    <span>Keywords &amp; Tags</span>
+                    <strong>{{ summaryTags.length }}</strong>
+                  </div>
+                </div>
+                <div class="summary-scroll-panel summary-tag-scroll">
+                  <span v-for="tag in summaryTags" :key="tag" class="summary-tag-pill">
+                    #{{ tag }}
+                  </span>
+                  <span v-if="summaryTags.length === 0" class="summary-placeholder">
+                    No tags yet.
+                  </span>
+                </div>
+              </section>
+
+              <section class="summary-routing-panel">
+                <div class="summary-section-head compact"><span>Routing Signals</span></div>
+                <div class="summary-scroll-panel summary-routing-scroll">
+                  <span v-for="signal in routingSignals" :key="signal">{{ signal }}</span>
+                  <span v-if="routingSignals.length === 0" class="summary-placeholder">
+                    No routing signals yet.
+                  </span>
+                </div>
+              </section>
+            </aside>
           </div>
 
-          <div v-else class="pdfmgmt-empty-summary">
-            <span>
-              <AppIcon name="auto_awesome" />
-            </span>
-            <strong>{{ isDetailLoading ? 'Loading document insight' : 'No summary generated' }}</strong>
+          <div v-else class="insight-empty-state document-summary-empty">
+            <div class="insight-icon"><AppIcon name="auto_awesome" /></div>
+            <h4>{{ isDetailLoading ? 'Loading document insight' : summaryEmpty.title }}</h4>
             <p>
               {{
                 isSummaryGenerating
                   ? isBatchSummarySelection
-                    ? 'Summary tasks are being queued for the selected sources.'
-                    : 'The summary engine is reading the selected source.'
+                    ? 'Summary tasks are being queued for the selected files.'
+                    : 'The summary model is reading the selected file.'
                   : isBatchSummarySelection
                     ? 'Generate summaries for every PDF contained in the selected files or folders.'
-                    : 'Select a data source from the left and click generate to reveal deep AI insights and patterns.'
+                    : summaryEmpty.detail
               }}
             </p>
             <p v-if="summaryTasks.length > 0" class="pdfmgmt-summary-task-result">
@@ -324,22 +290,18 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
                     v-if="canCancelSummaryTask(task)"
                     type="button"
                     @click="emit('cancelSummaryTask', task.id)"
-                  >
-                    Cancel
-                  </button>
+                  >Cancel</button>
                   <button
                     v-if="canRetrySummaryTask(task)"
                     type="button"
                     @click="emit('retrySummaryTask', task.id)"
-                  >
-                    Retry
-                  </button>
+                  >Retry</button>
                 </span>
               </div>
             </div>
             <button
               type="button"
-              class="pdfmgmt-summary-primary-action"
+              class="summary-action-button primary file-workspace-base-primary-action"
               :disabled="!canGenerateSummary || isSummaryGenerating"
               @click="emit('generateSummary')"
             >
@@ -347,70 +309,52 @@ function canRetrySummaryTask(task: PdfSummaryTask): boolean {
               {{ generateSummaryLabel }}
             </button>
           </div>
-
-          <div class="pdfmgmt-tags">
-            <div>
-              <span>Contextual Tags</span>
-              <button type="button" disabled>
-                <AppIcon name="add" />
-                Add Tag
-              </button>
-            </div>
-            <div class="pdfmgmt-tag-list">
-              <span v-for="tag in contextTags" :key="tag">
-                {{ tag }}
-                <AppIcon name="close" />
-              </span>
-            </div>
-          </div>
-        </div>
+        </BaseDocumentSummaryCard>
       </section>
 
-      <section v-else-if="activeTab === 'preview'" class="pdfmgmt-panel premium">
-        <div class="pdfmgmt-panel-static-header">
-          <span>
-            <AppIcon name="description" />
-            <strong>Data Preview</strong>
-          </span>
-          <small>{{ previewBlocks.length }} blocks</small>
-        </div>
+      <BaseInsightSectionCard
+        v-else-if="activeTab === 'preview'"
+        title="Data Preview"
+        icon-name="description"
+        :meta="`${previewBlocks.length} blocks`"
+        tone="premium"
+      >
         <div class="pdfmgmt-preview-list">
           <article v-for="block in previewBlocks" :key="block.id" class="pdfmgmt-preview-block">
             <span>{{ block.pageLabel }}</span>
             <strong>{{ block.title }}</strong>
             <p>{{ block.content }}</p>
           </article>
-          <div v-if="previewBlocks.length === 0" class="pdfmgmt-empty-summary compact">
-            <span>
-              <AppIcon name="description" />
-            </span>
-            <strong>No preview blocks</strong>
-            <p>Preview content will appear after parsing is complete.</p>
-          </div>
+          <BaseFileState
+            v-if="previewBlocks.length === 0"
+            domain="pdf"
+            icon-name="description"
+            title="No preview available"
+            detail="Preview content will appear after parsing is complete."
+          />
         </div>
-      </section>
+      </BaseInsightSectionCard>
 
-      <section v-else class="pdfmgmt-panel premium">
-        <div class="pdfmgmt-panel-static-header">
-          <span>
-            <AppIcon name="schema" />
-            <strong>Schema</strong>
-          </span>
-          <small>{{ schema.length }} fields</small>
-        </div>
+      <BaseInsightSectionCard
+        v-else
+        title="Schema"
+        icon-name="schema"
+        :meta="`${schema.length} fields`"
+        tone="premium"
+      >
         <div class="pdfmgmt-schema-grid">
           <div v-for="item in schema" :key="item.id">
             <span>{{ item.label }}</span>
             <strong>{{ item.value }}</strong>
           </div>
-          <div v-if="schema.length === 0" class="pdfmgmt-empty-summary compact">
-            <span>
-              <AppIcon name="schema" />
-            </span>
-            <strong>No schema extracted</strong>
-            <p>MinerU metadata and index statistics will appear here.</p>
-          </div>
+          <BaseFileState
+            v-if="schema.length === 0"
+            domain="pdf"
+            icon-name="schema"
+            title="No schema extracted"
+            detail="Extracted metadata and index statistics will appear here."
+          />
         </div>
-      </section>
+      </BaseInsightSectionCard>
   </FileWorkspaceInsightPane>
 </template>

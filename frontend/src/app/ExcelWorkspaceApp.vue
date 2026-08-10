@@ -217,14 +217,12 @@ const {
   answerModel,
   modelStageDrafts,
   answerSupportsDeepThinking,
-  canSaveModelPreference,
   isModelPreferenceSaving,
   modelPreferenceFeedback,
   modelPreferenceFeedbackKind,
   loadLlmModelOptions,
   updateModelStageProvider,
   updateModelStageModel,
-  saveModelPreferenceDefaults,
 } = useLlmPreferences({ onError: showWorkspaceError })
 let fileListRequestId = 0
 let workspaceSelectionRequestId = 0
@@ -1786,6 +1784,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
               :total-file-count="filteredFiles.length"
               :upload-accept="uploadAcceptValue"
               :upload-help-text="uploadHelpText"
+              :upload-max-bytes="uploadMaxBytes"
               :visible-pages="visibleFilePages"
               @delete-file="requestDeleteFile"
               @rename-file="renameFilePrompt"
@@ -1796,6 +1795,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
               @toggle-pin="toggleFilePin"
               @toggle-visibility="toggleFileVisibility"
               @upload-selected="handleUploadFileSelected"
+              @upload-validation-error="showWorkspaceErrorMessage"
             />
         </template>
 
@@ -1814,7 +1814,6 @@ function getGridCellValue(row: string[], columnIndex: number): string {
                 :providers="availableLlmProviders"
                 :model-preference-feedback="modelPreferenceFeedback"
                 :model-preference-feedback-kind="modelPreferenceFeedbackKind"
-                :can-save-model-preference="canSaveModelPreference"
                 :is-model-preference-saving="isModelPreferenceSaving"
                 :summary="documentSummary"
                 :is-summary-generating="isSummaryLoading"
@@ -1822,7 +1821,6 @@ function getGridCellValue(row: string[], columnIndex: number): string {
                 :can-generate-summary="Boolean(selectedVersionId)"
                 @provider-change="updateModelStageProvider"
                 @model-change="updateModelStageModel"
-                @save-model-preference="saveModelPreferenceDefaults"
                 @generate-summary="generateSummaryForSelectedVersion"
                 @save-summary="saveDocumentSummary"
               />

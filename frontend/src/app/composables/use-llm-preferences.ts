@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 import { getLlmModelOptions, getLlmPreference, saveLlmPreference } from '../../api/llm-api'
 import { toErrorMessage } from '../workspace-utils'
@@ -28,6 +28,9 @@ export function useLlmPreferences(options: LlmPreferenceOptions = {}) {
   const isModelPreferenceSaving = ref<boolean>(false)
   const modelPreferenceFeedback = ref<string>('')
   const modelPreferenceFeedbackKind = ref<'success' | 'error'>('success')
+  let modelSaveTimer: ReturnType<typeof setTimeout> | undefined
+  let modelSaveRevision = 0
+  let activeModelSaves = 0
 
   const modelStageDrafts = computed<ModelStageDraft[]>(() => [
     {
@@ -161,6 +164,7 @@ export function useLlmPreferences(options: LlmPreferenceOptions = {}) {
       draftAnswerProvider.value = provider
     }
     handleModelProviderChange(stage)
+    scheduleModelPreferenceSave()
   }
 
   function updateModelStageModel(stage: ModelStage, model: string): void {
@@ -172,6 +176,7 @@ export function useLlmPreferences(options: LlmPreferenceOptions = {}) {
       draftAnswerModel.value = model
     }
     handleModelDraftChange()
+    scheduleModelPreferenceSave()
   }
 
   function resetModelPreferenceDraft(): void {
@@ -184,33 +189,73 @@ export function useLlmPreferences(options: LlmPreferenceOptions = {}) {
     modelPreferenceFeedback.value = ''
   }
 
+  function scheduleModelPreferenceSave(): void {
+    if (modelSaveTimer) {
+      clearTimeout(modelSaveTimer)
+    }
+    if (!isCompleteModelPreference()) {
+      return
+    }
+    modelPreferenceFeedbackKind.value = 'success'
+    modelPreferenceFeedback.value = 'Changes pending…'
+    modelSaveTimer = setTimeout(() => {
+      modelSaveTimer = undefined
+      void saveModelPreferenceDefaults()
+    }, 350)
+  }
+
   async function saveModelPreferenceDefaults(): Promise<void> {
+    if (modelSaveTimer) {
+      clearTimeout(modelSaveTimer)
+      modelSaveTimer = undefined
+    }
     if (!isCompleteModelPreference()) {
       modelPreferenceFeedbackKind.value = 'error'
       modelPreferenceFeedback.value = 'Select a provider and model for every stage.'
       return
     }
+    const revision = ++modelSaveRevision
+    const draft = {
+      summary_provider: draftSummaryProvider.value,
+      summary_model: draftSummaryModel.value,
+      router_provider: draftRouterProvider.value,
+      router_model: draftRouterModel.value,
+      answer_provider: draftAnswerProvider.value,
+      answer_model: draftAnswerModel.value,
+    }
+    activeModelSaves += 1
     isModelPreferenceSaving.value = true
     modelPreferenceFeedback.value = ''
     try {
-      const preference = await saveLlmPreference({
-        summary_provider: draftSummaryProvider.value,
-        summary_model: draftSummaryModel.value,
-        router_provider: draftRouterProvider.value,
-        router_model: draftRouterModel.value,
-        answer_provider: draftAnswerProvider.value,
-        answer_model: draftAnswerModel.value,
-      })
+      const preference = await saveLlmPreference(draft)
+      if (revision !== modelSaveRevision) {
+        return
+      }
       applyModelDefaults(preference)
       modelPreferenceFeedbackKind.value = 'success'
       modelPreferenceFeedback.value = 'Saved as workspace defaults.'
     } catch (error: unknown) {
+      if (revision !== modelSaveRevision) {
+        return
+      }
       modelPreferenceFeedbackKind.value = 'error'
       modelPreferenceFeedback.value = toErrorMessage(error)
     } finally {
-      isModelPreferenceSaving.value = false
+      activeModelSaves = Math.max(0, activeModelSaves - 1)
+      isModelPreferenceSaving.value = activeModelSaves > 0
     }
   }
+
+  onBeforeUnmount(() => {
+    if (!modelSaveTimer) {
+      return
+    }
+    clearTimeout(modelSaveTimer)
+    modelSaveTimer = undefined
+    if (isCompleteModelPreference() && hasModelPreferenceDraftChanges.value) {
+      void saveModelPreferenceDefaults()
+    }
+  })
 
   function isCompleteModelPreference(): boolean {
     return Boolean(

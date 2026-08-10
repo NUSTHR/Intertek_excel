@@ -11,7 +11,7 @@ withDefaults(
 </script>
 
 <template>
-  <section class="file-workspace-source-content" :data-file-domain="domain">
+  <section class="file-workspace-source-content" :data-file-domain="domain" :data-domain="domain">
     <slot name="overlay"></slot>
 
     <div

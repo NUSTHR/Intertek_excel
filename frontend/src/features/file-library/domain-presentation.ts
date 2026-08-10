@@ -45,11 +45,11 @@ export const fileLibraryCopy = {
   },
 } as const satisfies Record<FileLibraryDomain, FileLibraryCopyTemplate>
 
-export function formatFileLibraryCount(domain: FileLibraryDomain, count: number): string {
+export const PDF_FILES_ROOT_LABEL = fileLibraryCopy.pdf.listTitle
+
+export function formatFileLibraryCount(_domain: FileLibraryDomain, count: number): string {
   const normalizedCount = Math.max(0, count)
-  const noun = domain === 'excel'
-    ? (normalizedCount === 1 ? 'workbook' : 'workbooks')
-    : (normalizedCount === 1 ? 'source' : 'sources')
+  const noun = normalizedCount === 1 ? 'workbook' : 'workbooks'
   return `${normalizedCount} ${noun}`
 }
 
@@ -75,7 +75,7 @@ export function formatExcelUploadDescription(
 }
 
 export function formatPdfUploadDescription(scopeLabel: string, maxSize: string): string {
-  const scope = scopeLabel.trim() || 'Knowledge Base'
+  const scope = scopeLabel.trim() || PDF_FILES_ROOT_LABEL
   return `PDF · Max ${maxSize} each · Uploaded to ${scope} and indexed for cited answers.`
 }
 

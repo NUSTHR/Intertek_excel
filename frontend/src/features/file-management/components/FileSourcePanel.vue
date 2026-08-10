@@ -1,17 +1,26 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import AppIcon from '../../../components/AppIcon.vue'
 import FileWorkspaceSourcePane from '../../../components/file-workspace/FileWorkspaceSourcePane.vue'
-import WorkbookUploadDropzone from './WorkbookUploadDropzone.vue'
 import { fileIcon, fileTypeLabel, formatDate } from '../../../app/workspace-utils'
 import {
   fileLibraryCopy,
   formatFileLibraryCount,
-  formatFileMetadata,
   getFileLibraryEmptyState,
 } from '../../file-library/domain-presentation'
-
+import BaseFileDropzone from '../../../shared/file-workspace/components/BaseFileDropzone.vue'
+import BaseFileLibraryHeading from '../../../shared/file-workspace/components/BaseFileLibraryHeading.vue'
+import BaseFilePagination from '../../../shared/file-workspace/components/BaseFilePagination.vue'
+import BaseFileRow from '../../../shared/file-workspace/components/BaseFileRow.vue'
+import BaseFileState from '../../../shared/file-workspace/components/BaseFileState.vue'
+import { buildFilePaginationViewModel } from '../../../shared/file-workspace/composables/use-pagination-label'
+import type {
+  BaseFileRowViewModel,
+  FileActionId,
+  FileWorkspaceIconName,
+} from '../../../shared/file-workspace/file-card-contract'
+import type { FileActionItem } from '../../../shared/file-workspace/file-action-menu-contract'
+import { fileWorkspaceCopy } from '../../../shared/file-workspace/copy'
 import type { ExcelFile } from '../../../types/excel-assets'
 
 const props = defineProps<{
@@ -24,6 +33,7 @@ const props = defineProps<{
   searchTerm: string
   uploadAccept: string
   uploadHelpText: string
+  uploadMaxBytes: number
   currentPage: number
   pageCount: number
   visiblePages: number[]
@@ -32,6 +42,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   uploadSelected: [file: File | null]
+  uploadValidationError: [message: string]
   selectFile: [file: ExcelFile]
   toggleMenu: [fileId: string]
   togglePin: [file: ExcelFile]
@@ -42,165 +53,129 @@ const emit = defineEmits<{
   stepPage: [direction: 1 | -1]
 }>()
 
+const copy = fileLibraryCopy.excel
+const hasSearchQuery = computed(() => props.searchTerm.trim().length > 0)
+const countLabel = computed(() => formatFileLibraryCount('excel', props.totalFileCount))
+const emptyState = computed(() => getFileLibraryEmptyState('excel', hasSearchQuery.value))
+const paginationModel = computed(() => buildFilePaginationViewModel({
+  totalCount: props.totalFileCount,
+  currentPage: props.currentPage,
+}))
+
 function isFilePinned(fileId: string): boolean {
   return props.pinnedFileIds.includes(fileId)
 }
 
-const hasSearchQuery = computed(() => props.searchTerm.trim().length > 0)
+function rowModel(file: ExcelFile): BaseFileRowViewModel {
+  return {
+    id: file.file_id,
+    domain: 'excel',
+    kind: 'file',
+    displayName: file.display_name,
+    metaParts: [fileTypeLabel(file), `Updated ${formatDate(file.updated_at)}`],
+    iconName: fileIcon(file) as FileWorkspaceIconName,
+    isSelected: file.file_id === props.selectedFileId,
+    isPinned: isFilePinned(file.file_id),
+    isMultiSelectable: false,
+    isChecked: false,
+    isProgressing: false,
+    progressPercent: 100,
+    isFolderOpenable: false,
+    visibilityChip: file.visible_to_members ? undefined : 'Admin only',
+  }
+}
 
-const copy = fileLibraryCopy.excel
-const countLabel = computed(() => formatFileLibraryCount('excel', props.totalFileCount))
-const emptyState = computed(() => getFileLibraryEmptyState('excel', hasSearchQuery.value))
+function rowActions(file: ExcelFile): FileActionItem[] {
+  return [
+    {
+      id: isFilePinned(file.file_id) ? 'unpin' : 'pin',
+      label: isFilePinned(file.file_id) ? 'Unpin' : 'Pin',
+      iconName: 'push_pin',
+    },
+    { id: 'rename', label: fileWorkspaceCopy.actions.rename, iconName: 'edit' },
+    {
+      id: file.visible_to_members ? 'hide' : 'show',
+      label: file.visible_to_members
+        ? fileWorkspaceCopy.actions.hide
+        : fileWorkspaceCopy.actions.show,
+      iconName: file.visible_to_members ? 'visibility_off' : 'visibility',
+    },
+    { id: 'delete', label: fileWorkspaceCopy.actions.delete, iconName: 'delete', tone: 'danger' },
+  ]
+}
 
-function selectFile(file: ExcelFile): void {
-  if (props.disabled) {
+function fileById(id: string): ExcelFile | undefined {
+  return props.files.find((file) => file.file_id === id)
+}
+
+function handleAction(model: BaseFileRowViewModel, action: FileActionId): void {
+  const file = fileById(model.id)
+  if (!file) {
     return
   }
-  emit('selectFile', file)
+  if (action === 'pin' || action === 'unpin') {
+    emit('togglePin', file)
+  } else if (action === 'rename') {
+    emit('renameFile', file)
+  } else if (action === 'hide' || action === 'show') {
+    emit('toggleVisibility', file)
+  } else if (action === 'delete') {
+    emit('deleteFile', file)
+  }
 }
 </script>
 
 <template>
   <FileWorkspaceSourcePane domain="excel">
     <template #header>
-      <div class="panel-heading">
-        <div>
-          <h3>{{ copy.listTitle }}</h3>
-        </div>
-        <span class="files-found-label">{{ countLabel }}</span>
-      </div>
+      <BaseFileLibraryHeading :title="copy.listTitle" :count-label="countLabel" />
     </template>
 
     <template #upload>
-      <WorkbookUploadDropzone
+      <BaseFileDropzone
+        domain="excel"
         :accept="uploadAccept"
-        :disabled="disabled"
-        :title="copy.uploadTitle"
+        :multiple="false"
         :help-text="uploadHelpText"
-        @select="emit('uploadSelected', $event)"
+        :is-disabled="disabled"
+        :max-size-bytes="uploadMaxBytes"
+        :prompt-label="copy.uploadTitle"
+        @files-selected="emit('uploadSelected', $event[0] ?? null)"
+        @validation-error="emit('uploadValidationError', $event)"
       />
     </template>
 
     <template #list>
-      <div class="file-card-list">
-      <article
-        v-for="file in files"
-        :key="file.file_id"
-        class="file-library-card"
-        :class="{
-          selected: file.file_id === selectedFileId,
-          pinned: isFilePinned(file.file_id),
-          'menu-open': openMenuFileId === file.file_id,
-        }"
-        :aria-disabled="disabled ? 'true' : undefined"
-      >
-        <button
-          type="button"
-          class="semantic-card-hitbox"
+      <div class="file-workspace-base-list" role="list" aria-label="Excel workbooks">
+        <BaseFileState
+          v-if="totalFileCount === 0"
+          domain="excel"
+          :icon-name="hasSearchQuery ? 'search' : 'folder_open'"
+          :title="emptyState.title"
+          :detail="emptyState.detail"
+        />
+        <BaseFileRow
+          v-for="file in files"
+          v-else
+          :key="file.file_id"
+          :model="rowModel(file)"
+          :actions="rowActions(file)"
+          :menu-open="openMenuFileId === file.file_id"
           :disabled="disabled"
-          :aria-label="`Select ${file.display_name}`"
-          @click="selectFile(file)"
-        ></button>
-        <span class="file-badge large"><AppIcon :name="fileIcon(file)" /></span>
-        <span class="file-card-main">
-          <strong>{{ file.display_name }}</strong>
-          <span class="file-meta-line">
-            {{ formatFileMetadata([fileTypeLabel(file), `Updated ${formatDate(file.updated_at)}`]) }}
-          </span>
-          <span
-            v-if="!file.visible_to_members"
-            class="file-visibility-chip"
-            title="Hidden from workspace users"
-          >
-            <AppIcon name="visibility_off" />
-            Admin only
-          </span>
-        </span>
-        <span class="file-card-actions" @click.stop>
-          <button
-            type="button"
-            class="menu-trigger"
-            :disabled="disabled"
-            :aria-expanded="openMenuFileId === file.file_id"
-            aria-label="File actions"
-            @click="emit('toggleMenu', file.file_id)"
-          >
-            <AppIcon name="more_vert" />
-          </button>
-        </span>
-        <span
-          v-if="openMenuFileId === file.file_id"
-          class="item-action-menu file-card-menu"
-          @click.stop
-        >
-          <button type="button" @click="emit('togglePin', file)">
-            <AppIcon name="push_pin" />
-            {{ isFilePinned(file.file_id) ? 'Unpin' : 'Pin' }}
-          </button>
-          <button type="button" :disabled="disabled" @click="emit('renameFile', file)">
-            <AppIcon name="edit" />
-            Rename
-          </button>
-          <button type="button" :disabled="disabled" @click="emit('toggleVisibility', file)">
-            <AppIcon :name="file.visible_to_members ? 'visibility_off' : 'visibility'" />
-            {{ file.visible_to_members ? 'Hide from members' : 'Show to members' }}
-          </button>
-          <button
-            type="button"
-            class="danger-text"
-            :disabled="disabled"
-            @click="emit('deleteFile', file)"
-          >
-            <AppIcon name="close" />
-            Delete
-          </button>
-        </span>
-      </article>
-
-      <div v-if="totalFileCount === 0" class="file-empty-panel">
-        <span class="empty-state-mark" aria-hidden="true">
-          <AppIcon :name="hasSearchQuery ? 'search' : 'folder_open'" />
-        </span>
-        <strong>{{ emptyState.title }}</strong>
-        <span>{{ emptyState.detail }}</span>
-      </div>
+          @select="emit('selectFile', file)"
+          @toggle-menu="emit('toggleMenu', file.file_id)"
+          @close-menu="emit('toggleMenu', '')"
+          @request-action="handleAction"
+        />
       </div>
     </template>
 
     <template #pagination>
-      <div class="file-pagination">
-        <button
-          type="button"
-          class="pagination-link"
-          :disabled="currentPage <= 1"
-          @click="emit('stepPage', -1)"
-        >
-          <AppIcon name="chevron_left" />
-          Previous
-        </button>
-        <div class="pagination-pages">
-          <button
-            v-for="pageNumber in visiblePages"
-            :key="pageNumber"
-            type="button"
-            :class="{ active: pageNumber === currentPage }"
-            :aria-current="pageNumber === currentPage ? 'page' : undefined"
-            @click="emit('setPage', pageNumber)"
-          >
-            {{ pageNumber }}
-          </button>
-        </div>
-        <span class="pagination-range">{{ paginationLabel }}</span>
-        <button
-          type="button"
-          class="pagination-link"
-          :disabled="currentPage >= pageCount"
-          @click="emit('stepPage', 1)"
-        >
-          Next
-          <AppIcon name="chevron_right" />
-        </button>
-      </div>
+      <BaseFilePagination
+        :model="paginationModel"
+        @set-page="emit('setPage', $event)"
+        @step-page="emit('stepPage', $event)"
+      />
     </template>
   </FileWorkspaceSourcePane>
 </template>

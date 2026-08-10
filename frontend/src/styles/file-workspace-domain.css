@@ -1,0 +1,49 @@
+/*
+ * file-workspace-domain.css
+ *
+ * Domain accent tokens. The file workspace shell exposes a `data-domain`
+ * attribute (`excel` | `pdf`) on its root element; all domain-driven
+ * colours must read from the variables defined here. Do not introduce
+ * hex literals inside component CSS.
+ *
+ * Migration state: draft (milestone-0). Existing
+ * `file-management.css` / `pdf-management-alignment.css` continue to be
+ * the source of truth until milestone-8.
+ */
+
+:root {
+  --file-workspace-surface: #ffffff;
+  --file-workspace-surface-soft: #f8fafc;
+  --file-workspace-border: #e2e8f0;
+  --file-workspace-text: #0f172a;
+  --file-workspace-text-soft: #64748b;
+  --file-workspace-danger: #b91c1c;
+  --file-workspace-danger-soft: #fef2f2;
+  --file-workspace-success: #047857;
+  --file-workspace-warning: #b45309;
+}
+
+.file-workspace-base-reference-card {
+  --file-workspace-accent: #047857;
+  --file-workspace-accent-strong: #065f46;
+  --file-workspace-accent-soft: #ecfdf5;
+  --file-workspace-accent-on: #ffffff;
+}
+
+[data-domain='excel'] {
+  --file-workspace-accent: #047857;
+  --file-workspace-accent-strong: #065f46;
+  --file-workspace-accent-soft: #ecfdf5;
+  --file-workspace-accent-on: #ffffff;
+  --file-workspace-glyph-tone: #047857;
+  --file-workspace-glyph-soft: #ecfdf5;
+}
+
+[data-domain='pdf'] {
+  --file-workspace-accent: #006f66;
+  --file-workspace-accent-strong: #014f48;
+  --file-workspace-accent-soft: #cffaf4;
+  --file-workspace-accent-on: #ffffff;
+  --file-workspace-glyph-tone: #006f66;
+  --file-workspace-glyph-soft: #cffaf4;
+}

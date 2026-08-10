@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import AppIcon from '../../../components/AppIcon.vue'
 import FileWorkspaceLayout from '../../../components/file-workspace/FileWorkspaceLayout.vue'
+import BaseWorkspaceDialog from '../../../shared/file-workspace/components/BaseWorkspaceDialog.vue'
 import { fileLibraryCopy } from '../../file-library/domain-presentation'
 import { usePdfDocumentInsight } from '../composables/use-pdf-document-insight'
 import { usePdfKnowledgeLibrary } from '../composables/use-pdf-knowledge-library'
@@ -25,8 +26,11 @@ const library = usePdfKnowledgeLibrary({
   onLibraryChanged: () => emit('libraryChanged'),
 })
 const insight = usePdfDocumentInsight(library.selectedFile, library.selectedFiles)
-const fileInput = ref<HTMLInputElement | null>(null)
 const pendingDeleteFile = ref<PdfManagedFile | null>(null)
+const pendingRenameFile = ref<PdfManagedFile | null>(null)
+const renameDraft = ref('')
+const isRenamePending = ref(false)
+const renameErrorMessage = ref('')
 const isDeletePending = ref(false)
 const deleteErrorMessage = ref('')
 
@@ -71,6 +75,7 @@ watch(
   () => props.active,
   (active) => {
     if (!active) {
+      closeRenameDialog()
       closeDeleteDialog()
     }
   },
@@ -86,29 +91,51 @@ function applyFocusTarget(): void {
   }
 }
 
-function openFilePicker(): void {
-  if (!props.isAdmin || library.isUploading.value) {
-    return
-  }
-  fileInput.value?.click()
+function handleUploadFiles(files: File[]): void {
+  void library.uploadFiles(files)
 }
 
-function handleUploadInputChange(event: Event): void {
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files ?? [])
-  void library.uploadFiles(files)
-  input.value = ''
+function handleUploadValidationError(message: string): void {
+  library.errorMessage.value = message
 }
 
 function handleRenameFile(file: PdfManagedFile): void {
   if (!props.isAdmin) {
     return
   }
-  const nextName = window.prompt('Rename PDF source', file.name)
-  if (nextName === null) {
+  pendingRenameFile.value = file
+  renameDraft.value = file.name
+  renameErrorMessage.value = ''
+}
+
+function closeRenameDialog(): void {
+  if (isRenamePending.value) return
+  pendingRenameFile.value = null
+  renameDraft.value = ''
+  renameErrorMessage.value = ''
+}
+
+async function confirmRenameFile(): Promise<void> {
+  const file = pendingRenameFile.value
+  const nextName = renameDraft.value.trim()
+  if (!file || isRenamePending.value) return
+  if (!nextName) {
+    renameErrorMessage.value = 'Name cannot be empty.'
     return
   }
-  void library.renameFile(file, nextName)
+  if (nextName === file.name) {
+    closeRenameDialog()
+    return
+  }
+  isRenamePending.value = true
+  renameErrorMessage.value = ''
+  await library.renameFile(file, nextName)
+  isRenamePending.value = false
+  if (library.errorMessage.value) {
+    renameErrorMessage.value = library.errorMessage.value
+    return
+  }
+  closeRenameDialog()
 }
 
 function handleDeleteFile(file: PdfManagedFile): void {
@@ -145,6 +172,7 @@ async function confirmDeleteFile(): Promise<void> {
 
 function handleDocumentKeyDown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
+    closeRenameDialog()
     closeDeleteDialog()
   }
 }
@@ -201,7 +229,8 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           @select-file="library.selectFile"
           @select-scope="library.selectScope"
           @open-scope="library.openScope"
-          @request-upload="openFilePicker"
+          @upload-files="handleUploadFiles"
+          @upload-validation-error="handleUploadValidationError"
           @rename-file="handleRenameFile"
           @toggle-visibility="library.toggleFileVisibility"
           @delete-file="handleDeleteFile"
@@ -235,69 +264,33 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
     </template>
 
     <template #overlay>
-      <input
-        ref="fileInput"
-        class="pdfmgmt-file-input"
-        type="file"
-        accept=".pdf,application/pdf"
-        :aria-label="fileLibraryCopy.pdf.uploadTitle"
-        multiple
-        @change="handleUploadInputChange"
+      <BaseWorkspaceDialog
+        :open="Boolean(pendingRenameFile)"
+        mode="rename"
+        kind-label="PDF Source"
+        :display-name="pendingRenameFile?.name ?? ''"
+        :draft="renameDraft"
+        :error-message="renameErrorMessage"
+        :is-busy="isRenamePending"
+        @cancel="closeRenameDialog"
+        @confirm="confirmRenameFile"
+        @update-draft="renameDraft = $event"
       />
-      <section
-        v-if="pendingDeleteFile"
-        class="dialog-backdrop"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="pdf-delete-dialog-title"
-        @click.self="closeDeleteDialog"
-      >
-        <div class="app-dialog">
-          <div class="dialog-heading">
-            <div>
-              <p class="eyebrow">
-                {{ pendingDeleteFile.kind === 'folder' ? 'PDF Folder' : 'PDF Source' }}
-              </p>
-              <h3 id="pdf-delete-dialog-title">Delete</h3>
-            </div>
-            <button
-              type="button"
-              class="dialog-icon-button"
-              aria-label="Close"
-              :disabled="isDeletePending"
-              @click="closeDeleteDialog"
-            >
-              <AppIcon name="close" />
-            </button>
-          </div>
-          <p class="dialog-copy">
-            Delete "{{ pendingDeleteFile.name }}" from the PDF knowledge directory?
-            <template v-if="pendingDeleteDescendantCount > 0">
-              This also permanently removes {{ pendingDeleteDescendantCount }}
-              nested item{{ pendingDeleteDescendantCount === 1 ? '' : 's' }} and their indexed data.
-            </template>
-          </p>
-          <p v-if="deleteErrorMessage" class="dialog-error">{{ deleteErrorMessage }}</p>
-          <div class="dialog-actions">
-            <button
-              type="button"
-              class="dialog-secondary"
-              :disabled="isDeletePending"
-              @click="closeDeleteDialog"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              class="dialog-danger"
-              :disabled="isDeletePending"
-              @click="confirmDeleteFile"
-            >
-              {{ isDeletePending ? 'Deleting...' : 'Delete' }}
-            </button>
-          </div>
-        </div>
-      </section>
+      <BaseWorkspaceDialog
+        :open="Boolean(pendingDeleteFile)"
+        mode="delete"
+        :kind-label="pendingDeleteFile?.kind === 'folder' ? 'PDF Folder' : 'PDF Source'"
+        :display-name="pendingDeleteFile?.name ?? ''"
+        :description="pendingDeleteFile
+          ? `Delete &quot;${pendingDeleteFile.name}&quot; from the PDF knowledge directory?${pendingDeleteDescendantCount > 0
+            ? ` This also permanently removes ${pendingDeleteDescendantCount} nested item${pendingDeleteDescendantCount === 1 ? '' : 's'} and their indexed data.`
+            : ''}`
+          : ''"
+        :error-message="deleteErrorMessage"
+        :is-busy="isDeletePending"
+        @cancel="closeDeleteDialog"
+        @confirm="confirmDeleteFile"
+      />
     </template>
   </FileWorkspaceLayout>
 </template>

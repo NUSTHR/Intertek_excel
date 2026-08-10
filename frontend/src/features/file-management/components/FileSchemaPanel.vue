@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import AppIcon from '../../../components/AppIcon.vue'
+import BaseInsightSectionCard from '../../../shared/file-workspace/components/BaseInsightSectionCard.vue'
+import BaseFileState from '../../../shared/file-workspace/components/BaseFileState.vue'
 import { shortId } from '../../../app/workspace-utils'
 
 import type { ExcelFile, ExcelFileVersion, ExcelSheet } from '../../../types/excel-assets'
@@ -23,6 +25,12 @@ const emit = defineEmits<{
 </script>
 
 <template>
+  <BaseInsightSectionCard
+    title="Schema"
+    icon-name="schema"
+    :meta="`${schemaColumns.length} fields`"
+    tone="premium"
+  >
   <section class="file-schema-panel">
     <article class="schema-overview-card">
       <div class="schema-card-head">
@@ -71,9 +79,13 @@ const emit = defineEmits<{
           <strong>{{ sheet.sheet_code }} {{ sheet.sheet_name }}</strong>
           <span>{{ sheet.row_count }} rows / {{ sheet.column_count }} columns</span>
         </button>
-        <div v-if="sheets.length === 0" class="file-empty-panel">
-          No sheets available.
-        </div>
+        <BaseFileState
+          v-if="sheets.length === 0"
+          domain="excel"
+          icon-name="table_rows"
+          title="No sheets available"
+          detail="Select a workbook with parsed sheets to inspect its schema."
+        />
       </div>
     </article>
 
@@ -91,10 +103,15 @@ const emit = defineEmits<{
           <em>{{ column.type }}</em>
           <small>{{ column.sample }}</small>
         </div>
-        <div v-if="schemaColumns.length === 0" class="file-empty-panel">
-          Select a sheet to inspect columns.
-        </div>
+        <BaseFileState
+          v-if="schemaColumns.length === 0"
+          domain="excel"
+          icon-name="schema"
+          title="No columns available"
+          detail="Select a sheet to inspect its columns."
+        />
       </div>
     </article>
   </section>
+  </BaseInsightSectionCard>
 </template>

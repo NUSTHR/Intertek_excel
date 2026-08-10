@@ -33,8 +33,9 @@ test('uses parallel workspace and search copy for Excel and PDF files', () => {
 test('formats domain-specific counts with correct singular and plural nouns', () => {
   assert.equal(formatFileLibraryCount('excel', 1), '1 workbook')
   assert.equal(formatFileLibraryCount('excel', 2), '2 workbooks')
-  assert.equal(formatFileLibraryCount('pdf', 1), '1 source')
-  assert.equal(formatFileLibraryCount('pdf', 2), '2 sources')
+  assert.equal(formatFileLibraryCount('pdf', 0), '0 workbooks')
+  assert.equal(formatFileLibraryCount('pdf', 1), '1 workbook')
+  assert.equal(formatFileLibraryCount('pdf', 2), '2 workbooks')
 })
 
 test('uses consistent empty-state structure while preserving domain meaning', () => {
