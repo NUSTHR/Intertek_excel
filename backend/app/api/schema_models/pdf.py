@@ -143,6 +143,10 @@ class PdfSummaryTaskResponse(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     last_retry_at: str | None = None
+    source_fingerprint: str = ""
+    state_revision: int = 0
+    claimed_at: str | None = None
+    attempt: int = 1
 
 
 class CreatePdfSummaryTasksRequest(BaseModel):
@@ -176,6 +180,12 @@ class PdfDocumentSummaryResponse(BaseModel):
     suitable_questions: list[str] = Field(default_factory=list)
     unsuitable_questions: list[str] = Field(default_factory=list)
     routing_notes: str = ""
+    source_fingerprint: str = ""
+    source_updated_at: str | None = None
+    provider: str = ""
+    model: str = ""
+    prompt_version: str = "pdf-summary-v1"
+    revision: int = 0
 
 
 class PdfPreviewBlockResponse(BaseModel):

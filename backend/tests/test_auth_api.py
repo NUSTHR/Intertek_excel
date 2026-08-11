@@ -23,13 +23,15 @@ from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.llm_preferences import WorkspaceLlmPreferenceService
 from app.core.auth import normalize_email
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError, RateLimitError
 from app.main import app
 
 
 @pytest.fixture
-def client(tmp_path: Path) -> Iterator[TestClient]:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
     excel_assets = ExcelAssetService(
         repository=repository,
@@ -77,6 +79,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    get_settings.cache_clear()
 
 
 def test_admin_can_login_and_member_cannot_manage_files(

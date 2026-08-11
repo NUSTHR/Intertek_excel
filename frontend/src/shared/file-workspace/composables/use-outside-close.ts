@@ -1,4 +1,4 @@
-import { onBeforeUnmount, onMounted, watch, type Ref } from 'vue'
+import { onBeforeUnmount, onMounted, type Ref } from 'vue'
 
 export interface OutsideCloseOptions {
   isOpen: Ref<boolean>
@@ -86,13 +86,5 @@ export function useOutsideClose(options: OutsideCloseOptions): void {
   onBeforeUnmount(() => {
     document.removeEventListener('pointerdown', handlePointerDown, true)
     document.removeEventListener('keydown', handleKeyDown, true)
-  })
-
-  // Defensive: if the consumer sets `isOpen` to false while a stale
-  // pointerdown is in flight, ensure the next pointer event does not
-  // trigger a redundant `onClose()`. This is mostly a no-op but
-  // guarantees that the listener always reads the latest value.
-  watch(isOpen, () => {
-    /* keep handler references stable; no-op */
   })
 }

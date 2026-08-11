@@ -9,6 +9,7 @@ import {
 } from '../api/chat-api'
 import type { ChatAnswer, ChatSession, ExcelCitation, SelectedDocument } from '../types/chat'
 import { renderMarkdown } from '../utils/markdown'
+import ChatDataSourceMenu from '../features/chat/components/ChatDataSourceMenu.vue'
 import AppIcon from './AppIcon.vue'
 
 interface ChatHistoryEntry {
@@ -27,6 +28,8 @@ interface RenderedAnswerBlock {
   body: string
   thinking: string
 }
+
+type ChatRequestPhase = 'idle' | 'submitting' | 'answering' | 'cancelling'
 
 const draftSessionKey = '__draft__'
 const renderedBlockCacheLimit = 180
@@ -58,7 +61,7 @@ const emit = defineEmits<{
 const question = ref<string>('')
 const historiesBySession = ref<Record<string, ChatHistoryEntry[]>>({})
 const errorMessage = ref<string>('')
-const isAsking = ref<boolean>(false)
+const requestPhase = ref<ChatRequestPhase>('idle')
 const isHistoryLoading = ref<boolean>(false)
 const enableDeepThinking = ref<boolean>(false)
 const activeChatRequestId = ref<string>('')
@@ -70,10 +73,14 @@ let nextHistoryEntryId = 0
 let historyLoadRequestId = 0
 let activeChatAbortController: AbortController | null = null
 let activePendingEntry: PendingHistoryEntry | null = null
+let activeSubmittedQuestion = ''
 let copiedKeyTimer: number | null = null
 const renderedBlockCache = new Map<string, RenderedAnswerBlock>()
 
 const currentSessionKey = computed(() => props.sessionId || draftSessionKey)
+const isAsking = computed(() => (
+  requestPhase.value === 'submitting' || requestPhase.value === 'answering'
+))
 const effectiveDeepThinkingEnabled = computed(
   () => enableDeepThinking.value && props.answerSupportsDeepThinking,
 )
@@ -254,11 +261,12 @@ async function submitQuestion(): Promise<void> {
   }
 
   errorMessage.value = ''
-  isAsking.value = true
+  requestPhase.value = 'submitting'
   const requestId = newChatRequestId()
   const abortController = new AbortController()
   activeChatRequestId.value = requestId
   activeChatAbortController = abortController
+  activeSubmittedQuestion = trimmedQuestion
 
   let targetSessionId = props.sessionId
   let targetSessionKey = props.sessionId || draftSessionKey
@@ -290,6 +298,7 @@ async function submitQuestion(): Promise<void> {
     }
     setHistory(targetSessionKey, [...historyForSession(targetSessionKey), entry])
     activePendingEntry = { sessionKey: targetSessionKey, entryId }
+    requestPhase.value = 'answering'
     await scrollChatToBottom()
 
     const answer = await askExcelQuestion(
@@ -313,6 +322,7 @@ async function submitQuestion(): Promise<void> {
       )),
     )
     activePendingEntry = null
+    activeSubmittedQuestion = ''
     emit('answerReceived', answer)
     await scrollChatToBottom()
 
@@ -335,7 +345,8 @@ async function submitQuestion(): Promise<void> {
     if (activeChatRequestId.value === requestId) {
       activeChatRequestId.value = ''
       activeChatAbortController = null
-      isAsking.value = false
+      activeSubmittedQuestion = ''
+      requestPhase.value = 'idle'
     }
   }
 }
@@ -345,22 +356,27 @@ async function stopCurrentAnswer(): Promise<void> {
   if (!requestId) {
     return
   }
+  requestPhase.value = 'cancelling'
   const pendingEntry = activePendingEntry
   const restoredQuestion = pendingEntry
     ? historyForSession(pendingEntry.sessionKey).find(
       (entry) => entry.id === pendingEntry.entryId,
-    )?.question
-    : ''
+    )?.question ?? activeSubmittedQuestion
+    : activeSubmittedQuestion
   const cancelPromise = cancelChatRequest(requestId).catch(() => undefined)
+  if (pendingEntry) {
+    removeHistoryEntry(pendingEntry)
+  }
   activeChatRequestId.value = ''
   activeChatAbortController?.abort()
   activeChatAbortController = null
-  isAsking.value = false
-  if (pendingEntry) {
-    if (restoredQuestion) {
-      question.value = restoredQuestion
-    }
-    activePendingEntry = null
+  activePendingEntry = null
+  activeSubmittedQuestion = ''
+  if (restoredQuestion) {
+    question.value = restoredQuestion
+  }
+  requestPhase.value = 'idle'
+  if (restoredQuestion) {
     await nextTick()
     resizeChatInput()
     chatInput.value?.focus()
@@ -690,9 +706,11 @@ function resizeChatInput(): void {
             <span>Data Sources</span>
             <strong>{{ sourceCountLabel }}</strong>
           </div>
-          <button type="button" class="chat-source-menu" aria-label="Data source options">
-            <AppIcon name="more_vert" />
-          </button>
+          <ChatDataSourceMenu
+            :documents="dataSourceDocuments"
+            :document-titles="documentTitles"
+            @select="selectDocument"
+          />
         </div>
         <div class="chat-data-source-list">
           <button

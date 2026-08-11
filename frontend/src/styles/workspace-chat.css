@@ -356,9 +356,20 @@
   display: grid;
   place-items: center;
   color: #94a3b8;
+  border: 0;
+  padding: 0;
+  background: transparent;
   font-size: 17px;
-  pointer-events: none;
+  cursor: pointer;
   transform: translateY(-50%);
+}
+
+.sheet-search-icon:hover:not(:disabled) {
+  color: #0f172a;
+}
+
+.sheet-search-icon:disabled {
+  cursor: default;
 }
 
 .sheet-search-field input {
@@ -906,6 +917,73 @@
 
 .chat-source-menu .app-icon {
   font-size: 16px;
+}
+
+.chat-source-menu-control {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.chat-source-options-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  width: min(250px, calc(100vw - 48px));
+  gap: 3px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 6px;
+  background: #ffffff;
+  box-shadow: 0 14px 34px rgb(15 23 42 / 0.14);
+}
+
+.chat-source-options-popover > button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  padding: 8px;
+  color: #334155;
+  background: transparent;
+  text-align: left;
+}
+
+.chat-source-options-popover > button:hover {
+  background: #f1f5f9;
+}
+
+.chat-source-options-popover > button > span {
+  display: grid;
+  min-width: 0;
+}
+
+.chat-source-options-popover strong,
+.chat-source-options-popover small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-source-options-popover strong {
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.chat-source-options-popover small,
+.chat-source-options-empty {
+  color: #64748b;
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.chat-source-options-empty {
+  padding: 8px 9px;
 }
 
 .chat-data-source-list {

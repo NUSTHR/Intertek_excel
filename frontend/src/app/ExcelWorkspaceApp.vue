@@ -42,6 +42,8 @@ import {
 } from '../features/file-library/domain-presentation'
 import { PdfKnowledgeWorkspace, PdfParseDiagnosticsPage } from '../features/pdf-knowledge'
 import GlobalWorkspaceSidebar from './shell/GlobalWorkspaceSidebar.vue'
+import BaseActionMenu from '../shared/file-workspace/components/BaseActionMenu.vue'
+import type { ActionMenuItem } from '../shared/file-workspace/action-menu-contract'
 import { useTransientFeedback } from './use-transient-feedback'
 import { useAuthSession } from './composables/use-auth-session'
 import { useChatSessions } from './composables/use-chat-sessions'
@@ -456,19 +458,11 @@ onMounted(() => {
   if (typeof window !== 'undefined') {
     window.addEventListener('hashchange', syncActiveViewFromLocation)
   }
-  if (typeof document !== 'undefined') {
-    document.addEventListener('pointerdown', handleDocumentPointerDown)
-    document.addEventListener('keydown', handleDocumentKeyDown)
-  }
 })
 
 onBeforeUnmount(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('hashchange', syncActiveViewFromLocation)
-  }
-  if (typeof document !== 'undefined') {
-    document.removeEventListener('pointerdown', handleDocumentPointerDown)
-    document.removeEventListener('keydown', handleDocumentKeyDown)
   }
   clearOperationFeedback()
   clearChatSessionFeedback()
@@ -611,26 +605,6 @@ function closeActionMenus(): void {
   openChatSessionActionMenuId.value = ''
 }
 
-function handleDocumentPointerDown(event: PointerEvent): void {
-  if (!openFileActionMenuId.value && !openChatSessionActionMenuId.value) {
-    return
-  }
-  if (isActionMenuTarget(event.target)) {
-    return
-  }
-  closeActionMenus()
-}
-
-function handleDocumentKeyDown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
-    closeActionMenus()
-  }
-}
-
-function isActionMenuTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest('.item-action-menu, .menu-trigger'))
-}
-
 function collapseChatPanel(): void {
   stopChatResize()
   isChatPanelCollapsed.value = true
@@ -641,7 +615,12 @@ function expandChatPanel(): void {
 }
 
 function showNotificationsNotice(): void {
-  showOperationFeedback('info', 'No new file notifications.')
+  const message = 'No new file notifications.'
+  if (activeView.value === 'excel-chat') {
+    showChatSessionFeedback('info', message)
+    return
+  }
+  showOperationFeedback('info', message)
 }
 
 function showWorkspaceError(error: unknown, durationMs = 4200): void {
@@ -687,6 +666,28 @@ async function removeChatSession(session: ChatSession): Promise<void> {
   closeActionMenus()
   dialogError.value = ''
   confirmDialog.value = { kind: 'session', session }
+}
+
+function chatSessionActions(session: ChatSession): ActionMenuItem[] {
+  return [
+    {
+      id: 'toggle-pin',
+      label: session.pinned_at ? 'Unpin' : 'Pin',
+      iconName: 'push_pin',
+    },
+    { id: 'rename', label: 'Rename', iconName: 'edit' },
+    { id: 'delete', label: 'Delete', iconName: 'delete', tone: 'danger' },
+  ]
+}
+
+function handleChatSessionAction(session: ChatSession, actionId: string): void {
+  if (actionId === 'toggle-pin') {
+    void toggleChatSessionPin(session)
+  } else if (actionId === 'rename') {
+    void renameChatSessionPrompt(session)
+  } else if (actionId === 'delete') {
+    void removeChatSession(session)
+  }
 }
 
 async function confirmDeleteChatSession(session: ChatSession): Promise<void> {
@@ -1936,35 +1937,17 @@ function getGridCellValue(row: string[], columnIndex: number): string {
               <span class="session-copy">
                 <strong>{{ session.title }}</strong>
               </span>
-              <span class="session-actions" @click.stop>
-                <button
-                  type="button"
-                  class="menu-trigger compact"
-                  :aria-expanded="openChatSessionActionMenuId === session.session_id"
-                  aria-label="Session actions"
-                  @click="toggleChatSessionActionMenu(session.session_id)"
-                >
-                  <AppIcon name="more_vert" />
-                </button>
-              </span>
-              <span
-                v-if="openChatSessionActionMenuId === session.session_id"
-                class="item-action-menu session-action-menu"
-                @click.stop
-              >
-                <button type="button" @click="toggleChatSessionPin(session)">
-                  <AppIcon name="push_pin" />
-                  {{ session.pinned_at ? 'Unpin' : 'Pin' }}
-                </button>
-                <button type="button" @click="renameChatSessionPrompt(session)">
-                  <AppIcon name="edit" />
-                  Rename
-                </button>
-                <button type="button" class="danger-text" @click="removeChatSession(session)">
-                  <AppIcon name="close" />
-                  Delete
-                </button>
-              </span>
+              <BaseActionMenu
+                :is-open="openChatSessionActionMenuId === session.session_id"
+                :items="chatSessionActions(session)"
+                trigger-label="Session actions"
+                root-class="session-actions"
+                trigger-class="menu-trigger compact"
+                menu-class="session-action-menu"
+                @toggle="toggleChatSessionActionMenu(session.session_id)"
+                @select="handleChatSessionAction(session, $event)"
+                @close="openChatSessionActionMenuId = ''"
+              />
             </article>
 
             <div v-if="chatSessions.length === 0" class="session-empty-state">
@@ -1996,9 +1979,14 @@ function getGridCellValue(row: string[], columnIndex: number): string {
 
           <header class="sheet-topbar">
             <form class="sheet-search-field" @submit.prevent="submitSheetSearch">
-              <span class="sheet-search-icon" aria-hidden="true">
+              <button
+                type="submit"
+                class="sheet-search-icon"
+                aria-label="Search sheet data"
+                :disabled="!selectedVersionId || blocksWorkspaceMutation || !sheetSearchTerm.trim()"
+              >
                 <AppIcon name="search" />
-              </span>
+              </button>
               <input
                 v-model="sheetSearchTerm"
                 type="search"
@@ -2016,7 +2004,7 @@ function getGridCellValue(row: string[], columnIndex: number): string {
               </button>
             </form>
             <div class="sheet-topbar-actions">
-              <button type="button" aria-label="Notifications">
+              <button type="button" aria-label="Notifications" @click="showNotificationsNotice">
                 <AppIcon name="notifications" />
               </button>
             </div>

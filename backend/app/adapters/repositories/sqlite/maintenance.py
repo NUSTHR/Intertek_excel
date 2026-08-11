@@ -18,6 +18,8 @@ class SQLiteOperationalMaintenance:
         deleted_password_reset_tokens = 0
         deleted_chat_cancellations = 0
         deleted_login_attempts = 0
+        deleted_pdf_summary_tasks = 0
+        deleted_pdf_cleanup_jobs = 0
         if self._table_exists(connection, "auth_sessions"):
             cutoff = self._retention_cutoff_iso(
                 now_iso,
@@ -69,11 +71,45 @@ class SQLiteOperationalMaintenance:
                 (now_iso, cutoff),
             )
             deleted_login_attempts = max(0, cursor.rowcount)
+        if self._table_exists(connection, "pdf_summary_tasks"):
+            cutoff = self._retention_cutoff_iso(
+                now_iso,
+                self._policy.pdf_summary_task_retention_days,
+            )
+            cursor = connection.execute(
+                """
+                DELETE FROM pdf_summary_tasks
+                WHERE status IN ('ready', 'failed', 'skipped', 'cancelled')
+                  AND updated_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM pdf_document_summaries AS summary
+                    WHERE summary.generation_task_id = pdf_summary_tasks.task_id
+                  )
+                """,
+                (cutoff,),
+            )
+            deleted_pdf_summary_tasks = max(0, cursor.rowcount)
+        if self._table_exists(connection, "pdf_file_cleanup_jobs"):
+            cutoff = self._retention_cutoff_iso(
+                now_iso,
+                self._policy.pdf_cleanup_job_retention_days,
+            )
+            cursor = connection.execute(
+                """
+                DELETE FROM pdf_file_cleanup_jobs
+                WHERE status = 'completed' AND completed_at < ?
+                """,
+                (cutoff,),
+            )
+            deleted_pdf_cleanup_jobs = max(0, cursor.rowcount)
         return {
             "auth_sessions": deleted_auth_sessions,
             "password_reset_tokens": deleted_password_reset_tokens,
             "chat_request_cancellations": deleted_chat_cancellations,
             "auth_login_attempts": deleted_login_attempts,
+            "pdf_summary_tasks": deleted_pdf_summary_tasks,
+            "pdf_file_cleanup_jobs": deleted_pdf_cleanup_jobs,
         }
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:

@@ -2,7 +2,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
+from app.adapters.repositories.sqlite_repository import (
+    SCHEMA_MIGRATIONS,
+    SQLiteExcelAssetRepository,
+)
 from app.api.dependencies import get_excel_repository
 from app.core.config import get_settings
 from app.main import app
@@ -41,8 +44,8 @@ def test_health_and_readiness_endpoints(tmp_path: Path) -> None:
     }
     assert payload["details"]["migrations"]["metadata"] == {
         "migration_table_exists": True,
-        "current_version": 28,
-        "expected_version": 28,
+        "current_version": max(migration.version for migration in SCHEMA_MIGRATIONS),
+        "expected_version": max(migration.version for migration in SCHEMA_MIGRATIONS),
         "missing_count": 0,
         "unknown_count": 0,
         "checksum_mismatch_count": 0,
@@ -53,20 +56,29 @@ def test_health_and_readiness_endpoints(tmp_path: Path) -> None:
 class _temporary_settings_env:
     def __init__(self, tmp_path: Path) -> None:
         self._tmp_path = tmp_path
-        self._original_database_path: str | None = None
-        self._original_storage_root: str | None = None
+        self._original_values: dict[str, str | None] = {}
 
     def __enter__(self) -> None:
         import os
 
-        self._original_database_path = os.environ.get("EXCEL_DATABASE_PATH")
-        self._original_storage_root = os.environ.get("EXCEL_STORAGE_ROOT")
-        os.environ["EXCEL_DATABASE_PATH"] = str(self._tmp_path / "ready.sqlite3")
-        os.environ["EXCEL_STORAGE_ROOT"] = str(self._tmp_path / "storage")
+        mineru_command = self._tmp_path / "mineru"
+        mineru_command.write_text(
+            "#!/bin/sh\nprintf 'mineru, version 3.4.0\\n'\n",
+            encoding="utf-8",
+        )
+        mineru_command.chmod(0o755)
+        overrides = {
+            "EXCEL_DATABASE_PATH": str(self._tmp_path / "ready.sqlite3"),
+            "EXCEL_STORAGE_ROOT": str(self._tmp_path / "storage"),
+            "PDF_PARSER_BACKEND": "mineru",
+            "MINERU_COMMAND": str(mineru_command),
+        }
+        self._original_values = {key: os.environ.get(key) for key in overrides}
+        os.environ.update(overrides)
 
     def __exit__(self, *_args: object) -> None:
-        self._restore_env("EXCEL_DATABASE_PATH", self._original_database_path)
-        self._restore_env("EXCEL_STORAGE_ROOT", self._original_storage_root)
+        for key, value in self._original_values.items():
+            self._restore_env(key, value)
 
     def _restore_env(self, key: str, value: str | None) -> None:
         import os

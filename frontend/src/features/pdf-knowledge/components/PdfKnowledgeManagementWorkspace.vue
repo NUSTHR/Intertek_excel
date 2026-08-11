@@ -26,7 +26,11 @@ const props = defineProps<{
 const library = usePdfKnowledgeLibrary({
   onLibraryChanged: () => emit('libraryChanged'),
 })
-const insight = usePdfDocumentInsight(library.selectedFile, library.selectedFiles)
+const insight = usePdfDocumentInsight(
+  library.selectedFile,
+  library.selectedFiles,
+  library.files,
+)
 const pendingDeleteFile = ref<PdfManagedFile | null>(null)
 const pendingRenameFile = ref<PdfManagedFile | null>(null)
 const renameDraft = ref('')
@@ -251,7 +255,6 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           :selected-file="library.selectedFile.value"
           :selected-files="library.selectedFiles.value"
           :summary="insight.summary.value"
-          :summary-tasks="insight.summaryTasks.value"
           :preview-blocks="insight.previewBlocks.value"
           :schema="insight.schema.value"
           :is-detail-loading="insight.isDetailLoading.value"
@@ -259,8 +262,6 @@ function handleDocumentKeyDown(event: KeyboardEvent): void {
           :error-message="insight.errorMessage.value"
           @tab-change="insight.setActiveTab"
           @generate-summary="insight.generateSummary"
-          @cancel-summary-task="insight.cancelSummaryTask"
-          @retry-summary-task="insight.retrySummaryTask"
           @model-setting-change="insight.updateModelPreference"
         />
     </template>

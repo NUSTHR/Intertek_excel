@@ -88,6 +88,10 @@ test('both domains use the canonical page size and copy template', () => {
     title: 'No summary generated',
     detail: 'Select a PDF source and generate a summary to view AI insights.',
   })
+  assert.deepEqual(summaryEmptyCopy('excel', true), {
+    title: 'No summary generated',
+    detail: 'Generate a summary for the selected workbook to view AI insights.',
+  })
 })
 
 test('empty file libraries do not invent a page-one control', () => {
@@ -104,6 +108,14 @@ test('PDF restores folder upload without changing the Excel upload contract', ()
   assert.ok(pdfUploadFormData.includes('selection.relativePath'))
   assert.ok(pdfLibrary.includes('loadErrorMessage'))
   assert.ok(pdfFiles.includes('props.loadErrorMessage'))
+})
+
+test('PDF summary presentation hides task bookkeeping like the Excel summary', () => {
+  assert.equal(pdfInsight.includes('summaryTaskResultLabel'), false)
+  assert.equal(pdfInsight.includes('summary tasks completed'), false)
+  assert.equal(pdfInsight.includes('v-for="task in'), false)
+  assert.equal(pdfInsight.includes('summaryTasks:'), false)
+  assert.ok(pdfInsight.includes('isSummaryGenerating'))
 })
 
 test('shared design tokens and component styles are part of the application bundle', () => {

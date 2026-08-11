@@ -393,6 +393,7 @@ def test_pdf_folder_upload_reuses_existing_folder_nodes(client: TestClient) -> N
 def test_pdf_file_can_be_renamed_hidden_and_deleted_from_directory(
     client: TestClient,
     pdf_repository: SQLiteExcelAssetRepository,
+    tmp_path: Path,
 ) -> None:
     file_id = _upload_pdf(client, filename="root/a/safety-standard.pdf")
     worker = app.dependency_overrides[get_pdf_upload_task_worker]()
@@ -429,12 +430,21 @@ def test_pdf_file_can_be_renamed_hidden_and_deleted_from_directory(
     deleted = delete_response.json()
     assert deleted["file_id"] == file_id
     assert deleted["deleted_files"] == 1
-    assert deleted["deleted_chunks"] == 0
+    assert deleted["deleted_chunks"] > 0
+    assert deleted["deleted_summaries"] == 1
+    assert deleted["deleted_preview_blocks"] > 0
+    assert deleted["deleted_schema_items"] > 0
+    assert deleted["deleted_parse_reports"] == 1
+    assert deleted["deleted_parse_pages"] > 0
+    assert deleted["deleted_parse_artifacts"] == 0
 
     assert client.get(f"/api/pdf/files/{file_id}/detail").status_code == 404
     assert client.get("/api/pdf/files").json()["files"][0]["kind"] == "folder"
-    assert pdf_repository.get_pdf_document_detail(file_id) is not None
-    assert pdf_repository.list_pdf_document_chunks(file_id)
+    assert pdf_repository.get_pdf_document_detail(file_id) is None
+    assert pdf_repository.list_pdf_document_chunks(file_id) == []
+    assert pdf_repository.get_pdf_parse_report(file_id) is None
+    assert pdf_repository.list_pending_pdf_file_cleanup_jobs() == []
+    assert not (tmp_path / "storage" / "pdf-knowledge" / "files" / file_id).exists()
 
 
 def test_pdf_file_rename_conflict_is_scoped_to_parent(client: TestClient) -> None:
@@ -1129,6 +1139,48 @@ def test_pdf_summary_task_creation_reuses_active_task(client: TestClient) -> Non
     )
     assert cancel_response.status_code == 200
     assert cancel_response.json()["status"] == "cancelled"
+
+
+def test_pdf_summary_task_force_regenerates_ready_summary(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_id = _upload_pdf(client, filename="force-regenerate-standard.pdf")
+    upload_worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert upload_worker.run_once() is True
+
+    first_response = client.post(
+        "/api/pdf/summary-tasks",
+        json={"file_ids": [file_id]},
+    )
+    assert first_response.status_code == 202
+    first_task_id = first_response.json()["tasks"][0]["task_id"]
+    summary_worker = app.dependency_overrides[get_pdf_summary_task_worker]()
+    assert summary_worker.run_once() is True
+
+    skipped_response = client.post(
+        "/api/pdf/summary-tasks",
+        json={"file_ids": [file_id]},
+    )
+    assert skipped_response.status_code == 202
+    skipped_task = skipped_response.json()["tasks"][0]
+    assert skipped_task["status"] == "skipped"
+    assert skipped_task["result"]["reason"] == "already_ready"
+
+    regenerate_response = client.post(
+        "/api/pdf/summary-tasks",
+        json={"file_ids": [file_id], "force": True},
+    )
+    assert regenerate_response.status_code == 202
+    regenerate_task = regenerate_response.json()["tasks"][0]
+    assert regenerate_task["status"] == "queued"
+    assert regenerate_task["task_id"] != first_task_id
+    assert summary_worker.run_once() is True
+
+    detail = pdf_repository.get_pdf_document_detail(file_id)
+    assert detail is not None
+    assert detail.summary.status == "ready"
+    assert detail.summary.generation_task_id == regenerate_task["task_id"]
 
 
 def test_pdf_route_single_candidate_does_not_require_summary(

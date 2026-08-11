@@ -1,12 +1,11 @@
 import { computed, onMounted, ref, watch, type Ref } from 'vue'
 
 import {
-  cancelPdfSummaryTask,
   createPdfSummaryTasks,
   getPdfDocumentDetail,
   getPdfSummaryTask,
   listPdfModelSettings,
-  retryPdfSummaryTask,
+  listPdfSummaryTasks,
   updatePdfModelSetting,
 } from '../../../api/pdf-knowledge-api'
 import type {
@@ -23,16 +22,19 @@ import {
 } from '../utils/pdf-model-setting'
 import { usePdfTaskPolling } from './use-pdf-task-polling'
 
+type PdfSummaryPhase = 'idle' | 'submitting' | 'polling' | 'refreshing'
+
 export function usePdfDocumentInsight(
   selectedFile: Ref<PdfManagedFile | undefined>,
   selectedFiles: Readonly<Ref<PdfManagedFile[]>>,
+  allFiles: Readonly<Ref<PdfManagedFile[]>>,
 ) {
   const summaryTaskPolling = usePdfTaskPolling()
   const activeTab = ref<PdfManagementInsightTab>('summary')
   const documentDetail = ref<PdfDocumentDetail | null>(null)
   const modelSettings = ref<PdfModelSetting[]>([])
   const isDetailLoading = ref<boolean>(false)
-  const isSummaryGenerating = ref<boolean>(false)
+  const summaryPhase = ref<PdfSummaryPhase>('idle')
   const summaryTasks = ref<PdfSummaryTask[]>([])
   const modelSettingErrors = ref<Record<string, PdfModelSettingFieldErrors>>({})
   const errorMessage = ref<string>('')
@@ -48,9 +50,11 @@ export function usePdfDocumentInsight(
   const schema = computed(() => documentDetail.value?.schema ?? [])
   const contextTags = computed(() => documentDetail.value?.tags ?? [])
   const parseReport = computed(() => documentDetail.value?.parseReport)
+  const isSummaryGenerating = computed(() => summaryPhase.value !== 'idle')
 
   onMounted(() => {
     void loadModelSettings()
+    void restoreSummaryTasks()
   })
 
   watch(
@@ -59,7 +63,6 @@ export function usePdfDocumentInsight(
       return file && file.kind !== 'folder' ? file.id : ''
     },
     (fileId) => {
-      invalidateSummaryOperation()
       if (!fileId) {
         detailRequestId += 1
         documentDetail.value = null
@@ -72,9 +75,12 @@ export function usePdfDocumentInsight(
   )
 
   watch(
-    () => selectedFiles.value.map((file) => file.id).sort().join('|'),
+    () => [
+      selectedFiles.value.map((file) => file.id).sort().join('|'),
+      allFiles.value.map((file) => file.id).sort().join('|'),
+    ].join('::'),
     () => {
-      invalidateSummaryOperation()
+      void restoreSummaryTasks()
     },
   )
 
@@ -105,9 +111,13 @@ export function usePdfDocumentInsight(
     if (selected.length === 0) {
       return
     }
+    if (isSummaryGenerating.value) {
+      return
+    }
     const operationId = ++summaryOperationId
     const targetFileIds = selected.map((file) => file.id)
-    isSummaryGenerating.value = true
+    const force = shouldForceSummaryRegeneration(selected, summary.value)
+    summaryPhase.value = 'submitting'
     errorMessage.value = ''
     summaryTasks.value = []
     summaryTaskPolling.stopPolling()
@@ -115,6 +125,7 @@ export function usePdfDocumentInsight(
       const nextTasks = await createPdfSummaryTasks({
         fileIds: targetFileIds,
         includeDescendants: true,
+        force,
       })
       if (operationId !== summaryOperationId) {
         return
@@ -124,10 +135,39 @@ export function usePdfDocumentInsight(
     } catch (error: unknown) {
       if (operationId === summaryOperationId) {
         errorMessage.value = toErrorMessage(error)
+        summaryTasks.value = []
+        summaryPhase.value = 'idle'
       }
-    } finally {
+    }
+  }
+
+  async function restoreSummaryTasks(): Promise<void> {
+    const operationId = ++summaryOperationId
+    summaryTaskPolling.stopPolling()
+    try {
+      const listedTasks = await listPdfSummaryTasks()
+      if (operationId !== summaryOperationId) {
+        return
+      }
+      const selectedIds = summaryTargetFileIds(selectedFiles.value, allFiles.value)
+      const activeTasks = listedTasks.filter(
+        (task) => selectedIds.has(task.fileId) && isActiveSummaryTask(task),
+      )
+      summaryTasks.value = activeTasks
+      if (activeTasks.length > 0) {
+        startSummaryTaskPolling(
+          summaryTasks.value,
+          operationId,
+          [...selectedIds],
+        )
+      } else {
+        summaryPhase.value = 'idle'
+      }
+    } catch (error: unknown) {
       if (operationId === summaryOperationId) {
-        isSummaryGenerating.value = false
+        errorMessage.value = toErrorMessage(error)
+        summaryTasks.value = []
+        summaryPhase.value = 'idle'
       }
     }
   }
@@ -139,9 +179,10 @@ export function usePdfDocumentInsight(
   ): void {
     summaryTaskPolling.stopPolling()
     if (tasks.length === 0 || tasks.every(isTerminalSummaryTask)) {
-      void refreshSummaryTarget(operationId, targetFileIds)
+      void finalizeSummaryTasks(operationId, targetFileIds, tasks)
       return
     }
+    summaryPhase.value = 'polling'
     const taskIds = tasks.map((task) => task.id)
     summaryTaskPolling.startPolling({
       load: () => Promise.all(taskIds.map(getPdfSummaryTask)),
@@ -151,34 +192,47 @@ export function usePdfDocumentInsight(
           summaryTasks.value = nextTasks
         }
       },
-      onTerminal: () => refreshSummaryTarget(operationId, targetFileIds),
+      onTerminal: (nextTasks) => finalizeSummaryTasks(
+        operationId,
+        targetFileIds,
+        nextTasks,
+      ),
       onError: (error, isFinalAttempt) => {
         if (isFinalAttempt && operationId === summaryOperationId) {
           errorMessage.value = toErrorMessage(error)
+          summaryTasks.value = []
+          summaryPhase.value = 'idle'
         }
       },
     })
   }
 
-  async function cancelSummaryTask(taskId: string): Promise<void> {
-    errorMessage.value = ''
-    try {
-      const nextTask = await cancelPdfSummaryTask(taskId)
-      summaryTasks.value = replaceSummaryTask(summaryTasks.value, nextTask)
-      startSummaryTaskPolling(summaryTasks.value, summaryOperationId)
-    } catch (error: unknown) {
-      errorMessage.value = toErrorMessage(error)
+  async function finalizeSummaryTasks(
+    operationId: number,
+    targetFileIds: string[],
+    tasks: PdfSummaryTask[],
+  ): Promise<void> {
+    if (operationId !== summaryOperationId) {
+      return
     }
-  }
-
-  async function retrySummaryTask(taskId: string): Promise<void> {
-    errorMessage.value = ''
+    summaryTasks.value = tasks
+    const unsuccessfulTask = tasks.find(isUnsuccessfulSummaryTask)
+    if (unsuccessfulTask) {
+      errorMessage.value = unsuccessfulTask.errorMessage
+        || unsuccessfulTask.detail
+        || 'PDF summary generation failed.'
+      summaryTasks.value = []
+      summaryPhase.value = 'idle'
+      return
+    }
+    summaryPhase.value = 'refreshing'
     try {
-      const nextTask = await retryPdfSummaryTask(taskId)
-      summaryTasks.value = replaceSummaryTask(summaryTasks.value, nextTask)
-      startSummaryTaskPolling(summaryTasks.value, summaryOperationId)
-    } catch (error: unknown) {
-      errorMessage.value = toErrorMessage(error)
+      await refreshSummaryTarget(operationId, targetFileIds)
+    } finally {
+      if (operationId === summaryOperationId) {
+        summaryTasks.value = []
+        summaryPhase.value = 'idle'
+      }
     }
   }
 
@@ -269,13 +323,6 @@ export function usePdfDocumentInsight(
     activeTab.value = tab
   }
 
-  function invalidateSummaryOperation(): void {
-    summaryOperationId += 1
-    summaryTaskPolling.stopPolling()
-    summaryTasks.value = []
-    isSummaryGenerating.value = false
-  }
-
   async function refreshSummaryTarget(
     operationId: number,
     targetFileIds: string[],
@@ -284,7 +331,11 @@ export function usePdfDocumentInsight(
       return
     }
     const fileId = targetFileIds[0]
-    if (!fileId || selectedFile.value?.id !== fileId) {
+    if (
+      !fileId
+      || selectedFile.value?.id !== fileId
+      || selectedFile.value.kind === 'folder'
+    ) {
       return
     }
     await loadDocumentDetail(fileId)
@@ -314,7 +365,6 @@ export function usePdfDocumentInsight(
     schema,
     contextTags,
     parseReport,
-    summaryTasks,
     modelSettings,
     modelSettingErrors,
     isDetailLoading,
@@ -322,8 +372,6 @@ export function usePdfDocumentInsight(
     errorMessage,
     setActiveTab,
     generateSummary,
-    cancelSummaryTask,
-    retrySummaryTask,
     loadModelSettings,
     updateModelPreference,
   }
@@ -333,8 +381,47 @@ function isTerminalSummaryTask(task: PdfSummaryTask): boolean {
   return ['ready', 'failed', 'skipped', 'cancelled'].includes(task.status)
 }
 
-function replaceSummaryTask(tasks: PdfSummaryTask[], nextTask: PdfSummaryTask): PdfSummaryTask[] {
-  return tasks.map((task) => (task.id === nextTask.id ? nextTask : task))
+function isActiveSummaryTask(task: PdfSummaryTask): boolean {
+  return task.status === 'queued' || task.status === 'running'
+}
+
+function isUnsuccessfulSummaryTask(task: PdfSummaryTask): boolean {
+  if (task.status === 'failed' || task.status === 'cancelled') {
+    return true
+  }
+  return task.status === 'skipped' && task.result.reason !== 'already_ready'
+}
+
+function shouldForceSummaryRegeneration(
+  selected: PdfManagedFile[],
+  summary: PdfDocumentDetail['summary'] | null,
+): boolean {
+  return selected.length === 1
+    && selected[0].kind !== 'folder'
+    && summary?.fileId === selected[0].id
+    && summary.status === 'ready'
+}
+
+function summaryTargetFileIds(
+  selected: PdfManagedFile[],
+  allFiles: PdfManagedFile[],
+): Set<string> {
+  const selectedIds = new Set(selected.map((file) => file.id))
+  const fileLookup = new Map(allFiles.map((file) => [file.id, file]))
+  const targetIds = new Set(selectedIds)
+  for (const file of allFiles) {
+    let parentId = file.parentId
+    const visited = new Set<string>()
+    while (parentId && !visited.has(parentId)) {
+      if (selectedIds.has(parentId)) {
+        targetIds.add(file.id)
+        break
+      }
+      visited.add(parentId)
+      parentId = fileLookup.get(parentId)?.parentId
+    }
+  }
+  return targetIds
 }
 
 function toErrorMessage(error: unknown): string {

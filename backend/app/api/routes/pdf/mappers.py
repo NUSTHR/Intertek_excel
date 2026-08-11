@@ -162,6 +162,10 @@ def to_pdf_summary_task_response(task: PdfSummaryTask) -> PdfSummaryTaskResponse
         started_at=task.started_at,
         finished_at=task.finished_at,
         last_retry_at=task.last_retry_at,
+        source_fingerprint=task.source_fingerprint,
+        state_revision=task.state_revision,
+        claimed_at=task.claimed_at,
+        attempt=task.attempt,
     )
 
 
@@ -478,6 +482,12 @@ def to_pdf_summary_response(
         suitable_questions=summary.suitable_questions,
         unsuitable_questions=summary.unsuitable_questions,
         routing_notes=summary.routing_notes,
+        source_fingerprint=summary.source_fingerprint,
+        source_updated_at=summary.source_updated_at,
+        provider=summary.provider,
+        model=summary.model,
+        prompt_version=summary.prompt_version,
+        revision=summary.revision,
     )
 
 

@@ -19,7 +19,6 @@ import type {
   PdfManagementInsightTab,
   PdfModelSetting,
   PdfModelSettingFieldErrors,
-  PdfSummaryTask,
 } from '../types'
 
 const props = defineProps<{
@@ -31,7 +30,6 @@ const props = defineProps<{
   selectedFile?: PdfManagedFile
   selectedFiles: PdfManagedFile[]
   summary: PdfDocumentSummary | null
-  summaryTasks: PdfSummaryTask[]
   previewBlocks: PdfDocumentPreviewBlock[]
   schema: PdfDocumentSchemaItem[]
   isDetailLoading: boolean
@@ -42,8 +40,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   tabChange: [tab: PdfManagementInsightTab]
   generateSummary: []
-  cancelSummaryTask: [taskId: string]
-  retrySummaryTask: [taskId: string]
   modelSettingChange: [
     settingId: string,
     field: 'selectedProvider' | 'selectedModel',
@@ -57,7 +53,7 @@ const tabs: Array<{ key: PdfManagementInsightTab; label: string }> = [
   { key: 'preview', label: fileWorkspaceCopy.tabs.preview },
   { key: 'schema', label: fileWorkspaceCopy.tabs.schema },
 ]
-const summaryEmpty = summaryEmptyCopy('pdf')
+const summaryEmpty = computed(() => summaryEmptyCopy('pdf', selectedCount.value > 0))
 const selectedCount = computed(() => props.selectedFiles.length)
 const selectedFolderCount = computed(
   () => props.selectedFiles.filter((file) => file.kind === 'folder').length,
@@ -119,27 +115,6 @@ const normalizedModelStages = computed<BaseModelStageViewModel[]>(() => props.mo
   errorMessage: modelSettingError(setting.id, 'selectedProvider')
     || modelSettingError(setting.id, 'selectedModel'),
 })))
-const summaryTaskResultLabel = computed(() => {
-  const tasks = props.summaryTasks
-  if (tasks.length === 0) {
-    return ''
-  }
-  const readyCount = tasks.filter((task) => task.status === 'ready').length
-  const skippedCount = tasks.filter((task) => task.status === 'skipped').length
-  const failedCount = tasks.filter((task) =>
-    ['failed', 'cancelled'].includes(task.status),
-  ).length
-  const completedCount = readyCount + skippedCount
-  const activeCount = tasks.length - completedCount - failedCount
-  if (activeCount > 0) {
-    return `${completedCount} of ${tasks.length} summary tasks completed.`
-  }
-  if (failedCount > 0) {
-    return `${completedCount} completed; ${failedCount} failed or cancelled.`
-  }
-  return `${completedCount} summary task${completedCount === 1 ? '' : 's'} completed.`
-})
-
 const providerLabels: Record<string, string> = {
   deepseek: 'DeepSeek Official',
   siliconflow: 'SiliconFlow',
@@ -148,14 +123,6 @@ const providerLabels: Record<string, string> = {
 
 function providerLabel(provider: string): string {
   return providerLabels[provider] ?? provider
-}
-
-function canCancelSummaryTask(task: PdfSummaryTask): boolean {
-  return task.status === 'queued' || task.status === 'running'
-}
-
-function canRetrySummaryTask(task: PdfSummaryTask): boolean {
-  return task.status === 'failed' || task.status === 'cancelled'
 }
 
 function handleModelSettingChange(
@@ -271,34 +238,6 @@ function handleModelSettingChange(
                     : summaryEmpty.detail
               }}
             </p>
-            <p v-if="summaryTasks.length > 0" class="pdfmgmt-summary-task-result">
-              {{ summaryTaskResultLabel }}
-            </p>
-            <div v-if="summaryTasks.length > 0" class="pdfmgmt-summary-task-list">
-              <div
-                v-for="task in summaryTasks"
-                :key="task.id"
-                class="pdfmgmt-task-card compact"
-              >
-                <span>
-                  <strong>{{ task.detail || `Summary ${task.status}` }}</strong>
-                  <span>{{ task.status }} · {{ task.progress }}%</span>
-                  <small v-if="task.errorMessage">{{ task.errorMessage }}</small>
-                </span>
-                <span v-if="isAdmin" class="pdfmgmt-task-actions">
-                  <button
-                    v-if="canCancelSummaryTask(task)"
-                    type="button"
-                    @click="emit('cancelSummaryTask', task.id)"
-                  >Cancel</button>
-                  <button
-                    v-if="canRetrySummaryTask(task)"
-                    type="button"
-                    @click="emit('retrySummaryTask', task.id)"
-                  >Retry</button>
-                </span>
-              </div>
-            </div>
             <button
               type="button"
               class="summary-action-button primary file-workspace-base-primary-action"

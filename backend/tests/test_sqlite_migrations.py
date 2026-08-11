@@ -718,6 +718,8 @@ def test_repository_operational_maintenance_removes_expired_runtime_records(
         "password_reset_tokens": 2,
         "chat_request_cancellations": 0,
         "auth_login_attempts": 0,
+        "pdf_summary_tasks": 0,
+        "pdf_file_cleanup_jobs": 0,
     }
     assert auth_session_ids == {"auth_active", "auth_recent_expired"}
     assert reset_token_ids == {"reset_active", "reset_recent_expired"}

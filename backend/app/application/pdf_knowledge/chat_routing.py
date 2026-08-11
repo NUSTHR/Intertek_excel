@@ -41,7 +41,11 @@ class PdfRoutingCatalogBuilder:
         ready_summaries = {
             summary.file_id: summary
             for summary in self._repository.list_pdf_document_summaries()
-            if summary.status == "ready" and summary.file_id in files
+            if (
+                summary.status == "ready"
+                and summary.file_id in files
+                and summary.source_fingerprint == files[summary.file_id].content_fingerprint
+            )
         }
         fallback_file_ids = [
             file_id

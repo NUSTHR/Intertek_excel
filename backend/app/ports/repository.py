@@ -23,6 +23,7 @@ from app.domain.models import (
     PdfDocumentDetail,
     PdfDocumentSummary,
     PdfFile,
+    PdfFileCleanupJob,
     PdfFileStatus,
     PdfFileVisibility,
     PdfModelSetting,
@@ -612,6 +613,26 @@ class PdfKnowledgeRepository(Protocol):
     def delete_pdf_file_tree(self, file_id: str) -> dict[str, int]:
         ...
 
+    def list_pending_pdf_file_cleanup_jobs(self) -> list[PdfFileCleanupJob]:
+        ...
+
+    def complete_pdf_file_cleanup_job(
+        self,
+        *,
+        job_id: str,
+        completed_at: str,
+    ) -> PdfFileCleanupJob | None:
+        ...
+
+    def fail_pdf_file_cleanup_job(
+        self,
+        *,
+        job_id: str,
+        error_message: str,
+        failed_at: str,
+    ) -> PdfFileCleanupJob | None:
+        ...
+
     def create_pdf_upload_batch(self, batch: PdfUploadBatch) -> None:
         ...
 
@@ -710,7 +731,7 @@ class PdfKnowledgeRepository(Protocol):
     ) -> int:
         ...
 
-    def create_pdf_summary_task(self, task: PdfSummaryTask) -> None:
+    def create_pdf_summary_task(self, task: PdfSummaryTask) -> PdfSummaryTask:
         ...
 
     def get_pdf_summary_task(self, task_id: str) -> PdfSummaryTask | None:
@@ -734,6 +755,8 @@ class PdfKnowledgeRepository(Protocol):
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         result: dict[str, object],
         detail: str,
         finished_at: str,
@@ -744,6 +767,8 @@ class PdfKnowledgeRepository(Protocol):
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         failed_at: str,
     ) -> PdfSummaryTask | None:
@@ -753,6 +778,8 @@ class PdfKnowledgeRepository(Protocol):
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         detail: str,
         result: dict[str, object],
         skipped_at: str,
@@ -790,7 +817,7 @@ class PdfKnowledgeRepository(Protocol):
     def get_pdf_document_detail(self, file_id: str) -> PdfDocumentDetail | None:
         ...
 
-    def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> None:
+    def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> bool:
         ...
 
     def list_pdf_document_summaries(self) -> list[PdfDocumentSummary]:

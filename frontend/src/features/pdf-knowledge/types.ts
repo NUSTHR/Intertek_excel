@@ -240,6 +240,10 @@ export interface PdfSummaryTask {
   startedAt?: string
   finishedAt?: string
   lastRetryAt?: string
+  sourceFingerprint: string
+  stateRevision: number
+  claimedAt?: string
+  attempt: number
 }
 
 export interface PdfUploadBatch {
@@ -330,6 +334,12 @@ export interface PdfDocumentSummary {
   suitableQuestions?: string[]
   unsuitableQuestions?: string[]
   routingNotes?: string
+  sourceFingerprint?: string
+  sourceUpdatedAt?: string
+  provider?: string
+  model?: string
+  promptVersion?: string
+  revision?: number
 }
 
 export interface PdfDocumentPreviewBlock {

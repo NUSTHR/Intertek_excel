@@ -2,7 +2,7 @@
 import AppIcon from '../../../components/AppIcon.vue'
 import type { FileActionId, BaseFileRowViewModel } from '../file-card-contract'
 import type { FileActionItem } from '../file-action-menu-contract'
-import BaseFileActionMenu from './BaseFileActionMenu.vue'
+import BaseActionMenu from './BaseActionMenu.vue'
 
 const props = withDefaults(defineProps<{
   model: BaseFileRowViewModel
@@ -23,6 +23,11 @@ const emit = defineEmits<{
   requestAction: [model: BaseFileRowViewModel, action: FileActionId]
   closeMenu: []
 }>()
+
+function requestAction(actionId: string): void {
+  emit('closeMenu')
+  emit('requestAction', props.model, actionId as FileActionId)
+}
 </script>
 
 <template>
@@ -85,28 +90,18 @@ const emit = defineEmits<{
       <AppIcon name="push_pin" />
     </span>
 
-    <span v-if="actions.length > 0" class="file-workspace-base-row-actions">
-      <button
-        type="button"
-        class="file-workspace-base-menu-trigger"
-        :disabled="disabled"
-        :aria-label="`Actions for ${model.displayName}`"
-        :aria-expanded="menuOpen"
-        aria-haspopup="menu"
-        data-file-action-menu-item
-        @click.stop="emit('toggleMenu', model)"
-      >
-        <AppIcon name="more_vert" />
-      </button>
-      <BaseFileActionMenu
-        :is-open="menuOpen"
-        :items="actions"
-        anchor="right"
-        :is-disabled="disabled"
-        @select="emit('closeMenu'); emit('requestAction', model, $event)"
-        @close="emit('closeMenu')"
-      />
-    </span>
+    <BaseActionMenu
+      v-if="actions.length > 0"
+      :is-open="menuOpen"
+      :items="actions"
+      :trigger-label="`Actions for ${model.displayName}`"
+      :disabled="disabled"
+      root-class="file-workspace-base-row-actions"
+      trigger-class="file-workspace-base-menu-trigger"
+      @toggle="emit('toggleMenu', model)"
+      @select="requestAction"
+      @close="emit('closeMenu')"
+    />
 
     <button
       v-if="model.isFolderOpenable"

@@ -23,6 +23,10 @@ from app.ports.llm_client import LlmClient
 from app.ports.repository import PdfKnowledgeRepository
 
 
+class PdfSummarySourceChangedError(RuntimeError):
+    """Raised when parsed PDF content changes while a summary is being generated."""
+
+
 class PdfSummaryService:
     """Owns PDF summary generation and durable summary task lifecycle."""
 
@@ -72,8 +76,10 @@ class PdfSummaryService:
                 created_at=now,
                 force=force,
             )
-            self._repository.create_pdf_summary_task(task)
-            tasks.append(task)
+            if task.result.get("reason") == "already_ready":
+                tasks.append(task)
+                continue
+            tasks.append(self._repository.create_pdf_summary_task(task))
         return tasks
 
     def list_tasks(self, *, user_id: str) -> list[PdfSummaryTask]:
@@ -81,7 +87,7 @@ class PdfSummaryService:
 
     def get_task(self, task_id: str, *, user_id: str) -> PdfSummaryTask:
         task = self._repository.get_pdf_summary_task(task_id)
-        if task is None or task.user_id != user_id:
+        if task is None:
             raise AssetNotFoundError("PDF summary task was not found")
         return task
 
@@ -107,7 +113,7 @@ class PdfSummaryService:
                 "only failed, skipped, or cancelled PDF summary tasks can be retried"
             )
         file = self._repository.get_pdf_file(task.file_id)
-        if file is None or file.user_id != user_id:
+        if file is None:
             raise AssetNotFoundError("PDF source file was not found")
         retried = self._repository.retry_pdf_summary_task(
             task_id=task.task_id,
@@ -116,11 +122,14 @@ class PdfSummaryService:
         return retried or task
 
     def process_task(self, task: PdfSummaryTask) -> PdfSummaryTask:
+        worker_id, claim_token = self._task_claim(task)
         file = self._repository.get_pdf_file(task.file_id)
         now = utc_now_iso()
         if file is None:
             return self._repository.skip_pdf_summary_task(
                 task_id=task.task_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
                 detail="PDF source file is no longer available.",
                 result={"reason": "file_not_available"},
                 skipped_at=now,
@@ -128,6 +137,8 @@ class PdfSummaryService:
         if file.kind != PdfFileKind.PDF:
             return self._repository.skip_pdf_summary_task(
                 task_id=task.task_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
                 detail="Skipped non-PDF item.",
                 result={"reason": "not_pdf"},
                 skipped_at=now,
@@ -135,6 +146,8 @@ class PdfSummaryService:
         if file.processing_status != PdfProcessingStatus.READY:
             return self._repository.skip_pdf_summary_task(
                 task_id=task.task_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
                 detail="Skipped because PDF parsing is not ready.",
                 result={
                     "reason": "not_ready",
@@ -142,10 +155,35 @@ class PdfSummaryService:
                 },
                 skipped_at=now,
             ) or task
-        summary = self.generate(file.file_id, user_role=UserRole.ADMIN)
+        if file.content_fingerprint != task.source_fingerprint:
+            return self._repository.skip_pdf_summary_task(
+                task_id=task.task_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                detail="Skipped because the parsed PDF content changed.",
+                result={"reason": "source_changed"},
+                skipped_at=now,
+            ) or task
+        try:
+            summary = self.generate(
+                file.file_id,
+                user_role=UserRole.ADMIN,
+                generation_task=task,
+            )
+        except PdfSummarySourceChangedError:
+            return self._repository.skip_pdf_summary_task(
+                task_id=task.task_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                detail="Skipped because the parsed PDF content changed.",
+                result={"reason": "source_changed"},
+                skipped_at=utc_now_iso(),
+            ) or task
         finished_at = utc_now_iso()
         return self._repository.complete_pdf_summary_task(
             task_id=task.task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
             result={
                 "summary_status": summary.status,
                 "summary_updated_at": summary.updated_at,
@@ -159,8 +197,11 @@ class PdfSummaryService:
         task: PdfSummaryTask,
         error_message: str,
     ) -> PdfSummaryTask:
+        worker_id, claim_token = self._task_claim(task)
         return self._repository.fail_pdf_summary_task(
             task_id=task.task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
             error_message=error_message[:500],
             failed_at=utc_now_iso(),
         ) or task
@@ -176,7 +217,13 @@ class PdfSummaryService:
             failed_at=failed_at,
         )
 
-    def generate(self, file_id: str, *, user_role: UserRole) -> PdfDocumentSummary:
+    def generate(
+        self,
+        file_id: str,
+        *,
+        user_role: UserRole,
+        generation_task: PdfSummaryTask | None = None,
+    ) -> PdfDocumentSummary:
         file = self._library.get_file(file_id, user_role=user_role)
         now = utc_now_iso()
         if file.kind != PdfFileKind.PDF:
@@ -192,6 +239,11 @@ class PdfSummaryService:
                 content=content,
                 updated_at=now,
                 document_title=file.display_name,
+                source_fingerprint=file.content_fingerprint,
+                source_updated_at=file.updated_at,
+                generation_task_id=(generation_task.task_id if generation_task else None),
+                generated_by_user_id=(generation_task.user_id if generation_task else None),
+                created_at=now,
             )
         elif self._llm_client is not None and self._llm_preferences is not None:
             chunks = self._repository.list_pdf_document_chunks(file.file_id)
@@ -219,6 +271,13 @@ class PdfSummaryService:
                 suitable_questions=document_summary.suitable_questions,
                 unsuitable_questions=document_summary.unsuitable_questions,
                 routing_notes=document_summary.routing_notes,
+                source_fingerprint=file.content_fingerprint,
+                source_updated_at=file.updated_at,
+                provider=model_selection.provider,
+                model=model_selection.model,
+                generation_task_id=(generation_task.task_id if generation_task else None),
+                generated_by_user_id=(generation_task.user_id if generation_task else None),
+                created_at=now,
             )
         else:
             content = (
@@ -238,8 +297,18 @@ class PdfSummaryService:
                 suitable_questions=["Ask about content present in this PDF document."],
                 unsuitable_questions=["Questions requiring information outside this PDF."],
                 routing_notes="fallback PDF summary generated without LLM",
+                source_fingerprint=file.content_fingerprint,
+                source_updated_at=file.updated_at,
+                provider="fallback",
+                model="deterministic",
+                generation_task_id=(generation_task.task_id if generation_task else None),
+                generated_by_user_id=(generation_task.user_id if generation_task else None),
+                created_at=now,
             )
-        self._repository.save_pdf_document_summary(summary)
+        if not self._repository.save_pdf_document_summary(summary):
+            raise PdfSummarySourceChangedError(
+                "PDF content changed while its summary was being generated"
+            )
         return summary
 
     def mark_stale(self, file: PdfFile, *, updated_at: str) -> None:
@@ -252,8 +321,19 @@ class PdfSummaryService:
                 status="stale",
                 updated_at=updated_at,
                 error_message="PDF content changed; regenerate the summary before routing.",
+                source_fingerprint=file.content_fingerprint,
+                source_updated_at=file.updated_at,
             )
         )
+
+    def _task_claim(self, task: PdfSummaryTask) -> tuple[str, str]:
+        if (
+            task.status != PdfSummaryTaskStatus.RUNNING
+            or not task.worker_id
+            or not task.claim_token
+        ):
+            raise UploadValidationError("PDF summary task does not have an active worker claim")
+        return task.worker_id, task.claim_token
 
     def _task_candidate_files(
         self,
@@ -336,6 +416,7 @@ class PdfSummaryService:
                 created_at=created_at,
                 updated_at=created_at,
                 finished_at=created_at,
+                source_fingerprint=file.content_fingerprint,
             )
         if not force and self._summary_is_current_ready(file):
             return PdfSummaryTask(
@@ -350,6 +431,7 @@ class PdfSummaryService:
                 created_at=created_at,
                 updated_at=created_at,
                 finished_at=created_at,
+                source_fingerprint=file.content_fingerprint,
             )
         return PdfSummaryTask(
             task_id=new_id("pdfsummary"),
@@ -362,15 +444,14 @@ class PdfSummaryService:
             result={},
             created_at=created_at,
             updated_at=created_at,
+            source_fingerprint=file.content_fingerprint,
         )
 
     def _summary_is_current_ready(self, file: PdfFile) -> bool:
         detail = self._repository.get_pdf_document_detail(file.file_id)
         if detail is None or detail.summary.status != "ready":
             return False
-        if detail.summary.updated_at is None:
-            return False
-        return detail.summary.updated_at >= file.updated_at
+        return detail.summary.source_fingerprint == file.content_fingerprint
 
 
 def _dedupe_file_ids(file_ids: list[str]) -> list[str]:

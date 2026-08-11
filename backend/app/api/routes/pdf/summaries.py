@@ -2,7 +2,6 @@ from fastapi import APIRouter
 
 from app.api.routes.pdf.dependencies import (
     AdminDependency,
-    AuthenticatedDependency,
     PdfKnowledgeServiceDependency,
 )
 from app.api.routes.pdf.mappers import (
@@ -97,7 +96,7 @@ def retry_pdf_summary_task(
 def generate_pdf_document_summary(
     file_id: str,
     service: PdfKnowledgeServiceDependency,
-    user: AuthenticatedDependency,
+    user: AdminDependency,
 ) -> GeneratePdfSummaryResponse:
     return GeneratePdfSummaryResponse(
         summary=to_pdf_summary_response(service.generate_summary(file_id, user_role=user.role))

@@ -54,7 +54,11 @@ class PdfKnowledgeService:
         llm_client: LlmClient | None = None,
         llm_preferences: WorkspaceLlmPreferenceService | None = None,
     ) -> None:
-        library = PdfLibraryService(repository=repository)
+        resolved_storage_root = storage_root.expanduser().resolve()
+        library = PdfLibraryService(
+            repository=repository,
+            storage_root=resolved_storage_root,
+        )
         model_settings = PdfModelSettingsService(repository=repository)
         summaries = PdfSummaryService(
             repository=repository,
@@ -63,7 +67,6 @@ class PdfKnowledgeService:
             llm_client=llm_client,
             llm_preferences=llm_preferences,
         )
-        resolved_storage_root = storage_root.expanduser().resolve()
         upload_records = PdfUploadRecordBuilder(
             repository=repository,
             storage_root=resolved_storage_root,
@@ -98,6 +101,7 @@ class PdfKnowledgeService:
         self._parser_profiles = parser_registry
         self._uploads = uploads
         self._parsing = parsing
+        library.retry_pending_file_cleanups()
 
     def list_files(self, *, user_role: UserRole) -> list[PdfFile]:
         return self._library.list_files(user_role=user_role)

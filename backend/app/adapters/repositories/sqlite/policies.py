@@ -7,6 +7,8 @@ SQLITE_MAINTENANCE_INTERVAL_SECONDS = 300.0
 AUTH_SESSION_RETENTION_DAYS = 30
 PASSWORD_RESET_TOKEN_RETENTION_DAYS = 7
 LOGIN_ATTEMPT_RETENTION_DAYS = 1
+PDF_SUMMARY_TASK_RETENTION_DAYS = 90
+PDF_CLEANUP_JOB_RETENTION_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -22,3 +24,5 @@ class SQLiteMaintenancePolicy:
     auth_session_retention_days: int = AUTH_SESSION_RETENTION_DAYS
     password_reset_token_retention_days: int = PASSWORD_RESET_TOKEN_RETENTION_DAYS
     login_attempt_retention_days: int = LOGIN_ATTEMPT_RETENTION_DAYS
+    pdf_summary_task_retention_days: int = PDF_SUMMARY_TASK_RETENTION_DAYS
+    pdf_cleanup_job_retention_days: int = PDF_CLEANUP_JOB_RETENTION_DAYS

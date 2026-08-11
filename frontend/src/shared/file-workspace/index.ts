@@ -8,10 +8,13 @@ export type {
 } from './file-card-contract'
 
 export type {
+  ActionMenuItem,
+  ActionMenuTone,
+} from './action-menu-contract'
+
+export type {
   FileActionTone,
   FileActionItem,
-  BaseFileActionMenuProps,
-  BaseFileActionMenuEmits,
 } from './file-action-menu-contract'
 
 export {

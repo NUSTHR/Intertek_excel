@@ -500,49 +500,6 @@
   background: #ecfdf5;
 }
 
-.pdfmgmt-summary-task-result {
-  margin: 0;
-  color: #047857;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.pdfmgmt-summary-task-list {
-  display: grid;
-  gap: 8px;
-  width: 100%;
-}
-
-.pdfmgmt-summary-task-list .pdfmgmt-task-card {
-  min-width: 0;
-  width: 100%;
-  border-color: #d9e2ec;
-  background: #f8fafc;
-  text-align: left;
-}
-
-.pdfmgmt-summary-task-list .pdfmgmt-task-card > span:first-child {
-  gap: 2px;
-}
-
-.pdfmgmt-summary-task-list .pdfmgmt-task-card strong,
-.pdfmgmt-summary-task-list .pdfmgmt-task-card span,
-.pdfmgmt-summary-task-list .pdfmgmt-task-card small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pdfmgmt-summary-task-list .pdfmgmt-task-card span {
-  color: #475569;
-  font-size: 11px;
-}
-
-.pdfmgmt-summary-task-list .pdfmgmt-task-card small {
-  color: var(--pdfmgmt-danger);
-  font-size: 11px;
-}
-
 .pdfmgmt-ready-summary,
 .pdfmgmt-preview-block,
 .pdfmgmt-schema-grid > div,

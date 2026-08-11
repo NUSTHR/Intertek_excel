@@ -37,7 +37,7 @@ const newTagText = ref('')
 const newTagInput = ref<HTMLInputElement | null>(null)
 
 const primaryTags = computed(() => props.summary?.key_topics ?? [])
-const emptyCopy = summaryEmptyCopy('excel')
+const emptyCopy = computed(() => summaryEmptyCopy('excel', props.canGenerate))
 
 const isSavingSummary = computed(() => props.isSaving || isSavePending.value)
 

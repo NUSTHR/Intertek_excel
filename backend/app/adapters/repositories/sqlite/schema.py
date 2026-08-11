@@ -1023,4 +1023,148 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=29,
+        name="harden_pdf_summary_content_and_task_consistency",
+        statements=(
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN source_fingerprint TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN source_updated_at TEXT
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN provider TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN model TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN prompt_version TEXT NOT NULL DEFAULT 'pdf-summary-v1'
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN generation_task_id TEXT
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN generated_by_user_id TEXT
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN revision INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            ALTER TABLE pdf_document_summaries
+            ADD COLUMN created_at TEXT
+            """,
+            """
+            UPDATE pdf_document_summaries
+            SET source_fingerprint = COALESCE(
+                  (SELECT content_fingerprint
+                   FROM pdf_files
+                   WHERE pdf_files.file_id = pdf_document_summaries.file_id),
+                  ''
+                ),
+                source_updated_at = COALESCE(
+                  (SELECT updated_at
+                   FROM pdf_files
+                   WHERE pdf_files.file_id = pdf_document_summaries.file_id),
+                  updated_at
+                ),
+                created_at = COALESCE(created_at, updated_at)
+            """,
+            """
+            ALTER TABLE pdf_summary_tasks
+            ADD COLUMN source_fingerprint TEXT NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE pdf_summary_tasks
+            ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            ALTER TABLE pdf_summary_tasks
+            ADD COLUMN claim_token TEXT
+            """,
+            """
+            ALTER TABLE pdf_summary_tasks
+            ADD COLUMN claimed_at TEXT
+            """,
+            """
+            ALTER TABLE pdf_summary_tasks
+            ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1
+            """,
+            """
+            ALTER TABLE pdf_summary_tasks
+            ADD COLUMN parent_task_id TEXT
+            """,
+            """
+            UPDATE pdf_summary_tasks
+            SET source_fingerprint = COALESCE(
+              (SELECT content_fingerprint
+               FROM pdf_files
+               WHERE pdf_files.file_id = pdf_summary_tasks.file_id),
+              ''
+            )
+            """,
+            """
+            UPDATE pdf_summary_tasks
+            SET status = 'failed',
+                progress = 100,
+                detail = 'Superseded duplicate task during schema upgrade.',
+                error_message = 'A newer consistency rule replaced this duplicate task.',
+                finished_at = COALESCE(finished_at, updated_at),
+                state_revision = state_revision + 1
+            WHERE status IN ('queued', 'running')
+              AND task_id NOT IN (
+                SELECT MIN(task_id)
+                FROM pdf_summary_tasks
+                WHERE status IN ('queued', 'running')
+                GROUP BY file_id
+              )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pdf_summary_tasks_one_active_file
+              ON pdf_summary_tasks(file_id)
+              WHERE status IN ('queued', 'running')
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_summary_source_fingerprint
+              ON pdf_document_summaries(file_id, source_fingerprint)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=30,
+        name="add_pdf_file_cleanup_outbox",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_file_cleanup_jobs (
+              job_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              relative_path TEXT NOT NULL,
+              status TEXT NOT NULL,
+              attempt_count INTEGER NOT NULL DEFAULT 0,
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              completed_at TEXT
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pdf_cleanup_job_path_active
+              ON pdf_file_cleanup_jobs(relative_path)
+              WHERE status IN ('pending', 'failed')
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_cleanup_jobs_status_updated
+              ON pdf_file_cleanup_jobs(status, updated_at)
+            """,
+        ),
+    ),
 )

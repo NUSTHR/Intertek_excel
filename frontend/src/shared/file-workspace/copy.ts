@@ -23,10 +23,16 @@ export const fileWorkspaceCopy = {
   },
 } as const
 
-export function summaryEmptyCopy(domain: FileDomain): { title: string; detail: string } {
+export function summaryEmptyCopy(
+  domain: FileDomain,
+  hasSelection = false,
+): { title: string; detail: string } {
+  const noun = domainNouns[domain].singular
   return {
     title: 'No summary generated',
-    detail: `Select a ${domainNouns[domain].singular} and generate a summary to view AI insights.`,
+    detail: hasSelection
+      ? `Generate a summary for the selected ${noun} to view AI insights.`
+      : `Select a ${noun} and generate a summary to view AI insights.`,
   }
 }
 

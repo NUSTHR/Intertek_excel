@@ -167,6 +167,10 @@ interface PdfSummaryTaskResponse {
   started_at: string | null
   finished_at: string | null
   last_retry_at: string | null
+  source_fingerprint: string
+  state_revision: number
+  claimed_at: string | null
+  attempt: number
 }
 
 interface CreatePdfSummaryTasksResponse {
@@ -193,6 +197,12 @@ interface PdfDocumentSummaryResponse {
   suitable_questions?: string[]
   unsuitable_questions?: string[]
   routing_notes?: string
+  source_fingerprint?: string
+  source_updated_at?: string | null
+  provider?: string
+  model?: string
+  prompt_version?: string
+  revision?: number
 }
 
 interface PdfPreviewBlockResponse {
@@ -1072,6 +1082,10 @@ function toSummaryTask(task: PdfSummaryTaskResponse): PdfSummaryTask {
     startedAt: task.started_at ?? undefined,
     finishedAt: task.finished_at ?? undefined,
     lastRetryAt: task.last_retry_at ?? undefined,
+    sourceFingerprint: task.source_fingerprint,
+    stateRevision: task.state_revision,
+    claimedAt: task.claimed_at ?? undefined,
+    attempt: task.attempt,
   }
 }
 
@@ -1154,6 +1168,12 @@ function toDocumentSummary(summary: PdfDocumentSummaryResponse): PdfDocumentSumm
     suitableQuestions: summary.suitable_questions ?? [],
     unsuitableQuestions: summary.unsuitable_questions ?? [],
     routingNotes: summary.routing_notes,
+    sourceFingerprint: summary.source_fingerprint,
+    sourceUpdatedAt: summary.source_updated_at ?? undefined,
+    provider: summary.provider,
+    model: summary.model,
+    promptVersion: summary.prompt_version,
+    revision: summary.revision,
   }
 }
 

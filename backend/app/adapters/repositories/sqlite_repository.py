@@ -73,6 +73,7 @@ from app.domain.models import (
     PdfDocumentDetail,
     PdfDocumentSummary,
     PdfFile,
+    PdfFileCleanupJob,
     PdfFileKind,
     PdfFileStatus,
     PdfFileVisibility,
@@ -220,6 +221,29 @@ class SQLiteExcelAssetRepository:
                 (ordered_content_fingerprint(content_hashes), file_id)
                 for file_id, content_hashes in hashes_by_file_id.items()
             ],
+        )
+        connection.execute(
+            """
+            UPDATE pdf_document_summaries
+            SET source_fingerprint = (
+                  SELECT content_fingerprint
+                  FROM pdf_files
+                  WHERE pdf_files.file_id = pdf_document_summaries.file_id
+                ),
+                source_updated_at = COALESCE(
+                  source_updated_at,
+                  (SELECT updated_at
+                   FROM pdf_files
+                   WHERE pdf_files.file_id = pdf_document_summaries.file_id)
+                )
+            WHERE source_fingerprint = ''
+              AND EXISTS (
+                SELECT 1
+                FROM pdf_files
+                WHERE pdf_files.file_id = pdf_document_summaries.file_id
+                  AND pdf_files.content_fingerprint <> ''
+              )
+            """
         )
 
     def create_file(self, file: ExcelFile) -> None:
@@ -1001,6 +1025,113 @@ class SQLiteExcelAssetRepository:
 
             deleted_at = utc_now_iso()
             file_ids = [str(row["file_id"]) for row in rows]
+            cleanup_jobs = [
+                (
+                    new_id("pdfcleanup"),
+                    current_file_id,
+                    f"pdf-knowledge/files/{current_file_id}",
+                    "pending",
+                    0,
+                    None,
+                    deleted_at,
+                    deleted_at,
+                    None,
+                )
+                for current_file_id in file_ids
+                if connection.execute(
+                    """
+                    SELECT 1 FROM pdf_files
+                    WHERE file_id = ? AND storage_path IS NOT NULL
+                    """,
+                    (current_file_id,),
+                ).fetchone()
+                is not None
+            ]
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO pdf_file_cleanup_jobs
+                  (
+                    job_id, file_id, relative_path, status, attempt_count,
+                    error_message, created_at, updated_at, completed_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                cleanup_jobs,
+            )
+
+            deleted_counts: dict[str, int] = {}
+            content_tables = (
+                ("pdf_chat_session_documents", "deleted_chat_attachments"),
+                ("pdf_document_chunks", "deleted_chunks"),
+                ("pdf_preview_blocks", "deleted_preview_blocks"),
+                ("pdf_schema_items", "deleted_schema_items"),
+                ("pdf_document_tags", "deleted_tags"),
+                ("pdf_parse_pages", "deleted_parse_pages"),
+                ("pdf_parse_artifacts", "deleted_parse_artifacts"),
+                ("pdf_parse_reports", "deleted_parse_reports"),
+                ("pdf_document_summaries", "deleted_summaries"),
+            )
+            for table_name, count_name in content_tables:
+                deleted_counts[count_name] = sum(
+                    max(
+                        0,
+                        connection.execute(
+                            f"DELETE FROM {table_name} WHERE file_id = ?",
+                            (current_file_id,),
+                        ).rowcount,
+                    )
+                    for current_file_id in file_ids
+                )
+            connection.executemany(
+                """
+                UPDATE pdf_summary_tasks
+                SET status = ?,
+                    progress = 100,
+                    detail = ?,
+                    error_message = NULL,
+                    updated_at = ?,
+                    finished_at = ?,
+                    state_revision = state_revision + 1
+                WHERE file_id = ? AND status IN (?, ?)
+                """,
+                [
+                    (
+                        PdfSummaryTaskStatus.CANCELLED.value,
+                        "Cancelled because the PDF source was deleted.",
+                        deleted_at,
+                        deleted_at,
+                        current_file_id,
+                        PdfSummaryTaskStatus.QUEUED.value,
+                        PdfSummaryTaskStatus.RUNNING.value,
+                    )
+                    for current_file_id in file_ids
+                ],
+            )
+            connection.executemany(
+                """
+                UPDATE pdf_upload_tasks
+                SET status = ?,
+                    stage = ?,
+                    progress = 100,
+                    detail = ?,
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE file_id = ? AND status IN (?, ?)
+                """,
+                [
+                    (
+                        PdfUploadTaskStatus.CANCELLED.value,
+                        PdfUploadTaskStage.CANCELLED.value,
+                        "Cancelled because the PDF source was deleted.",
+                        deleted_at,
+                        deleted_at,
+                        current_file_id,
+                        PdfUploadTaskStatus.QUEUED.value,
+                        PdfUploadTaskStatus.PROCESSING.value,
+                    )
+                    for current_file_id in file_ids
+                ],
+            )
             archived_names = [
                 (
                     self._deleted_file_display_name(
@@ -1033,8 +1164,77 @@ class SQLiteExcelAssetRepository:
 
         return {
             **self._empty_pdf_delete_counts(),
+            **deleted_counts,
             "deleted_files": len(file_ids),
+            "cleanup_jobs": len(cleanup_jobs),
         }
+
+    def list_pending_pdf_file_cleanup_jobs(self) -> list[PdfFileCleanupJob]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM pdf_file_cleanup_jobs
+                WHERE status IN ('pending', 'failed')
+                  AND attempt_count < 10
+                ORDER BY created_at ASC
+                LIMIT 100
+                """
+            ).fetchall()
+        return [self._to_pdf_file_cleanup_job(row) for row in rows]
+
+    def complete_pdf_file_cleanup_job(
+        self,
+        *,
+        job_id: str,
+        completed_at: str,
+    ) -> PdfFileCleanupJob | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_file_cleanup_jobs
+                SET status = 'completed',
+                    attempt_count = attempt_count + 1,
+                    error_message = NULL,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE job_id = ? AND status IN ('pending', 'failed')
+                """,
+                (completed_at, completed_at, job_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM pdf_file_cleanup_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._to_pdf_file_cleanup_job(row)
+
+    def fail_pdf_file_cleanup_job(
+        self,
+        *,
+        job_id: str,
+        error_message: str,
+        failed_at: str,
+    ) -> PdfFileCleanupJob | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_file_cleanup_jobs
+                SET status = 'failed',
+                    attempt_count = attempt_count + 1,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE job_id = ? AND status IN ('pending', 'failed')
+                """,
+                (error_message[:500], failed_at, job_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                "SELECT * FROM pdf_file_cleanup_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._to_pdf_file_cleanup_job(row)
 
     def _empty_pdf_delete_counts(self) -> dict[str, int]:
         return {
@@ -1476,20 +1676,42 @@ class SQLiteExcelAssetRepository:
             )
         return max(0, cursor.rowcount)
 
-    def create_pdf_summary_task(self, task: PdfSummaryTask) -> None:
+    def create_pdf_summary_task(self, task: PdfSummaryTask) -> PdfSummaryTask:
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO pdf_summary_tasks
-                  (
-                    task_id, user_id, file_id, status, progress, detail,
-                    error_message, result_json, created_at, updated_at,
-                    started_at, finished_at, worker_id, retry_count, last_retry_at
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._pdf_summary_task_values(task),
-            )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO pdf_summary_tasks
+                      (
+                        task_id, user_id, file_id, status, progress, detail,
+                        error_message, result_json, created_at, updated_at,
+                        started_at, finished_at, worker_id, retry_count, last_retry_at,
+                        source_fingerprint, state_revision, claim_token, claimed_at,
+                        attempt, parent_task_id
+                      )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._pdf_summary_task_values(task),
+                )
+            except sqlite3.IntegrityError:
+                row = connection.execute(
+                    """
+                    SELECT * FROM pdf_summary_tasks
+                    WHERE file_id = ? AND status IN (?, ?)
+                    ORDER BY created_at ASC, task_id ASC
+                    LIMIT 1
+                    """,
+                    (
+                        task.file_id,
+                        PdfSummaryTaskStatus.QUEUED.value,
+                        PdfSummaryTaskStatus.RUNNING.value,
+                    ),
+                ).fetchone()
+                existing = self._to_pdf_summary_task(row)
+                if existing is None:
+                    raise
+                return existing
+        return task
 
     def get_pdf_summary_task(self, task_id: str) -> PdfSummaryTask | None:
         with self._connect() as connection:
@@ -1522,11 +1744,9 @@ class SQLiteExcelAssetRepository:
             rows = connection.execute(
                 """
                 SELECT * FROM pdf_summary_tasks
-                WHERE user_id = ?
                 ORDER BY updated_at DESC, created_at DESC
                 LIMIT 50
-                """,
-                (user_id,),
+                """
             ).fetchall()
         return [
             task
@@ -1540,17 +1760,21 @@ class SQLiteExcelAssetRepository:
         worker_id: str,
         started_at: str,
     ) -> PdfSummaryTask | None:
+        claim_token = new_id("pdfsummaryclaim")
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE pdf_summary_tasks
                 SET status = ?,
                     worker_id = ?,
+                    claim_token = ?,
+                    claimed_at = ?,
                     started_at = ?,
                     updated_at = ?,
                     error_message = NULL,
                     detail = ?,
-                    progress = ?
+                    progress = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = (
                   SELECT task_id
                   FROM pdf_summary_tasks
@@ -1562,6 +1786,8 @@ class SQLiteExcelAssetRepository:
                 (
                     PdfSummaryTaskStatus.RUNNING.value,
                     worker_id,
+                    claim_token,
+                    started_at,
                     started_at,
                     started_at,
                     "PDF summary generation started.",
@@ -1575,11 +1801,12 @@ class SQLiteExcelAssetRepository:
                 """
                 SELECT * FROM pdf_summary_tasks
                 WHERE worker_id = ?
+                  AND claim_token = ?
                   AND status = ?
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (worker_id, PdfSummaryTaskStatus.RUNNING.value),
+                (worker_id, claim_token, PdfSummaryTaskStatus.RUNNING.value),
             ).fetchone()
         return self._to_pdf_summary_task(row)
 
@@ -1587,6 +1814,8 @@ class SQLiteExcelAssetRepository:
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         result: dict[str, object],
         detail: str,
         finished_at: str,
@@ -1601,8 +1830,12 @@ class SQLiteExcelAssetRepository:
                     error_message = NULL,
                     result_json = ?,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
                 """,
                 (
                     PdfSummaryTaskStatus.READY.value,
@@ -1612,6 +1845,9 @@ class SQLiteExcelAssetRepository:
                     finished_at,
                     finished_at,
                     task_id,
+                    PdfSummaryTaskStatus.RUNNING.value,
+                    worker_id,
+                    claim_token,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1626,6 +1862,8 @@ class SQLiteExcelAssetRepository:
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         failed_at: str,
     ) -> PdfSummaryTask | None:
@@ -1638,8 +1876,12 @@ class SQLiteExcelAssetRepository:
                     detail = ?,
                     error_message = ?,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
                 """,
                 (
                     PdfSummaryTaskStatus.FAILED.value,
@@ -1649,6 +1891,9 @@ class SQLiteExcelAssetRepository:
                     failed_at,
                     failed_at,
                     task_id,
+                    PdfSummaryTaskStatus.RUNNING.value,
+                    worker_id,
+                    claim_token,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1663,6 +1908,8 @@ class SQLiteExcelAssetRepository:
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         detail: str,
         result: dict[str, object],
         skipped_at: str,
@@ -1677,8 +1924,12 @@ class SQLiteExcelAssetRepository:
                     error_message = NULL,
                     result_json = ?,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
                 """,
                 (
                     PdfSummaryTaskStatus.SKIPPED.value,
@@ -1688,6 +1939,9 @@ class SQLiteExcelAssetRepository:
                     skipped_at,
                     skipped_at,
                     task_id,
+                    PdfSummaryTaskStatus.RUNNING.value,
+                    worker_id,
+                    claim_token,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1755,7 +2009,17 @@ class SQLiteExcelAssetRepository:
                     started_at = NULL,
                     finished_at = NULL,
                     worker_id = NULL,
+                    claim_token = NULL,
+                    claimed_at = NULL,
+                    source_fingerprint = COALESCE(
+                      (SELECT content_fingerprint
+                       FROM pdf_files
+                       WHERE pdf_files.file_id = pdf_summary_tasks.file_id),
+                      ''
+                    ),
                     retry_count = retry_count + 1,
+                    attempt = attempt + 1,
+                    state_revision = state_revision + 1,
                     last_retry_at = ?
                 WHERE task_id = ?
                   AND status IN (?, ?, ?)
@@ -1797,6 +2061,7 @@ class SQLiteExcelAssetRepository:
                     error_message = ?,
                     updated_at = ?,
                     finished_at = ?
+                    , state_revision = state_revision + 1
                 WHERE status = ?
                   AND started_at IS NOT NULL
                   AND started_at < ?
@@ -1816,6 +2081,8 @@ class SQLiteExcelAssetRepository:
 
     def save_pdf_document_detail(self, detail: PdfDocumentDetail) -> None:
         with self._connect() as connection:
+            if not self._is_active_pdf_file(connection, detail.file_id):
+                return
             connection.execute(
                 "DELETE FROM pdf_preview_blocks WHERE file_id = ?",
                 (detail.file_id,),
@@ -1922,9 +2189,20 @@ class SQLiteExcelAssetRepository:
             parse_report=self.get_pdf_parse_report(file_id),
         )
 
-    def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> None:
+    def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> bool:
         with self._connect() as connection:
+            source = connection.execute(
+                """
+                SELECT content_fingerprint
+                FROM pdf_files
+                WHERE file_id = ? AND status = ?
+                """,
+                (summary.file_id, PdfFileStatus.ACTIVE.value),
+            ).fetchone()
+            if source is None or str(source["content_fingerprint"]) != summary.source_fingerprint:
+                return False
             self._save_pdf_summary(connection, summary)
+        return True
 
     def list_pdf_document_summaries(self) -> list[PdfDocumentSummary]:
         with self._connect() as connection:
@@ -1942,6 +2220,8 @@ class SQLiteExcelAssetRepository:
 
     def save_pdf_parse_report(self, report: PdfParseReport) -> None:
         with self._connect() as connection:
+            if not self._is_active_pdf_file(connection, report.file_id):
+                return
             connection.execute(
                 """
                 INSERT INTO pdf_parse_reports
@@ -2037,6 +2317,8 @@ class SQLiteExcelAssetRepository:
         pages: list[PdfParsePage],
     ) -> None:
         with self._connect() as connection:
+            if not self._is_active_pdf_file(connection, file_id):
+                return
             connection.execute(
                 "DELETE FROM pdf_parse_pages WHERE file_id = ?",
                 (file_id,),
@@ -2087,6 +2369,8 @@ class SQLiteExcelAssetRepository:
         artifacts: list[PdfParseArtifact],
     ) -> None:
         with self._connect() as connection:
+            if not self._is_active_pdf_file(connection, file_id):
+                return
             connection.execute(
                 "DELETE FROM pdf_parse_artifacts WHERE file_id = ?",
                 (file_id,),
@@ -2134,6 +2418,8 @@ class SQLiteExcelAssetRepository:
     ) -> None:
         created_at = utc_now_iso()
         with self._connect() as connection:
+            if not self._is_active_pdf_file(connection, file_id):
+                return
             connection.execute(
                 "DELETE FROM pdf_document_chunks WHERE file_id = ?",
                 (file_id,),
@@ -3789,6 +4075,12 @@ class SQLiteExcelAssetRepository:
             task.worker_id,
             task.retry_count,
             task.last_retry_at,
+            task.source_fingerprint,
+            task.state_revision,
+            task.claim_token,
+            task.claimed_at,
+            task.attempt,
+            task.parent_task_id,
         )
 
     def _to_pdf_summary_task(self, row: sqlite3.Row | None) -> PdfSummaryTask | None:
@@ -3810,7 +4102,36 @@ class SQLiteExcelAssetRepository:
             worker_id=row["worker_id"],
             retry_count=safe_int(row_value(row, "retry_count", 0), 0),
             last_retry_at=row_value(row, "last_retry_at"),
+            source_fingerprint=row_str(row, "source_fingerprint"),
+            state_revision=safe_int(row_value(row, "state_revision", 0), 0),
+            claim_token=row_value(row, "claim_token"),
+            claimed_at=row_value(row, "claimed_at"),
+            attempt=safe_int(row_value(row, "attempt", 1), 1),
+            parent_task_id=row_value(row, "parent_task_id"),
         )
+
+    def _to_pdf_file_cleanup_job(self, row: sqlite3.Row) -> PdfFileCleanupJob:
+        return PdfFileCleanupJob(
+            job_id=str(row["job_id"]),
+            file_id=str(row["file_id"]),
+            relative_path=str(row["relative_path"]),
+            status=str(row["status"]),
+            attempt_count=int(row["attempt_count"]),
+            error_message=row["error_message"],
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            completed_at=row["completed_at"],
+        )
+
+    def _is_active_pdf_file(
+        self,
+        connection: sqlite3.Connection,
+        file_id: str,
+    ) -> bool:
+        return connection.execute(
+            "SELECT 1 FROM pdf_files WHERE file_id = ? AND status = ?",
+            (file_id, PdfFileStatus.ACTIVE.value),
+        ).fetchone() is not None
 
     def _save_pdf_summary(
         self,
@@ -3826,8 +4147,11 @@ class SQLiteExcelAssetRepository:
                 key_topics_json, positive_routing_terms_json,
                 negative_routing_terms_json, exact_identifiers_json,
                 suitable_questions_json, unsuitable_questions_json, routing_notes
+                , source_fingerprint, source_updated_at, provider, model,
+                prompt_version, generation_task_id, generated_by_user_id,
+                revision, created_at
               )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_id) DO UPDATE SET
               status = excluded.status,
               content = excluded.content,
@@ -3842,7 +4166,16 @@ class SQLiteExcelAssetRepository:
               exact_identifiers_json = excluded.exact_identifiers_json,
               suitable_questions_json = excluded.suitable_questions_json,
               unsuitable_questions_json = excluded.unsuitable_questions_json,
-              routing_notes = excluded.routing_notes
+              routing_notes = excluded.routing_notes,
+              source_fingerprint = excluded.source_fingerprint,
+              source_updated_at = excluded.source_updated_at,
+              provider = excluded.provider,
+              model = excluded.model,
+              prompt_version = excluded.prompt_version,
+              generation_task_id = excluded.generation_task_id,
+              generated_by_user_id = excluded.generated_by_user_id,
+              revision = pdf_document_summaries.revision + 1,
+              created_at = COALESCE(pdf_document_summaries.created_at, excluded.created_at)
             """,
             (
                 summary.file_id,
@@ -3860,6 +4193,15 @@ class SQLiteExcelAssetRepository:
                 dump_json(summary.suitable_questions),
                 dump_json(summary.unsuitable_questions),
                 summary.routing_notes,
+                summary.source_fingerprint,
+                summary.source_updated_at,
+                summary.provider,
+                summary.model,
+                summary.prompt_version,
+                summary.generation_task_id,
+                summary.generated_by_user_id,
+                summary.revision,
+                summary.created_at or summary.updated_at,
             ),
         )
 
@@ -3892,6 +4234,15 @@ class SQLiteExcelAssetRepository:
                 row_value(row, "unsuitable_questions_json", "[]")
             ),
             routing_notes=row_str(row, "routing_notes"),
+            source_fingerprint=row_str(row, "source_fingerprint"),
+            source_updated_at=row_value(row, "source_updated_at"),
+            provider=row_str(row, "provider"),
+            model=row_str(row, "model"),
+            prompt_version=row_str(row, "prompt_version", "pdf-summary-v1"),
+            generation_task_id=row_value(row, "generation_task_id"),
+            generated_by_user_id=row_value(row, "generated_by_user_id"),
+            revision=safe_int(row_value(row, "revision", 0), 0),
+            created_at=row_value(row, "created_at"),
         )
 
     def _to_pdf_attached_document(

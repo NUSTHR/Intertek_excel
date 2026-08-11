@@ -308,6 +308,12 @@ class PdfSummaryTask:
     worker_id: str | None = None
     retry_count: int = 0
     last_retry_at: str | None = None
+    source_fingerprint: str = ""
+    state_revision: int = 0
+    claim_token: str | None = None
+    claimed_at: str | None = None
+    attempt: int = 1
+    parent_task_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -327,6 +333,28 @@ class PdfDocumentSummary:
     suitable_questions: list[str] = field(default_factory=list)
     unsuitable_questions: list[str] = field(default_factory=list)
     routing_notes: str = ""
+    source_fingerprint: str = ""
+    source_updated_at: str | None = None
+    provider: str = ""
+    model: str = ""
+    prompt_version: str = "pdf-summary-v1"
+    generation_task_id: str | None = None
+    generated_by_user_id: str | None = None
+    revision: int = 0
+    created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class PdfFileCleanupJob:
+    job_id: str
+    file_id: str
+    relative_path: str
+    status: str
+    attempt_count: int
+    error_message: str | None
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,8 +24,14 @@ from app.ports.repository import PdfKnowledgeRepository
 class PdfLibraryService:
     """Owns PDF library access, metadata mutations, and document inspection."""
 
-    def __init__(self, *, repository: PdfKnowledgeRepository) -> None:
+    def __init__(
+        self,
+        *,
+        repository: PdfKnowledgeRepository,
+        storage_root: Path | None = None,
+    ) -> None:
         self._repository = repository
+        self._storage_root = storage_root.expanduser().resolve() if storage_root else None
 
     def list_files(self, *, user_role: UserRole) -> list[PdfFile]:
         files = self._repository.list_pdf_files()
@@ -116,6 +123,7 @@ class PdfLibraryService:
                 file_id=file.file_id,
             )
         counts = self._repository.delete_pdf_file_tree(file_id)
+        self.retry_pending_file_cleanups()
         return DeletePdfFileResult(
             file_id=file.file_id,
             display_name=file.display_name,
@@ -128,6 +136,36 @@ class PdfLibraryService:
             deleted_parse_pages=counts["deleted_parse_pages"],
             deleted_parse_artifacts=counts["deleted_parse_artifacts"],
         )
+
+    def retry_pending_file_cleanups(self) -> int:
+        if self._storage_root is None:
+            return 0
+        completed = 0
+        files_root = (self._storage_root / "pdf-knowledge" / "files").resolve()
+        for job in self._repository.list_pending_pdf_file_cleanup_jobs():
+            now = utc_now_iso()
+            try:
+                target = (self._storage_root / job.relative_path).resolve()
+                if target.parent != files_root or target.name != job.file_id:
+                    raise ValueError("PDF cleanup target is outside the managed file directory")
+                if target.is_symlink():
+                    raise ValueError("PDF cleanup target must not be a symbolic link")
+                if target.exists():
+                    if not target.is_dir():
+                        raise ValueError("PDF cleanup target is not a directory")
+                    shutil.rmtree(target)
+                self._repository.complete_pdf_file_cleanup_job(
+                    job_id=job.job_id,
+                    completed_at=now,
+                )
+                completed += 1
+            except (OSError, ValueError) as exc:
+                self._repository.fail_pdf_file_cleanup_job(
+                    job_id=job.job_id,
+                    error_message=str(exc),
+                    failed_at=now,
+                )
+        return completed
 
     def get_document_detail(
         self,

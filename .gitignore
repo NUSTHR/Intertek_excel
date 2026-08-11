@@ -1,5 +1,7 @@
 # Runtime storage and user-uploaded workbooks
 /storage/
+/.runtime/
+/.tools/
 
 # Backend local environment and generated files
 backend/.env

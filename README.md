@@ -799,6 +799,48 @@ That line is required because Vite 7 validates the `Host` header. Without it,
 requests from a generated `*.trycloudflare.com` domain may be blocked even
 though the tunnel itself is working.
 
+### Recommended: One-Command Isolated Test Environment
+
+The repository includes a checked installer and a lifecycle-managed sharing
+script for macOS. Install the project-local `cloudflared` binary once:
+
+```bash
+./scripts/install-cloudflared.sh
+```
+
+Then start the backend, frontend, and temporary tunnel together:
+
+```bash
+./scripts/share-test.sh
+```
+
+The script waits for backend readiness and the frontend proxy, starts a Quick
+Tunnel, and verifies the public health, login, Secure Cookie, CSRF, and logout
+flows before printing the shareable URL. It also writes the current URL to:
+
+```text
+.runtime/share-test/public-url.txt
+```
+
+For safety, public testing uses an isolated database and upload directory under
+`.runtime/share-test/`. The normal `storage/` database, uploaded workbooks,
+PDFs, and chat history are not exposed through the tunnel. Synthetic or
+deliberately selected test files must be uploaded again inside the public-test
+workspace.
+
+The administrator password is generated locally in the Git-ignored
+`backend/.env` and is not printed by the sharing script. View only the local
+test credentials when needed:
+
+```bash
+grep -E '^AUTH_ADMIN_(EMAIL|PASSWORD)=' backend/.env
+```
+
+Press `Ctrl+C` in the sharing terminal to stop Cloudflare Tunnel, Vite, and
+FastAPI together. Restarting the script creates a new random public URL. The
+isolated test data remains available across restarts, while runtime logs stay
+under `.runtime/share-test/`.
+
 ### Important Limitations
 
 Cloudflare Quick Tunnel is temporary:
@@ -901,17 +943,6 @@ Expected:
 HTTP/2 200
 ```
 
-### Current Demo URL From This Session
-
-At the time this README was updated, the running tunnel URL was:
-
-```text
-https://gained-lined-comedy-randy.trycloudflare.com
-```
-
-This URL is not permanent. If it fails, restart backend, frontend, and
-`cloudflared`, then use the new URL printed in the tunnel log.
-
 ### If The Public URL Does Not Work
 
 Check these in order:
@@ -950,6 +981,17 @@ Check these in order:
 
 8. If `cloudflared` logs QUIC errors but keeps running, it may fall back to
    HTTP/2. If it does not recover, restart the tunnel.
+
+9. If the one-command script reports that ports `8090` or `5174` are busy,
+   stop the separately started backend/frontend processes before retrying.
+
+10. If Quick Tunnel reports a configuration conflict, temporarily move
+    `~/.cloudflared/config.yml` or `config.yaml`, or use a named tunnel instead.
+
+11. If local HTTP login stops persisting after public-test hardening, remember
+    that `AUTH_COOKIE_SECURE=true` intentionally restricts the session cookie to
+    HTTPS. Use the generated public HTTPS URL, or disable the flag only after
+    the public tunnel has been stopped.
 
 For a stable long-term public URL, use a named Cloudflare Tunnel under a
 Cloudflare account or deploy the app to a server with nginx and HTTPS.
