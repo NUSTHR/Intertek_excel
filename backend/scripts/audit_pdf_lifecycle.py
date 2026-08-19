@@ -3,6 +3,7 @@
 import argparse
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 CONTENT_TABLES = (
@@ -10,6 +11,7 @@ CONTENT_TABLES = (
     "pdf_document_summaries",
     "pdf_preview_blocks",
     "pdf_schema_items",
+    "pdf_document_tags",
     "pdf_parse_reports",
     "pdf_parse_pages",
     "pdf_parse_artifacts",
@@ -34,7 +36,7 @@ def audit(database_path: Path) -> dict[str, object]:
             )
             for table in CONTENT_TABLES
         }
-        return {
+        report: dict[str, object] = {
             "database_path": str(resolved_path),
             "schema_version": _scalar(
                 connection,
@@ -55,6 +57,66 @@ def audit(database_path: Path) -> dict[str, object]:
                   GROUP BY file_id
                   HAVING COUNT(*) > 1
                 )
+                """,
+            ),
+            "active_upload_task_duplicate_groups": _scalar(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM (
+                  SELECT file_id
+                  FROM pdf_upload_tasks
+                  WHERE file_id IS NOT NULL
+                    AND status IN ('queued', 'processing')
+                  GROUP BY file_id
+                  HAVING COUNT(*) > 1
+                )
+                """,
+            ),
+            "active_sibling_name_duplicate_groups": _scalar(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM (
+                  SELECT user_id, COALESCE(parent_id, '') AS parent_key, display_name
+                  FROM pdf_files
+                  WHERE status = 'active'
+                  GROUP BY user_id, parent_key, display_name
+                  HAVING COUNT(*) > 1
+                )
+                """,
+            ),
+            "active_upload_tasks_for_deleted_files": _scalar(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM pdf_upload_tasks AS task
+                JOIN pdf_files AS file ON file.file_id = task.file_id
+                WHERE file.status = 'deleted'
+                  AND task.status IN ('queued', 'processing')
+                """,
+            ),
+            "terminal_upload_tasks_finished_after_file_deletion": _scalar(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM pdf_upload_tasks AS task
+                JOIN pdf_files AS file ON file.file_id = task.file_id
+                WHERE file.status = 'deleted'
+                  AND task.status IN ('ready', 'failed')
+                  AND task.finished_at IS NOT NULL
+                  AND file.deleted_at IS NOT NULL
+                  AND task.finished_at > file.deleted_at
+                """,
+            ),
+            "active_files_with_deleted_parent": _scalar(
+                connection,
+                """
+                SELECT COUNT(*)
+                FROM pdf_files AS child
+                JOIN pdf_files AS parent ON parent.file_id = child.parent_id
+                WHERE child.status = 'active'
+                  AND parent.status = 'deleted'
                 """,
             ),
             "ready_summary_fingerprint_mismatches": _scalar(
@@ -81,6 +143,21 @@ def audit(database_path: Path) -> dict[str, object]:
                 """,
             ),
         }
+        critical_fields = (
+            "foreign_key_violations",
+            "active_summary_task_duplicate_groups",
+            "active_upload_task_duplicate_groups",
+            "active_sibling_name_duplicate_groups",
+            "active_upload_tasks_for_deleted_files",
+            "active_files_with_deleted_parent",
+            "ready_summary_fingerprint_mismatches",
+        )
+        report["critical_violation_count"] = sum(
+            int(report[field]) for field in critical_fields
+        ) + sum(int(count) for count in deleted_content.values()) + (
+            0 if report["integrity_check"] == "ok" else 1
+        )
+        return report
     finally:
         connection.close()
 
@@ -93,8 +170,16 @@ def _scalar(connection: sqlite3.Connection, query: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("database", type=Path, help="Path to excel-workspace.sqlite3")
+    parser.add_argument(
+        "--fail-on-violations",
+        action="store_true",
+        help="Exit with status 1 when a critical lifecycle invariant is violated.",
+    )
     args = parser.parse_args()
-    print(json.dumps(audit(args.database), indent=2, ensure_ascii=False))
+    report = audit(args.database)
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    if args.fail_on_violations and int(report["critical_violation_count"]) > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,16 @@ from app.application.pdf_knowledge.uploads import (
     source_name_for_upload_batch,
     upload_batch_queued_detail,
 )
-from app.core.errors import AssetNotFoundError, UploadValidationError
+from app.core.errors import (
+    ActiveUploadTaskConflictError,
+    AssetNotFoundError,
+    UploadValidationError,
+)
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
+    PdfFile,
     PdfFileKind,
-    PdfProcessingStatus,
     PdfUploadBatch,
     PdfUploadBatchStatus,
     PdfUploadTask,
@@ -78,8 +82,11 @@ class PdfUploadService:
             batch_id=None,
             parser_backend=self._parser_profiles.selected_profile_id,
         )
-        self._repository.create_pdf_file(file)
-        self._repository.create_pdf_upload_task(task)
+        try:
+            self._repository.create_pdf_upload(file, task)
+        except Exception:
+            self._upload_records.delete_upload_records(file, task)
+            raise
         return task
 
     def create_batch(
@@ -126,23 +133,26 @@ class PdfUploadService:
                 "skipped_files_detail": inspection.skipped,
             },
         )
-        records = [
-            self._upload_records.build_upload_records(
-                user_id=user_id,
-                original_filename=candidate.original_filename,
-                content=candidate.content,
-                relative_path=candidate.relative_path or candidate.original_filename,
-                parent_id=target_parent_id,
-                created_at=now,
-                batch_id=batch_id,
-                parser_backend=self._parser_profiles.selected_profile_id,
-            )
-            for candidate in accepted
-        ]
-        self._repository.create_pdf_upload_batch(batch)
-        for file, task in records:
-            self._repository.create_pdf_file(file)
-            self._repository.create_pdf_upload_task(task)
+        records: list[tuple[PdfFile, PdfUploadTask]] = []
+        try:
+            for candidate in accepted:
+                records.append(
+                    self._upload_records.build_upload_records(
+                        user_id=user_id,
+                        original_filename=candidate.original_filename,
+                        content=candidate.content,
+                        relative_path=candidate.relative_path or candidate.original_filename,
+                        parent_id=target_parent_id,
+                        created_at=now,
+                        batch_id=batch_id,
+                        parser_backend=self._parser_profiles.selected_profile_id,
+                    )
+                )
+            self._repository.create_pdf_upload_batch_records(batch, records)
+        except Exception:
+            for file, task in records:
+                self._upload_records.delete_upload_records(file, task)
+            raise
         return PdfUploadBatchCreationResult(
             batch=batch,
             tasks=[task for _file, task in records],
@@ -176,16 +186,13 @@ class PdfUploadService:
         return self._repository.list_pdf_upload_tasks(user_id)
 
     def list_batches(self, *, user_id: str) -> list[PdfUploadBatch]:
-        return [
-            self.refresh_batch(batch.batch_id)
-            for batch in self._repository.list_pdf_upload_batches(user_id)
-        ]
+        return self._repository.list_pdf_upload_batches(user_id)
 
     def get_batch(self, batch_id: str, *, user_id: str) -> PdfUploadBatch:
         batch = self._repository.get_pdf_upload_batch(batch_id)
         if batch is None or batch.user_id != user_id:
             raise AssetNotFoundError("PDF upload batch was not found")
-        return self.refresh_batch(batch.batch_id)
+        return batch
 
     def list_batch_tasks(
         self,
@@ -206,6 +213,7 @@ class PdfUploadService:
         file = self._library.get_file(file_id, user_role=user_role)
         if file.kind != PdfFileKind.PDF or not file.storage_path:
             raise UploadValidationError("only stored PDF documents can be reparsed")
+        self._ensure_no_active_file_task(file.file_id)
         content = self._upload_records.stored_file_path(file.storage_path).read_bytes()
         now = utc_now_iso()
         task_id = new_id("pdfupload")
@@ -214,7 +222,6 @@ class PdfUploadService:
             file.original_filename,
             content,
         )
-        self._summaries.mark_stale(file, updated_at=now)
         task = PdfUploadTask(
             task_id=task_id,
             user_id=user_id,
@@ -232,15 +239,15 @@ class PdfUploadService:
             parser_backend=self._parser_profiles.selected_profile_id,
             retry_count=0,
         )
-        self._repository.update_pdf_file_processing(
-            file_id=file.file_id,
-            processing_status=PdfProcessingStatus.QUEUED,
-            progress=5,
-            status_detail="Queued for MinerU reparse.",
-            updated_at=now,
-            error_message=None,
-        )
-        self._repository.create_pdf_upload_task(task)
+        try:
+            self._repository.queue_pdf_upload_task_for_existing_file(
+                task,
+                status_detail="Queued for MinerU reparse.",
+                mark_summary_stale=True,
+            )
+        except Exception:
+            self._upload_records.delete_staging_task(task.task_id)
+            raise
         return task
 
     def cancel_task(self, task_id: str, *, user_id: str) -> PdfUploadTask:
@@ -248,20 +255,13 @@ class PdfUploadService:
         if task.status != PdfUploadTaskStatus.QUEUED:
             raise UploadValidationError("only queued PDF upload tasks can be cancelled")
         cancelled_at = utc_now_iso()
-        if task.file_id is not None:
-            self._repository.update_pdf_file_processing(
-                file_id=task.file_id,
-                processing_status=PdfProcessingStatus.CANCELLED,
-                progress=100,
-                status_detail="PDF parsing was cancelled before it started.",
-                updated_at=cancelled_at,
-                error_message=None,
-            )
         cancelled = self._repository.cancel_pdf_upload_task(
             task_id=task.task_id,
             cancelled_at=cancelled_at,
             detail="PDF parsing was cancelled before it started.",
-        ) or task
+        )
+        if cancelled is None:
+            raise UploadValidationError("PDF upload task is no longer queued")
         if cancelled.batch_id:
             self.refresh_batch(cancelled.batch_id)
         return cancelled
@@ -280,6 +280,7 @@ class PdfUploadService:
         file = self._repository.get_pdf_file(task.file_id)
         if file is None or file.user_id != user_id or not file.storage_path:
             raise AssetNotFoundError("PDF source file was not found")
+        self._ensure_no_active_file_task(file.file_id)
         content = self._upload_records.stored_file_path(file.storage_path).read_bytes()
         now = utc_now_iso()
         retry_task_id = new_id("pdfupload")
@@ -307,15 +308,15 @@ class PdfUploadService:
             last_retry_at=now,
             batch_id=task.batch_id,
         )
-        self._repository.update_pdf_file_processing(
-            file_id=file.file_id,
-            processing_status=PdfProcessingStatus.QUEUED,
-            progress=5,
-            status_detail="Queued for MinerU retry.",
-            updated_at=now,
-            error_message=None,
-        )
-        self._repository.create_pdf_upload_task(retry_task)
+        try:
+            self._repository.queue_pdf_upload_task_for_existing_file(
+                retry_task,
+                status_detail="Queued for MinerU retry.",
+                mark_summary_stale=False,
+            )
+        except Exception:
+            self._upload_records.delete_staging_task(retry_task.task_id)
+            raise
         if retry_task.batch_id:
             self.refresh_batch(retry_task.batch_id)
         return retry_task
@@ -369,3 +370,11 @@ class PdfUploadService:
 
     def is_supported_filename(self, filename: str) -> bool:
         return self._upload_records.is_supported_filename(filename)
+
+    def _ensure_no_active_file_task(self, file_id: str) -> None:
+        active_task = self._repository.get_active_pdf_upload_task_for_file(file_id)
+        if active_task is not None:
+            raise ActiveUploadTaskConflictError(
+                file_id=file_id,
+                task_id=active_task.task_id,
+            )

@@ -63,8 +63,22 @@ class FilesystemExcelArtifactStorage:
     def delete_file_tree(self, file_id: str) -> None:
         files_root = (self._storage_root / "files").resolve()
         target = (files_root / file_id).resolve()
-        if not target.is_relative_to(files_root):
+        if target.parent != files_root or target.name != file_id or target.is_symlink():
             raise ValueError("refusing to delete outside storage files root")
+        shutil.rmtree(target, ignore_errors=True)
+
+    def delete_version_tree(self, file_id: str, version_id: str) -> None:
+        files_root = (self._storage_root / "files").resolve()
+        file_root = (files_root / file_id).resolve()
+        target = (file_root / version_id).resolve()
+        if (
+            file_root.parent != files_root
+            or file_root.name != file_id
+            or target.parent != file_root
+            or target.name != version_id
+            or target.is_symlink()
+        ):
+            raise ValueError("refusing to delete outside workbook version directory")
         shutil.rmtree(target, ignore_errors=True)
 
     def artifact_reference(self, path: Path) -> str:

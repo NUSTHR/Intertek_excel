@@ -9,7 +9,7 @@ from app.adapters.llm.siliconflow_client import (
     MultiProviderLlmClient,
     SiliconFlowConfig,
 )
-from app.core.errors import LlmRequestError
+from app.core.errors import LlmRequestError, LlmResponseFormatError
 from app.domain.models import (
     AttachedDocument,
     ChatTurn,
@@ -188,7 +188,11 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     ]
     assert "enable_thinking" not in requests[0]
     assert "enable_thinking" not in requests[1]
-    assert "enable_thinking" not in requests[2]
+    assert requests[2]["enable_thinking"] is False
+    assert all(
+        request["response_format"] == {"type": "json_object"}
+        for request in requests
+    )
     assert '"evidence_id": "string"' in requests[2]["messages"][-1]["content"]
     assert '"version_id": "string"' in requests[2]["messages"][-1]["content"]
     assert '"sheet_id": "string"' in requests[2]["messages"][-1]["content"]
@@ -198,6 +202,63 @@ def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
     assert summary_payload["sheets"][0]["all_rows"][-1] == ["EN 2", "2025-01-01"]
     assert requests[1]["temperature"] == 0.0
     assert requests[1]["max_tokens"] == 1200
+    assert requests[0]["max_tokens"] == 4096
+    assert requests[2]["max_tokens"] == 4096
+
+
+def test_siliconflow_rejects_token_limit_truncation() -> None:
+    def post(url: str, **_kwargs: Any) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", url),
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "document_for_this_turn": [],
+                                }
+                            )
+                        },
+                    }
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="Qwen/Qwen3.6-35B-A3B",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+
+    with pytest.raises(LlmResponseFormatError, match="output token limit"):
+        client.route_documents(
+            "question",
+            [
+                DocumentSummary(
+                    summary_id="summary_1",
+                    file_id="file_1",
+                    version_id="version_1",
+                    summary_text="summary",
+                    business_domain="domain",
+                    key_topics=[],
+                    suitable_questions=[],
+                    unsuitable_questions=[],
+                    sheet_summaries=[],
+                    created_at="now",
+                )
+            ],
+            max_documents=1,
+        )
 
 
 def test_siliconflow_router_filters_unknown_version() -> None:
@@ -363,7 +424,7 @@ def test_siliconflow_pdf_router_uses_compact_prompt_and_repairs_invalid_json() -
             api_base_url="https://api.example.test/v1",
             api_key="test-key",
             summary_model="deepseek-ai/DeepSeek-V4-Pro",
-            router_model="inclusionAI/Ling-flash-2.0",
+            router_model="Qwen/Qwen3.6-35B-A3B",
             answer_model="Qwen/Qwen3.6-27B",
             timeout_seconds=1,
             summary_max_profile_rows=2,
@@ -404,6 +465,7 @@ def test_siliconflow_pdf_router_uses_compact_prompt_and_repairs_invalid_json() -
     assert [document.file_id for document in selected] == ["file_1"]
     assert len(requests) == 2
     assert requests[0]["max_tokens"] == 1600
+    assert all(request["enable_thinking"] is False for request in requests)
     assert "enterprise PDF knowledge base" in requests[0]["messages"][0]["content"]
     assert "Excel" not in requests[0]["messages"][0]["content"]
     assert "sheet_summaries" not in requests[0]["messages"][1]["content"]
@@ -1076,7 +1138,7 @@ def test_siliconflow_filters_deep_thinking_for_unsupported_models() -> None:
         enable_deep_thinking=True,
     )
 
-    assert "enable_thinking" not in requests[0]
+    assert requests[0]["enable_thinking"] is False
 
 
 def test_deepseek_official_provider_uses_official_url_and_json_mode() -> None:

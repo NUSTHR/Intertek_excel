@@ -51,6 +51,9 @@ class PdfKnowledgeService:
         parser_profile_descriptors: list[PdfParserProfile] | None = None,
         default_parser_profile_id: str | None = None,
         indexing: PdfIndexingService | None = None,
+        vector_embedding_revision: str | None = None,
+        vector_embedding_dimension: int = 4096,
+        pdf_chunk_max_characters: int = 12_000,
         llm_client: LlmClient | None = None,
         llm_preferences: WorkspaceLlmPreferenceService | None = None,
     ) -> None:
@@ -91,8 +94,14 @@ class PdfKnowledgeService:
             storage_root=resolved_storage_root,
             upload_records=upload_records,
             parser_profiles=parser_registry,
-            indexing=indexing or PdfIndexingService(repository=repository),
+            indexing=indexing
+            or PdfIndexingService(
+                repository=repository,
+                max_chunk_characters=pdf_chunk_max_characters,
+            ),
             refresh_batch=uploads.refresh_batch,
+            vector_embedding_revision=vector_embedding_revision,
+            vector_embedding_dimension=vector_embedding_dimension,
         )
 
         self._library = library
@@ -308,6 +317,9 @@ class PdfKnowledgeService:
             error_code=error_code,
             failed_at=failed_at,
         )
+
+    def ensure_deleted_file_cleanup(self, file_id: str) -> bool:
+        return self._library.ensure_deleted_file_cleanup(file_id)
 
     def fail_stale_processing_tasks(
         self,

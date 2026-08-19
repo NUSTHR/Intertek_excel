@@ -87,7 +87,7 @@ class PdfSummaryService:
 
     def get_task(self, task_id: str, *, user_id: str) -> PdfSummaryTask:
         task = self._repository.get_pdf_summary_task(task_id)
-        if task is None:
+        if task is None or task.user_id != user_id:
             raise AssetNotFoundError("PDF summary task was not found")
         return task
 

@@ -98,6 +98,27 @@ class PdfUploadBatchStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class PdfVectorIndexStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class PdfVectorIndexTaskAction(StrEnum):
+    INDEX = "index"
+    DELETE = "delete"
+
+
+class PdfVectorIndexTaskStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    SUCCEEDED = "succeeded"
+    DEAD_LETTER = "dead_letter"
+    CANCELLED = "cancelled"
+
+
 class ChatWorkspace(StrEnum):
     EXCEL = "excel"
     PDF = "pdf"
@@ -215,6 +236,10 @@ class ExcelUploadTask:
     started_at: str | None = None
     finished_at: str | None = None
     worker_id: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: str | None = None
+    heartbeat_at: str | None = None
+    state_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -289,6 +314,10 @@ class PdfUploadTask:
     retry_count: int = 0
     last_retry_at: str | None = None
     batch_id: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: str | None = None
+    heartbeat_at: str | None = None
+    state_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -355,6 +384,53 @@ class PdfFileCleanupJob:
     created_at: str
     updated_at: str
     completed_at: str | None = None
+    worker_id: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: str | None = None
+    heartbeat_at: str | None = None
+    state_revision: int = 0
+
+
+@dataclass(frozen=True)
+class PdfVectorIndex:
+    file_id: str
+    source_fingerprint: str
+    embedding_revision: str
+    embedding_dimension: int
+    status: PdfVectorIndexStatus
+    expected_chunk_count: int
+    indexed_chunk_count: int
+    created_at: str
+    updated_at: str
+    ready_at: str | None = None
+    last_error: str | None = None
+    state_revision: int = 0
+    generation: int = 1
+
+
+@dataclass(frozen=True)
+class PdfVectorIndexTask:
+    task_id: str
+    file_id: str
+    action: PdfVectorIndexTaskAction
+    source_fingerprint: str
+    embedding_revision: str
+    status: PdfVectorIndexTaskStatus
+    attempt_count: int
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    error_message: str | None = None
+    worker_id: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: str | None = None
+    heartbeat_at: str | None = None
+    next_attempt_at: str | None = None
+    error_code: str | None = None
+    parent_task_id: str | None = None
+    state_revision: int = 0
+    generation: int = 1
 
 
 @dataclass(frozen=True)

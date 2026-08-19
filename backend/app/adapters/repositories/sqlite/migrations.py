@@ -31,8 +31,16 @@ class SQLiteMigrationRunner:
         self._migrations = migrations
 
     def initialize_schema(self, connection: sqlite3.Connection) -> None:
-        self._ensure_migration_table(connection)
-        self._apply_migrations(connection)
+        savepoint = "schema_migration"
+        connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            self._ensure_migration_table(connection)
+            self._apply_migrations(connection)
+        except Exception:
+            connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     def inspect_schema(self, connection: sqlite3.Connection) -> SQLiteSchemaInspection:
         expected_checksums = {

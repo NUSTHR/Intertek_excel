@@ -9,7 +9,7 @@ from app.application.operational.worker_status import (
 )
 from app.application.pdf_knowledge.service import PdfKnowledgeService
 from app.core.time import utc_now_iso
-from app.domain.models import PdfSummaryTask
+from app.domain.models import PdfSummaryTask, PdfSummaryTaskStatus
 from app.ports.repository import PdfKnowledgeRepository
 
 logger = logging.getLogger(__name__)
@@ -63,10 +63,11 @@ class PdfSummaryTaskWorker:
         if task is None:
             return False
         self._runtime.mark_task_started()
+        succeeded = False
         try:
-            self._process_task(task)
+            succeeded = self._process_task(task)
         finally:
-            self._runtime.mark_task_finished()
+            self._runtime.mark_task_finished(succeeded=succeeded)
         return True
 
     def mark_stale_running_tasks_failed(self, *, max_running_age_minutes: int) -> int:
@@ -92,11 +93,16 @@ class PdfSummaryTaskWorker:
         finally:
             self._runtime.mark_stopped()
 
-    def _process_task(self, task: PdfSummaryTask) -> None:
+    def _process_task(self, task: PdfSummaryTask) -> bool:
         try:
-            self._pdf_knowledge.process_summary_task(task)
+            completed = self._pdf_knowledge.process_summary_task(task)
+            return completed.status in {
+                PdfSummaryTaskStatus.READY,
+                PdfSummaryTaskStatus.SKIPPED,
+            }
         except Exception as exc:
             self._pdf_knowledge.fail_summary_task(task, _safe_summary_error_message(exc))
+            return False
 
 
 def _safe_summary_error_message(exc: Exception) -> str:

@@ -1,3 +1,4 @@
+import logging
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -11,10 +12,12 @@ from app.application.pdf_knowledge.parse_reports import (
 )
 from app.application.pdf_knowledge.parser_profiles import PdfParserProfileRegistry
 from app.application.pdf_knowledge.uploads import PdfUploadRecordBuilder
+from app.core.content_fingerprint import ordered_content_fingerprint
 from app.core.errors import UploadValidationError
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
+    PdfDocumentChunk,
     PdfDocumentDetail,
     PdfDocumentSummary,
     PdfParseReport,
@@ -24,9 +27,17 @@ from app.domain.models import (
     PdfUploadBatch,
     PdfUploadTask,
     PdfUploadTaskStage,
+    PdfUploadTaskStatus,
+    PdfVectorIndex,
+    PdfVectorIndexStatus,
+    PdfVectorIndexTask,
+    PdfVectorIndexTaskAction,
+    PdfVectorIndexTaskStatus,
 )
 from app.ports.pdf_parser import ParsedPdfArtifact, ParsedPdfDocument
 from app.ports.repository import PdfKnowledgeRepository
+
+logger = logging.getLogger(__name__)
 
 
 class PdfParsingService:
@@ -41,6 +52,8 @@ class PdfParsingService:
         parser_profiles: PdfParserProfileRegistry,
         indexing: PdfIndexingService,
         refresh_batch: Callable[[str], PdfUploadBatch],
+        vector_embedding_revision: str | None = None,
+        vector_embedding_dimension: int = 4096,
     ) -> None:
         self._repository = repository
         self._files_root = (
@@ -50,79 +63,105 @@ class PdfParsingService:
         self._parser_profiles = parser_profiles
         self._indexing = indexing
         self._refresh_batch = refresh_batch
+        self._vector_embedding_revision = (
+            vector_embedding_revision.strip() if vector_embedding_revision else None
+        )
+        if vector_embedding_dimension < 1:
+            raise ValueError("vector embedding dimension must be positive")
+        self._vector_embedding_dimension = vector_embedding_dimension
 
     def process_task(self, task: PdfUploadTask, content: bytes) -> PdfUploadTask:
         if task.file_id is None:
             raise UploadValidationError("PDF upload task is missing a file reference")
+        worker_id, claim_token = self._task_claim(task)
         now = utc_now_iso()
-        self._repository.update_pdf_file_processing(
+        self._update_file_processing(
+            task=task,
             file_id=task.file_id,
             processing_status=PdfProcessingStatus.PARSING,
             progress=25,
             status_detail="MinerU parsing started.",
             updated_at=now,
         )
-        self._repository.update_pdf_upload_task_progress(
+        if self._repository.update_pdf_upload_task_progress(
             task_id=task.task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
             progress=25,
             detail="MinerU parsing started.",
             updated_at=now,
             stage=PdfUploadTaskStage.PARSING,
-        )
+        ) is None:
+            raise UploadValidationError("PDF upload task claim is no longer active")
+        self._refresh_batch_safely(task.batch_id)
         parsing_at = utc_now_iso()
-        self._repository.update_pdf_file_processing(
+        self._update_file_processing(
+            task=task,
             file_id=task.file_id,
             processing_status=PdfProcessingStatus.PARSING,
             progress=55,
             status_detail="MinerU is extracting document structure.",
             updated_at=parsing_at,
         )
-        self._repository.update_pdf_upload_task_progress(
+        if self._repository.update_pdf_upload_task_progress(
             task_id=task.task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
             progress=55,
             detail="MinerU is extracting document structure.",
             updated_at=parsing_at,
             stage=PdfUploadTaskStage.PARSING,
-        )
-        page_count, chunk_count, parse_report = self._parse_and_index(
+        ) is None:
+            raise UploadValidationError("PDF upload task claim is no longer active")
+        self._refresh_batch_safely(task.batch_id)
+        detail, chunks, parse_report = self._build_parse_result(
+            task=task,
             file_id=task.file_id,
             filename=task.original_filename,
             content=content,
             parser_profile_id=task.parser_backend,
         )
         indexed_at = utc_now_iso()
-        self._repository.update_pdf_file_processing(
+        self._update_file_processing(
+            task=task,
             file_id=task.file_id,
             processing_status=PdfProcessingStatus.INDEXING,
             progress=90,
             status_detail="Building knowledge chunks and chat index.",
             updated_at=indexed_at,
         )
-        self._repository.update_pdf_upload_task_progress(
+        if self._repository.update_pdf_upload_task_progress(
             task_id=task.task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
             progress=90,
             detail="Building knowledge chunks and chat index.",
             updated_at=indexed_at,
             stage=PdfUploadTaskStage.INDEXING,
-        )
+        ) is None:
+            raise UploadValidationError("PDF upload task claim is no longer active")
+        self._refresh_batch_safely(task.batch_id)
         final_status, final_detail = processing_outcome_for_report(parse_report)
         ready_at = utc_now_iso()
-        self._repository.update_pdf_file_processing(
-            file_id=task.file_id,
+        vector_index, vector_index_task = self._build_vector_index_publication(
+            task=task,
+            chunks=chunks,
+            queued_at=ready_at,
+        )
+        completed_task = self._repository.publish_pdf_parse_result(
+            task_id=task.task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            detail=detail,
+            chunks=chunks,
+            report=parse_report,
             processing_status=final_status,
-            progress=100,
             status_detail=final_detail,
-            updated_at=ready_at,
-            page_count=page_count,
-            chunk_count=chunk_count,
             error_message=(
                 "; ".join(parse_report.warnings[:2])
                 if final_status == PdfProcessingStatus.FAILED
                 else None
             ),
-        )
-        completed_task = self._repository.complete_pdf_upload_task(
-            task_id=task.task_id,
             result={
                 "file_id": task.file_id,
                 "quality_status": parse_report.quality_status.value,
@@ -130,12 +169,54 @@ class PdfParsingService:
                 "warning_count": parse_report.warning_count,
                 "failed_page_count": parse_report.failed_pages,
             },
-            detail=final_detail,
-            finished_at=ready_at,
-        ) or task
-        if completed_task.batch_id:
-            self._refresh_batch(completed_task.batch_id)
+            published_at=ready_at,
+            vector_index=vector_index,
+            vector_index_task=vector_index_task,
+        )
+        if completed_task is None:
+            self._delete_task_artifact_tree(task)
+            completed_task = self._repository.get_pdf_upload_task(task.task_id) or task
+        self._refresh_batch_safely(completed_task.batch_id)
         return completed_task
+
+    def _build_vector_index_publication(
+        self,
+        *,
+        task: PdfUploadTask,
+        chunks: list[PdfDocumentChunk],
+        queued_at: str,
+    ) -> tuple[PdfVectorIndex | None, PdfVectorIndexTask | None]:
+        revision = self._vector_embedding_revision
+        if revision is None:
+            return None, None
+        if task.file_id is None:
+            raise UploadValidationError("PDF upload task is missing a file reference")
+        source_fingerprint = ordered_content_fingerprint(
+            [chunk.content_hash for chunk in chunks]
+        )
+        index = PdfVectorIndex(
+            file_id=task.file_id,
+            source_fingerprint=source_fingerprint,
+            embedding_revision=revision,
+            embedding_dimension=self._vector_embedding_dimension,
+            status=PdfVectorIndexStatus.PENDING,
+            expected_chunk_count=len(chunks),
+            indexed_chunk_count=0,
+            created_at=queued_at,
+            updated_at=queued_at,
+        )
+        index_task = PdfVectorIndexTask(
+            task_id=new_id("pdfvector"),
+            file_id=task.file_id,
+            action=PdfVectorIndexTaskAction.INDEX,
+            source_fingerprint=source_fingerprint,
+            embedding_revision=revision,
+            status=PdfVectorIndexTaskStatus.PENDING,
+            attempt_count=0,
+            created_at=queued_at,
+            updated_at=queued_at,
+        )
+        return index, index_task
 
     def fail_task(
         self,
@@ -146,6 +227,8 @@ class PdfParsingService:
         failed_at: str | None = None,
     ) -> PdfUploadTask:
         failed_at = failed_at or utc_now_iso()
+        worker_id, claim_token = self._task_claim(task)
+        report: PdfParseReport | None = None
         if task.file_id is not None:
             parser_status = self._parser_profiles.status_for(task.parser_backend)
             report = build_failed_parse_report(
@@ -155,26 +238,68 @@ class PdfParsingService:
                 error_message=error_message,
                 failed_at=failed_at,
             )
-            self._repository.save_pdf_parse_report(report)
-            self._repository.replace_pdf_parse_pages(task.file_id, report.pages)
-            self._repository.replace_pdf_parse_artifacts(task.file_id, report.artifacts)
-            self._repository.update_pdf_file_processing(
-                file_id=task.file_id,
-                processing_status=PdfProcessingStatus.FAILED,
-                progress=100,
-                status_detail="PDF parsing failed.",
-                updated_at=failed_at,
+        try:
+            failed_task = self._repository.fail_pdf_parse_result(
+                task_id=task.task_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                report=report,
                 error_message=error_message,
+                failed_at=failed_at,
+                error_code=error_code,
             )
-        failed_task = self._repository.fail_pdf_upload_task(
-            task_id=task.task_id,
-            error_message=error_message,
-            failed_at=failed_at,
-            error_code=error_code,
-        ) or task
-        if failed_task.batch_id:
-            self._refresh_batch(failed_task.batch_id)
+        except Exception:
+            current_task = self._repository.get_pdf_upload_task(task.task_id)
+            if (
+                current_task is None
+                or current_task.status != PdfUploadTaskStatus.READY
+            ):
+                self._delete_task_artifact_tree(task)
+            raise
+        if failed_task is not None:
+            self._delete_task_artifact_tree(task)
+        else:
+            failed_task = self._repository.get_pdf_upload_task(task.task_id) or task
+            if failed_task.status != PdfUploadTaskStatus.READY:
+                self._delete_task_artifact_tree(task)
+        self._refresh_batch_safely(failed_task.batch_id)
         return failed_task
+
+    def _update_file_processing(
+        self,
+        *,
+        task: PdfUploadTask,
+        file_id: str,
+        processing_status: PdfProcessingStatus,
+        progress: int,
+        status_detail: str,
+        updated_at: str,
+        error_message: str | None = None,
+        page_count: int | None = None,
+        chunk_count: int | None = None,
+    ) -> None:
+        worker_id, claim_token = self._task_claim(task)
+        updated = self._repository.update_pdf_file_processing(
+            file_id=file_id,
+            processing_status=processing_status,
+            progress=progress,
+            status_detail=status_detail,
+            updated_at=updated_at,
+            error_message=error_message,
+            page_count=page_count,
+            chunk_count=chunk_count,
+            task_id=task.task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+        )
+        if updated is None:
+            raise UploadValidationError("PDF upload task claim is no longer active")
+
+    @staticmethod
+    def _task_claim(task: PdfUploadTask) -> tuple[str, str]:
+        if not task.worker_id or not task.claim_token:
+            raise UploadValidationError("PDF upload task claim is incomplete")
+        return task.worker_id, task.claim_token
 
     def fail_stale_tasks(
         self,
@@ -185,27 +310,71 @@ class PdfParsingService:
         stale_tasks = self._repository.list_stale_processing_pdf_upload_tasks(
             cutoff_started_at=cutoff_started_at
         )
+        failed_count = self._repository.fail_stale_processing_pdf_upload_tasks(
+            cutoff_started_at=cutoff_started_at,
+            failed_at=failed_at,
+        )
         for task in stale_tasks:
-            self.fail_task(
-                task,
-                "PDF processing was interrupted. Please upload the document again.",
-                error_code="stale_processing_task",
+            persisted = self._repository.get_pdf_upload_task(task.task_id)
+            if (
+                persisted is None
+                or persisted.error_code != "stale_processing_task"
+                or task.file_id is None
+            ):
+                continue
+            parser_status = self._parser_profiles.status_for(task.parser_backend)
+            report = build_failed_parse_report(
+                file_id=task.file_id,
+                parser_backend=parser_status.backend,
+                parser_version=parser_status.version,
+                error_message=(
+                    "PDF processing was interrupted. Please upload the document again."
+                ),
                 failed_at=failed_at,
             )
-        return len(stale_tasks)
+            self._repository.save_pdf_parse_report(report)
+            self._repository.replace_pdf_parse_pages(task.file_id, report.pages)
+            self._repository.replace_pdf_parse_artifacts(task.file_id, report.artifacts)
+            self._refresh_batch_safely(task.batch_id)
+        return failed_count
 
-    def _parse_and_index(
+    def _refresh_batch_safely(self, batch_id: str | None) -> None:
+        if not batch_id:
+            return
+        try:
+            self._refresh_batch(batch_id)
+        except Exception:
+            logger.warning(
+                "Failed to refresh PDF upload batch projection",
+                extra={"batch_id": batch_id},
+                exc_info=True,
+            )
+
+    def _build_parse_result(
         self,
         *,
+        task: PdfUploadTask,
         file_id: str,
         filename: str,
         content: bytes,
         parser_profile_id: str | None = None,
-    ) -> tuple[int, int, PdfParseReport]:
+    ) -> tuple[PdfDocumentDetail, list[PdfDocumentChunk], PdfParseReport]:
         parser = self._parser_profiles.parser_for(parser_profile_id)
         parser_status = self._parser_profiles.status_for(parser_profile_id)
         parsed = parser.parse(filename=filename, content=content)
-        parsed = self._archive_artifacts(file_id=file_id, parsed=parsed)
+        if not self._repository.is_pdf_upload_task_claim_active(
+            task_id=task.task_id,
+            worker_id=task.worker_id or "",
+            claim_token=task.claim_token or "",
+            checked_at=utc_now_iso(),
+        ):
+            raise UploadValidationError("PDF upload task claim is no longer active")
+        parsed = self._archive_artifacts(
+            file_id=file_id,
+            task_id=task.task_id,
+            claim_token=task.claim_token or "",
+            parsed=parsed,
+        )
         detail = PdfDocumentDetail(
             file_id=file_id,
             summary=PdfDocumentSummary(file_id=file_id, status="empty", content=""),
@@ -232,8 +401,7 @@ class PdfParsingService:
             ],
             tags=parsed.tags,
         )
-        self._repository.save_pdf_document_detail(detail)
-        chunks = self._indexing.index_document(
+        chunks = self._indexing.build_document_chunks(
             file_id=file_id,
             parsed_chunks=parsed.chunks,
             detail=detail,
@@ -245,15 +413,14 @@ class PdfParsingService:
             parser_backend=parser_status.backend,
             parser_version=parser_status.version,
         )
-        self._repository.save_pdf_parse_report(report)
-        self._repository.replace_pdf_parse_pages(file_id, report.pages)
-        self._repository.replace_pdf_parse_artifacts(file_id, report.artifacts)
-        return parsed.page_count, len(chunks), report
+        return detail, chunks, report
 
     def _archive_artifacts(
         self,
         *,
         file_id: str,
+        task_id: str,
+        claim_token: str,
         parsed: ParsedPdfDocument,
     ) -> ParsedPdfDocument:
         if not parsed.artifact_root or not parsed.artifacts:
@@ -270,9 +437,17 @@ class PdfParsingService:
                     warnings=warnings,
                     artifact_root=parsed.artifact_root,
                 )
-            archive_root = (self._files_root / file_id / "artifacts").resolve()
+            archive_root = (
+                self._files_root
+                / file_id
+                / "task-artifacts"
+                / task_id
+                / claim_token
+            ).resolve()
             if not archive_root.is_relative_to(self._files_root):
                 raise UploadValidationError("PDF artifact archive path is invalid")
+            if not claim_token or archive_root.name != claim_token:
+                raise UploadValidationError("PDF artifact claim path is invalid")
             if archive_root.exists():
                 shutil.rmtree(archive_root)
             archive_root.mkdir(parents=True, exist_ok=True)
@@ -315,3 +490,19 @@ class PdfParsingService:
             )
         finally:
             shutil.rmtree(source_root, ignore_errors=True)
+
+    def _delete_task_artifact_tree(self, task: PdfUploadTask) -> None:
+        if task.file_id is None or not task.claim_token:
+            return
+        target = (
+            self._files_root
+            / task.file_id
+            / "task-artifacts"
+            / task.task_id
+            / task.claim_token
+        ).resolve()
+        expected_parent = (
+            self._files_root / task.file_id / "task-artifacts" / task.task_id
+        ).resolve()
+        if target.parent == expected_parent and target.name == task.claim_token:
+            shutil.rmtree(target, ignore_errors=True)

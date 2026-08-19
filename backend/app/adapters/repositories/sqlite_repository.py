@@ -14,6 +14,11 @@ from app.adapters.repositories.sqlite.llm_preferences import (
     SQLiteLlmPreferenceRepository,
 )
 from app.adapters.repositories.sqlite.migrations import SQLiteMigrationRunner
+from app.adapters.repositories.sqlite.pdf_vector_index import (
+    SQLitePdfVectorIndexRepositoryMixin,
+    queue_pdf_vector_delete_on_connection,
+    queue_pdf_vector_index_on_connection,
+)
 from app.adapters.repositories.sqlite.policies import (
     AUTH_SESSION_RETENTION_DAYS,
     LOGIN_ATTEMPT_RETENTION_DAYS,
@@ -39,9 +44,11 @@ from app.adapters.repositories.sqlite.serialization import (
 )
 from app.core.content_fingerprint import ordered_content_fingerprint
 from app.core.errors import (
+    ActiveUploadTaskConflictError,
     ChatIdempotencyConflict,
     ChatRequestInProgress,
     ChatSessionRevisionConflict,
+    FileNameConflictError,
 )
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
@@ -65,6 +72,7 @@ from app.domain.models import (
     ExcelRowSearchMatch,
     ExcelSheet,
     ExcelUploadTask,
+    ExcelUploadTaskStatus,
     ExcelVersionStatus,
     LlmPreference,
     PasswordResetToken,
@@ -93,10 +101,19 @@ from app.domain.models import (
     PdfUploadTask,
     PdfUploadTaskStage,
     PdfUploadTaskStatus,
+    PdfVectorIndex,
+    PdfVectorIndexTask,
+    PdfVectorIndexTaskAction,
+    PdfVectorIndexTaskStatus,
     SelectedDocument,
     SheetSummary,
     UserAccount,
 )
+
+
+class _UploadTaskPublicationRejected(Exception):
+    """Rollback sentinel for a fenced Excel upload publication."""
+
 
 __all__ = [
     "AUTH_SESSION_RETENTION_DAYS",
@@ -143,7 +160,7 @@ LEFT JOIN pdf_parse_reports r ON r.file_id = f.file_id
 """
 
 
-class SQLiteExcelAssetRepository:
+class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
     def __init__(
         self,
         database_path: Path,
@@ -484,24 +501,211 @@ class SQLiteExcelAssetRepository:
                 (status.value, error_message, version_id),
             )
 
-    def activate_version(self, file_id: str, version_id: str, activated_at: str) -> None:
+    def cleanup_failed_version_materialization(self, version_id: str) -> bool:
         with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM excel_file_versions AS version
+                JOIN excel_files AS file ON file.file_id = version.file_id
+                WHERE version.version_id = ?
+                  AND version.status = ?
+                  AND (
+                    file.active_version_id IS NULL
+                    OR file.active_version_id <> version.version_id
+                  )
+                """,
+                (version_id, ExcelVersionStatus.FAILED.value),
+            ).fetchone()
+            if row is None:
+                return False
+            connection.execute(
+                "DELETE FROM excel_row_search_index WHERE version_id = ?",
+                (version_id,),
+            )
             connection.execute(
                 """
+                DELETE FROM document_sheet_summaries
+                WHERE summary_id IN (
+                  SELECT summary_id FROM document_summaries WHERE version_id = ?
+                )
+                """,
+                (version_id,),
+            )
+            connection.execute(
+                "DELETE FROM document_summaries WHERE version_id = ?",
+                (version_id,),
+            )
+            connection.execute(
+                "DELETE FROM excel_row_mappings WHERE version_id = ?",
+                (version_id,),
+            )
+            connection.execute(
+                "DELETE FROM excel_artifacts WHERE version_id = ?",
+                (version_id,),
+            )
+            connection.execute(
+                "DELETE FROM excel_sheets WHERE version_id = ?",
+                (version_id,),
+            )
+        return True
+
+    def activate_version(self, file_id: str, version_id: str, activated_at: str) -> bool:
+        return self._activate_version(
+            file_id=file_id,
+            version_id=version_id,
+            activated_at=activated_at,
+        )
+
+    def activate_version_for_upload_task(
+        self,
+        *,
+        file_id: str,
+        version_id: str,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        activated_at: str,
+        task_result: dict[str, object],
+    ) -> bool:
+        try:
+            with self._connect() as connection:
+                cursor = self._activate_version_on_connection(
+                    connection,
+                    file_id=file_id,
+                    version_id=version_id,
+                    activated_at=activated_at,
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    claim_token=claim_token,
+                )
+                if cursor.rowcount != 1:
+                    raise _UploadTaskPublicationRejected
+                cursor = connection.execute(
+                    """
+                    UPDATE excel_upload_tasks
+                    SET status = ?,
+                        error_message = NULL,
+                        result_json = ?,
+                        updated_at = ?,
+                        finished_at = ?,
+                        state_revision = state_revision + 1
+                    WHERE task_id = ?
+                      AND status = ?
+                      AND worker_id = ?
+                      AND claim_token = ?
+                      AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at >= ?
+                    """,
+                    (
+                        ExcelUploadTaskStatus.READY.value,
+                        dump_json(task_result),
+                        activated_at,
+                        activated_at,
+                        task_id,
+                        ExcelUploadTaskStatus.PROCESSING.value,
+                        worker_id,
+                        claim_token,
+                        activated_at,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise _UploadTaskPublicationRejected
+        except _UploadTaskPublicationRejected:
+            return False
+        return True
+
+    def _activate_version(
+        self,
+        *,
+        file_id: str,
+        version_id: str,
+        activated_at: str,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = self._activate_version_on_connection(
+                connection,
+                file_id=file_id,
+                version_id=version_id,
+                activated_at=activated_at,
+                task_id=task_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+            )
+        return cursor.rowcount == 1
+
+    def _activate_version_on_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        file_id: str,
+        version_id: str,
+        activated_at: str,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> sqlite3.Cursor:
+        cursor = connection.execute(
+            """
                 UPDATE excel_files
                 SET active_version_id = ?, updated_at = ?
                 WHERE file_id = ?
-                """,
-                (version_id, activated_at, file_id),
-            )
+                  AND status = ?
+                  AND EXISTS (
+                    SELECT 1
+                    FROM excel_file_versions
+                    WHERE version_id = ?
+                      AND file_id = excel_files.file_id
+                      AND status IN (?, ?)
+                  )
+                  AND (
+                    ? IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM excel_upload_tasks
+                      WHERE task_id = ?
+                        AND status = ?
+                        AND worker_id = ?
+                        AND claim_token = ?
+                        AND lease_expires_at IS NOT NULL
+                        AND lease_expires_at >= ?
+                    )
+                  )
+            """,
+            (
+                version_id,
+                activated_at,
+                file_id,
+                ExcelFileStatus.ACTIVE.value,
+                version_id,
+                ExcelVersionStatus.PROCESSING.value,
+                ExcelVersionStatus.READY.value,
+                task_id,
+                task_id,
+                ExcelUploadTaskStatus.PROCESSING.value,
+                worker_id,
+                claim_token,
+                activated_at,
+            ),
+        )
+        if cursor.rowcount == 1:
             connection.execute(
                 """
                 UPDATE excel_file_versions
                 SET status = ?, activated_at = ?
-                WHERE version_id = ?
+                WHERE version_id = ? AND file_id = ?
                 """,
-                (ExcelVersionStatus.READY.value, activated_at, version_id),
+                (
+                    ExcelVersionStatus.READY.value,
+                    activated_at,
+                    version_id,
+                    file_id,
+                ),
             )
+        return cursor
 
     def create_sheet(self, sheet: ExcelSheet) -> None:
         with self._connect() as connection:
@@ -684,21 +888,59 @@ class SQLiteExcelAssetRepository:
         *,
         worker_id: str,
         started_at: str,
+        lease_expires_at: str,
     ) -> ExcelUploadTask | None:
         return self._excel_upload_tasks.claim_next(
             worker_id=worker_id,
             started_at=started_at,
+            lease_expires_at=lease_expires_at,
+        )
+
+    def heartbeat_upload_task(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        return self._excel_upload_tasks.heartbeat(
+            task_id=task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            heartbeat_at=heartbeat_at,
+            lease_expires_at=lease_expires_at,
+        )
+
+    def is_upload_task_claim_active(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        checked_at: str,
+    ) -> bool:
+        return self._excel_upload_tasks.claim_is_active(
+            task_id=task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            checked_at=checked_at,
         )
 
     def complete_upload_task(
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         result: dict[str, object],
         finished_at: str,
     ) -> ExcelUploadTask | None:
         return self._excel_upload_tasks.complete(
             task_id=task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
             result=result,
             finished_at=finished_at,
         )
@@ -707,11 +949,15 @@ class SQLiteExcelAssetRepository:
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         finished_at: str,
     ) -> ExcelUploadTask | None:
         return self._excel_upload_tasks.fail(
             task_id=task_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
             error_message=error_message,
             finished_at=finished_at,
         )
@@ -729,19 +975,15 @@ class SQLiteExcelAssetRepository:
 
     def create_pdf_file(self, file: PdfFile) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO pdf_files
-                  (
-                    file_id, user_id, parent_id, display_name, original_filename,
-                    kind, size_bytes, storage_path, status, visibility,
-                    processing_status, progress, status_detail, error_message,
-                    page_count, chunk_count, created_at, updated_at, deleted_at
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._pdf_file_values(file),
-            )
+            self._insert_pdf_file(connection, file)
+
+    def create_pdf_upload(self, file: PdfFile, task: PdfUploadTask) -> None:
+        try:
+            with self._connect() as connection:
+                self._insert_pdf_file(connection, file)
+                self._insert_pdf_upload_task(connection, task)
+        except sqlite3.IntegrityError as exc:
+            self._raise_pdf_name_conflict([file], exc)
 
     def get_pdf_file(self, file_id: str) -> PdfFile | None:
         with self._connect() as connection:
@@ -821,7 +1063,7 @@ class SQLiteExcelAssetRepository:
         created_at: str,
     ) -> PdfFile:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(connection)
             folder = self._get_pdf_folder_by_parent_and_name(
                 connection,
                 user_id=user_id,
@@ -930,6 +1172,9 @@ class SQLiteExcelAssetRepository:
         error_message: str | None = None,
         page_count: int | None = None,
         chunk_count: int | None = None,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
     ) -> PdfFile | None:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -943,6 +1188,20 @@ class SQLiteExcelAssetRepository:
                     chunk_count = COALESCE(?, chunk_count),
                     updated_at = ?
                 WHERE file_id = ? AND status = ?
+                  AND (
+                    ? IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM pdf_upload_tasks
+                      WHERE task_id = ?
+                        AND file_id = pdf_files.file_id
+                        AND status = ?
+                        AND worker_id = ?
+                        AND claim_token = ?
+                        AND lease_expires_at IS NOT NULL
+                        AND lease_expires_at >= ?
+                    )
+                  )
                 """,
                 (
                     processing_status.value,
@@ -954,6 +1213,12 @@ class SQLiteExcelAssetRepository:
                     updated_at,
                     file_id,
                     PdfFileStatus.ACTIVE.value,
+                    task_id,
+                    task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    updated_at,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1025,6 +1290,29 @@ class SQLiteExcelAssetRepository:
 
             deleted_at = utc_now_iso()
             file_ids = [str(row["file_id"]) for row in rows]
+            vector_indexes = connection.execute(
+                f"""
+                SELECT file_id, source_fingerprint, embedding_revision
+                FROM pdf_vector_indexes
+                WHERE file_id IN ({','.join('?' for _file_id in file_ids)})
+                """,
+                file_ids,
+            ).fetchall()
+            for vector_index in vector_indexes:
+                queue_pdf_vector_delete_on_connection(
+                    connection,
+                    task=PdfVectorIndexTask(
+                        task_id=new_id("pdfvector"),
+                        file_id=str(vector_index["file_id"]),
+                        action=PdfVectorIndexTaskAction.DELETE,
+                        source_fingerprint=str(vector_index["source_fingerprint"]),
+                        embedding_revision=str(vector_index["embedding_revision"]),
+                        status=PdfVectorIndexTaskStatus.PENDING,
+                        attempt_count=0,
+                        created_at=deleted_at,
+                        updated_at=deleted_at,
+                    ),
+                )
             cleanup_jobs = [
                 (
                     new_id("pdfcleanup"),
@@ -1115,7 +1403,8 @@ class SQLiteExcelAssetRepository:
                     progress = 100,
                     detail = ?,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE file_id = ? AND status IN (?, ?)
                 """,
                 [
@@ -1169,23 +1458,132 @@ class SQLiteExcelAssetRepository:
             "cleanup_jobs": len(cleanup_jobs),
         }
 
-    def list_pending_pdf_file_cleanup_jobs(self) -> list[PdfFileCleanupJob]:
+    def list_pending_pdf_file_cleanup_jobs(
+        self,
+        *,
+        available_at: str,
+    ) -> list[PdfFileCleanupJob]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM pdf_file_cleanup_jobs
-                WHERE status IN ('pending', 'failed')
+                WHERE (
+                    status IN ('pending', 'failed')
+                    OR (
+                      status = 'processing'
+                      AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at < ?
+                    )
+                  )
                   AND attempt_count < 10
                 ORDER BY created_at ASC
                 LIMIT 100
-                """
+                """,
+                (available_at,),
             ).fetchall()
         return [self._to_pdf_file_cleanup_job(row) for row in rows]
+
+    def claim_pdf_file_cleanup_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> PdfFileCleanupJob | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_file_cleanup_jobs
+                SET status = 'processing',
+                    worker_id = ?,
+                    claim_token = ?,
+                    lease_expires_at = ?,
+                    heartbeat_at = ?,
+                    updated_at = ?,
+                    state_revision = state_revision + 1
+                WHERE job_id = ?
+                  AND attempt_count < 10
+                  AND (
+                    status IN ('pending', 'failed')
+                    OR (
+                      status = 'processing'
+                      AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at < ?
+                    )
+                  )
+                """,
+                (
+                    worker_id,
+                    claim_token,
+                    lease_expires_at,
+                    claimed_at,
+                    claimed_at,
+                    job_id,
+                    claimed_at,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_file_cleanup_jobs
+                WHERE job_id = ? AND claim_token = ?
+                """,
+                (job_id, claim_token),
+            ).fetchone()
+        return self._to_pdf_file_cleanup_job(row) if row is not None else None
+
+    def ensure_pdf_file_cleanup_job(
+        self,
+        *,
+        file_id: str,
+        created_at: str,
+    ) -> PdfFileCleanupJob | None:
+        relative_path = f"pdf-knowledge/files/{file_id}"
+        job_id = new_id("pdfcleanup")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO pdf_file_cleanup_jobs
+                  (
+                    job_id, file_id, relative_path, status, attempt_count,
+                    error_message, created_at, updated_at, completed_at
+                  )
+                SELECT ?, file_id, ?, 'pending', 0, NULL, ?, ?, NULL
+                FROM pdf_files
+                WHERE file_id = ?
+                  AND status = ?
+                  AND storage_path IS NOT NULL
+                """,
+                (
+                    job_id,
+                    relative_path,
+                    created_at,
+                    created_at,
+                    file_id,
+                    PdfFileStatus.DELETED.value,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_file_cleanup_jobs
+                WHERE relative_path = ?
+                  AND status IN ('pending', 'processing', 'failed')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (relative_path,),
+            ).fetchone()
+        return self._to_pdf_file_cleanup_job(row) if row is not None else None
 
     def complete_pdf_file_cleanup_job(
         self,
         *,
         job_id: str,
+        worker_id: str,
+        claim_token: str,
         completed_at: str,
     ) -> PdfFileCleanupJob | None:
         with self._connect() as connection:
@@ -1196,10 +1594,23 @@ class SQLiteExcelAssetRepository:
                     attempt_count = attempt_count + 1,
                     error_message = NULL,
                     updated_at = ?,
-                    completed_at = ?
-                WHERE job_id = ? AND status IN ('pending', 'failed')
+                    completed_at = ?,
+                    state_revision = state_revision + 1
+                WHERE job_id = ?
+                  AND status = 'processing'
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
                 """,
-                (completed_at, completed_at, job_id),
+                (
+                    completed_at,
+                    completed_at,
+                    job_id,
+                    worker_id,
+                    claim_token,
+                    completed_at,
+                ),
             )
             if cursor.rowcount == 0:
                 return None
@@ -1213,6 +1624,8 @@ class SQLiteExcelAssetRepository:
         self,
         *,
         job_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         failed_at: str,
     ) -> PdfFileCleanupJob | None:
@@ -1223,10 +1636,23 @@ class SQLiteExcelAssetRepository:
                 SET status = 'failed',
                     attempt_count = attempt_count + 1,
                     error_message = ?,
-                    updated_at = ?
-                WHERE job_id = ? AND status IN ('pending', 'failed')
+                    updated_at = ?,
+                    state_revision = state_revision + 1
+                WHERE job_id = ?
+                  AND status = 'processing'
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
                 """,
-                (error_message[:500], failed_at, job_id),
+                (
+                    error_message[:500],
+                    failed_at,
+                    job_id,
+                    worker_id,
+                    claim_token,
+                    failed_at,
+                ),
             )
             if cursor.rowcount == 0:
                 return None
@@ -1250,19 +1676,21 @@ class SQLiteExcelAssetRepository:
 
     def create_pdf_upload_batch(self, batch: PdfUploadBatch) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO pdf_upload_batches
-                  (
-                    batch_id, user_id, source_name, status, total_files,
-                    accepted_files, skipped_files, total_bytes, progress, detail,
-                    error_message, parser_backend, result_json, created_at, updated_at,
-                    completed_at
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._pdf_upload_batch_values(batch),
-            )
+            self._insert_pdf_upload_batch(connection, batch)
+
+    def create_pdf_upload_batch_records(
+        self,
+        batch: PdfUploadBatch,
+        records: list[tuple[PdfFile, PdfUploadTask]],
+    ) -> None:
+        try:
+            with self._connect() as connection:
+                self._insert_pdf_upload_batch(connection, batch)
+                for file, task in records:
+                    self._insert_pdf_file(connection, file)
+                    self._insert_pdf_upload_task(connection, task)
+        except sqlite3.IntegrityError as exc:
+            self._raise_pdf_name_conflict([file for file, _task in records], exc)
 
     def get_pdf_upload_batch(self, batch_id: str) -> PdfUploadBatch | None:
         with self._connect() as connection:
@@ -1330,27 +1758,113 @@ class SQLiteExcelAssetRepository:
         return self._to_pdf_upload_batch(row)
 
     def create_pdf_upload_task(self, task: PdfUploadTask) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO pdf_upload_tasks
-                  (
-                    task_id, user_id, file_id, original_filename, staging_path,
-                    status, progress, detail, error_message, result_json,
-                    created_at, updated_at, started_at, finished_at, worker_id,
-                    stage, parser_backend, error_code, retry_count, last_retry_at,
-                    batch_id
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._pdf_upload_task_values(task),
+        try:
+            with self._connect() as connection:
+                self._insert_pdf_upload_task(connection, task)
+        except sqlite3.IntegrityError as exc:
+            active_task = (
+                self.get_active_pdf_upload_task_for_file(task.file_id)
+                if task.file_id is not None
+                else None
             )
+            if active_task is not None:
+                raise ActiveUploadTaskConflictError(
+                    file_id=task.file_id or "",
+                    task_id=active_task.task_id,
+                ) from exc
+            raise
+
+    def queue_pdf_upload_task_for_existing_file(
+        self,
+        task: PdfUploadTask,
+        *,
+        status_detail: str,
+        mark_summary_stale: bool,
+    ) -> None:
+        if task.file_id is None:
+            raise ValueError("PDF upload task is missing a file reference")
+        try:
+            with self._connect() as connection:
+                self._insert_pdf_upload_task(connection, task)
+                if mark_summary_stale:
+                    connection.execute(
+                        """
+                        UPDATE pdf_document_summaries
+                        SET status = 'stale',
+                            error_message = ?,
+                            updated_at = ?,
+                            source_fingerprint = (
+                              SELECT content_fingerprint
+                              FROM pdf_files
+                              WHERE file_id = ?
+                            ),
+                            source_updated_at = (
+                              SELECT updated_at
+                              FROM pdf_files
+                              WHERE file_id = ?
+                            )
+                        WHERE file_id = ?
+                          AND status NOT IN ('empty', 'stale')
+                        """,
+                        (
+                            "PDF content changed; regenerate the summary before routing.",
+                            task.updated_at,
+                            task.file_id,
+                            task.file_id,
+                            task.file_id,
+                        ),
+                    )
+                cursor = connection.execute(
+                    """
+                    UPDATE pdf_files
+                    SET processing_status = ?,
+                        progress = 5,
+                        status_detail = ?,
+                        error_message = NULL,
+                        updated_at = ?
+                    WHERE file_id = ? AND status = ?
+                    """,
+                    (
+                        PdfProcessingStatus.QUEUED.value,
+                        status_detail,
+                        task.updated_at,
+                        task.file_id,
+                        PdfFileStatus.ACTIVE.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("PDF source file is no longer active")
+        except sqlite3.IntegrityError as exc:
+            active_task = self.get_active_pdf_upload_task_for_file(task.file_id)
+            if active_task is not None:
+                raise ActiveUploadTaskConflictError(
+                    file_id=task.file_id,
+                    task_id=active_task.task_id,
+                ) from exc
+            raise
 
     def get_pdf_upload_task(self, task_id: str) -> PdfUploadTask | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
                 (task_id,),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
+    def get_active_pdf_upload_task_for_file(self, file_id: str) -> PdfUploadTask | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM pdf_upload_tasks
+                WHERE file_id = ? AND status IN (?, ?)
+                ORDER BY created_at ASC, task_id ASC
+                LIMIT 1
+                """,
+                (
+                    file_id,
+                    PdfUploadTaskStatus.QUEUED.value,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                ),
             ).fetchone()
         return self._to_pdf_upload_task(row)
 
@@ -1384,7 +1898,9 @@ class SQLiteExcelAssetRepository:
         *,
         worker_id: str,
         started_at: str,
+        lease_expires_at: str,
     ) -> PdfUploadTask | None:
+        claim_token = new_id("pdfuploadclaim")
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -1397,7 +1913,11 @@ class SQLiteExcelAssetRepository:
                     error_code = NULL,
                     stage = ?,
                     detail = ?,
-                    progress = ?
+                    progress = ?,
+                    claim_token = ?,
+                    lease_expires_at = ?,
+                    heartbeat_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = (
                   SELECT task_id
                   FROM pdf_upload_tasks
@@ -1414,6 +1934,9 @@ class SQLiteExcelAssetRepository:
                     PdfUploadTaskStage.CLAIMED.value,
                     "MinerU parsing started.",
                     20,
+                    claim_token,
+                    lease_expires_at,
+                    started_at,
                     PdfUploadTaskStatus.QUEUED.value,
                 ),
             )
@@ -1423,18 +1946,88 @@ class SQLiteExcelAssetRepository:
                 """
                 SELECT * FROM pdf_upload_tasks
                 WHERE worker_id = ?
+                  AND claim_token = ?
                   AND status = ?
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (worker_id, PdfUploadTaskStatus.PROCESSING.value),
+                (worker_id, claim_token, PdfUploadTaskStatus.PROCESSING.value),
             ).fetchone()
         return self._to_pdf_upload_task(row)
+
+    def heartbeat_pdf_upload_task(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET heartbeat_at = ?,
+                    lease_expires_at = ?,
+                    updated_at = ?,
+                    state_revision = state_revision + 1
+                WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    heartbeat_at,
+                    lease_expires_at,
+                    heartbeat_at,
+                    task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    heartbeat_at,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def is_pdf_upload_task_claim_active(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        checked_at: str,
+    ) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM pdf_upload_tasks
+                WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    checked_at,
+                ),
+            ).fetchone()
+        return row is not None
 
     def update_pdf_upload_task_progress(
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         progress: int,
         detail: str,
         updated_at: str,
@@ -1447,9 +2040,14 @@ class SQLiteExcelAssetRepository:
                 SET progress = ?,
                     detail = ?,
                     stage = COALESCE(?, stage),
-                    updated_at = ?
+                    updated_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = ?
                   AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
                 """,
                 (
                     progress,
@@ -1458,6 +2056,9 @@ class SQLiteExcelAssetRepository:
                     updated_at,
                     task_id,
                     PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    updated_at,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1472,6 +2073,8 @@ class SQLiteExcelAssetRepository:
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         result: dict[str, object],
         detail: str,
         finished_at: str,
@@ -1486,8 +2089,14 @@ class SQLiteExcelAssetRepository:
                     detail = ?,
                     result_json = ?,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
                 """,
                 (
                     PdfUploadTaskStatus.READY.value,
@@ -1498,6 +2107,10 @@ class SQLiteExcelAssetRepository:
                     finished_at,
                     finished_at,
                     task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    finished_at,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1508,10 +2121,253 @@ class SQLiteExcelAssetRepository:
             ).fetchone()
         return self._to_pdf_upload_task(row)
 
+    def publish_pdf_parse_result(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        detail: PdfDocumentDetail,
+        chunks: list[PdfDocumentChunk],
+        report: PdfParseReport,
+        processing_status: PdfProcessingStatus,
+        status_detail: str,
+        error_message: str | None,
+        result: dict[str, object],
+        published_at: str,
+        vector_index: PdfVectorIndex | None = None,
+        vector_index_task: PdfVectorIndexTask | None = None,
+    ) -> PdfUploadTask | None:
+        if report.file_id != detail.file_id or any(
+            chunk.file_id != detail.file_id for chunk in chunks
+        ):
+            raise ValueError("PDF parse result contains mismatched file references")
+        if (vector_index is None) != (vector_index_task is None):
+            raise ValueError(
+                "PDF vector index state and task must be published together"
+            )
+        if vector_index is not None and (
+            vector_index.file_id != detail.file_id
+            or vector_index.expected_chunk_count != len(chunks)
+            or vector_index.source_fingerprint
+            != ordered_content_fingerprint([chunk.content_hash for chunk in chunks])
+        ):
+            raise ValueError("PDF vector index does not match the parse result")
+        with self._connect() as connection:
+            self._begin_immediate(connection)
+            claim = connection.execute(
+                """
+                SELECT task.file_id
+                FROM pdf_upload_tasks AS task
+                JOIN pdf_files AS file ON file.file_id = task.file_id
+                WHERE task.task_id = ?
+                  AND task.file_id = ?
+                  AND task.status = ?
+                  AND task.worker_id = ?
+                  AND task.claim_token = ?
+                  AND task.lease_expires_at IS NOT NULL
+                  AND task.lease_expires_at >= ?
+                  AND file.status = ?
+                """,
+                (
+                    task_id,
+                    detail.file_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    published_at,
+                    PdfFileStatus.ACTIVE.value,
+                ),
+            ).fetchone()
+            if claim is None:
+                return None
+            self._replace_pdf_detail_and_chunks_on_connection(
+                connection,
+                detail=detail,
+                chunks=chunks,
+                created_at=published_at,
+            )
+            self._replace_pdf_parse_diagnostics_on_connection(connection, report)
+            if vector_index is not None and vector_index_task is not None:
+                queue_pdf_vector_index_on_connection(
+                    connection,
+                    index=vector_index,
+                    task=vector_index_task,
+                )
+            connection.execute(
+                """
+                UPDATE pdf_files
+                SET processing_status = ?,
+                    progress = 100,
+                    status_detail = ?,
+                    error_message = ?,
+                    page_count = ?,
+                    chunk_count = ?,
+                    updated_at = ?
+                WHERE file_id = ? AND status = ?
+                """,
+                (
+                    processing_status.value,
+                    status_detail,
+                    error_message,
+                    report.total_pages,
+                    len(chunks),
+                    published_at,
+                    detail.file_id,
+                    PdfFileStatus.ACTIVE.value,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET status = ?,
+                    progress = 100,
+                    stage = ?,
+                    detail = ?,
+                    error_message = NULL,
+                    error_code = NULL,
+                    result_json = ?,
+                    updated_at = ?,
+                    finished_at = ?,
+                    state_revision = state_revision + 1
+                WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    PdfUploadTaskStatus.READY.value,
+                    PdfUploadTaskStage.READY.value,
+                    status_detail,
+                    dump_json(result),
+                    published_at,
+                    published_at,
+                    task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    published_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("PDF upload claim changed during parse publication")
+            row = connection.execute(
+                "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
+    def fail_pdf_parse_result(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        report: PdfParseReport | None,
+        error_message: str,
+        error_code: str | None,
+        failed_at: str,
+    ) -> PdfUploadTask | None:
+        with self._connect() as connection:
+            self._begin_immediate(connection)
+            claim = connection.execute(
+                """
+                SELECT task.file_id
+                FROM pdf_upload_tasks AS task
+                LEFT JOIN pdf_files AS file ON file.file_id = task.file_id
+                WHERE task.task_id = ?
+                  AND task.status = ?
+                  AND task.worker_id = ?
+                  AND task.claim_token = ?
+                  AND task.lease_expires_at IS NOT NULL
+                  AND task.lease_expires_at >= ?
+                  AND (task.file_id IS NULL OR file.status = ?)
+                """,
+                (
+                    task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    failed_at,
+                    PdfFileStatus.ACTIVE.value,
+                ),
+            ).fetchone()
+            if claim is None:
+                return None
+            file_id = claim["file_id"]
+            if report is not None and file_id is not None:
+                if report.file_id != str(file_id):
+                    raise ValueError("PDF failure report references a different file")
+                self._replace_pdf_parse_diagnostics_on_connection(connection, report)
+                connection.execute(
+                    """
+                    UPDATE pdf_files
+                    SET processing_status = ?,
+                        progress = 100,
+                        status_detail = ?,
+                        error_message = ?,
+                        updated_at = ?
+                    WHERE file_id = ? AND status = ?
+                    """,
+                    (
+                        PdfProcessingStatus.FAILED.value,
+                        "PDF parsing failed.",
+                        error_message,
+                        failed_at,
+                        file_id,
+                        PdfFileStatus.ACTIVE.value,
+                    ),
+                )
+            cursor = connection.execute(
+                """
+                UPDATE pdf_upload_tasks
+                SET status = ?,
+                    progress = 100,
+                    stage = ?,
+                    detail = ?,
+                    error_message = ?,
+                    error_code = ?,
+                    updated_at = ?,
+                    finished_at = ?,
+                    state_revision = state_revision + 1
+                WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    PdfUploadTaskStatus.FAILED.value,
+                    PdfUploadTaskStage.FAILED.value,
+                    "PDF parsing failed.",
+                    error_message,
+                    error_code,
+                    failed_at,
+                    failed_at,
+                    task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    failed_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("PDF upload claim changed during failure publication")
+            row = connection.execute(
+                "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return self._to_pdf_upload_task(row)
+
     def fail_pdf_upload_task(
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         failed_at: str,
         error_code: str | None = None,
@@ -1527,8 +2383,14 @@ class SQLiteExcelAssetRepository:
                     error_message = ?,
                     error_code = ?,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = ?
+                  AND status = ?
+                  AND worker_id = ?
+                  AND claim_token = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at >= ?
                 """,
                 (
                     PdfUploadTaskStatus.FAILED.value,
@@ -1540,6 +2402,10 @@ class SQLiteExcelAssetRepository:
                     failed_at,
                     failed_at,
                     task_id,
+                    PdfUploadTaskStatus.PROCESSING.value,
+                    worker_id,
+                    claim_token,
+                    failed_at,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1568,7 +2434,8 @@ class SQLiteExcelAssetRepository:
                     error_message = NULL,
                     error_code = NULL,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE task_id = ?
                   AND status = ?
                 """,
@@ -1585,6 +2452,27 @@ class SQLiteExcelAssetRepository:
             )
             if cursor.rowcount == 0:
                 return None
+            connection.execute(
+                """
+                UPDATE pdf_files
+                SET processing_status = ?,
+                    progress = 100,
+                    status_detail = ?,
+                    error_message = NULL,
+                    updated_at = ?
+                WHERE file_id = (
+                  SELECT file_id FROM pdf_upload_tasks WHERE task_id = ?
+                )
+                  AND status = ?
+                """,
+                (
+                    PdfProcessingStatus.CANCELLED.value,
+                    detail,
+                    cancelled_at,
+                    task_id,
+                    PdfFileStatus.ACTIVE.value,
+                ),
+            )
             row = connection.execute(
                 "SELECT * FROM pdf_upload_tasks WHERE task_id = ?",
                 (task_id,),
@@ -1601,12 +2489,19 @@ class SQLiteExcelAssetRepository:
                 """
                 SELECT * FROM pdf_upload_tasks
                 WHERE status = ?
-                  AND started_at IS NOT NULL
-                  AND started_at < ?
+                  AND (
+                    (lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+                    OR (
+                      lease_expires_at IS NULL
+                      AND started_at IS NOT NULL
+                      AND started_at < ?
+                    )
+                  )
                 ORDER BY started_at ASC
                 """,
                 (
                     PdfUploadTaskStatus.PROCESSING.value,
+                    cutoff_started_at,
                     cutoff_started_at,
                 ),
             ).fetchall()
@@ -1631,18 +2526,25 @@ class SQLiteExcelAssetRepository:
                   SELECT file_id
                   FROM pdf_upload_tasks
                   WHERE status = ?
-                    AND started_at IS NOT NULL
-                    AND started_at < ?
+                    AND (
+                      (lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+                      OR (
+                        lease_expires_at IS NULL
+                        AND started_at IS NOT NULL
+                        AND started_at < ?
+                      )
+                    )
                     AND file_id IS NOT NULL
                 )
                 """,
                 (
                     PdfProcessingStatus.FAILED.value,
                     100,
-                    "PDF processing was interrupted.",
+                    "PDF parsing failed.",
                     "PDF processing was interrupted. Please upload the document again.",
                     failed_at,
                     PdfUploadTaskStatus.PROCESSING.value,
+                    failed_at,
                     cutoff_started_at,
                 ),
             )
@@ -1656,10 +2558,17 @@ class SQLiteExcelAssetRepository:
                     stage = ?,
                     progress = ?,
                     updated_at = ?,
-                    finished_at = ?
+                    finished_at = ?,
+                    state_revision = state_revision + 1
                 WHERE status = ?
-                  AND started_at IS NOT NULL
-                  AND started_at < ?
+                  AND (
+                    (lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+                    OR (
+                      lease_expires_at IS NULL
+                      AND started_at IS NOT NULL
+                      AND started_at < ?
+                    )
+                  )
                 """,
                 (
                     PdfUploadTaskStatus.FAILED.value,
@@ -1671,6 +2580,7 @@ class SQLiteExcelAssetRepository:
                     failed_at,
                     failed_at,
                     PdfUploadTaskStatus.PROCESSING.value,
+                    failed_at,
                     cutoff_started_at,
                 ),
             )
@@ -1744,9 +2654,11 @@ class SQLiteExcelAssetRepository:
             rows = connection.execute(
                 """
                 SELECT * FROM pdf_summary_tasks
+                WHERE user_id = ?
                 ORDER BY updated_at DESC, created_at DESC
                 LIMIT 50
-                """
+                """,
+                (user_id,),
             ).fetchall()
         return [
             task
@@ -2081,6 +2993,7 @@ class SQLiteExcelAssetRepository:
 
     def save_pdf_document_detail(self, detail: PdfDocumentDetail) -> None:
         with self._connect() as connection:
+            self._begin_immediate(connection)
             if not self._is_active_pdf_file(connection, detail.file_id):
                 return
             connection.execute(
@@ -2191,6 +3104,7 @@ class SQLiteExcelAssetRepository:
 
     def save_pdf_document_summary(self, summary: PdfDocumentSummary) -> bool:
         with self._connect() as connection:
+            self._begin_immediate(connection)
             source = connection.execute(
                 """
                 SELECT content_fingerprint
@@ -2220,6 +3134,7 @@ class SQLiteExcelAssetRepository:
 
     def save_pdf_parse_report(self, report: PdfParseReport) -> None:
         with self._connect() as connection:
+            self._begin_immediate(connection)
             if not self._is_active_pdf_file(connection, report.file_id):
                 return
             connection.execute(
@@ -2317,6 +3232,7 @@ class SQLiteExcelAssetRepository:
         pages: list[PdfParsePage],
     ) -> None:
         with self._connect() as connection:
+            self._begin_immediate(connection)
             if not self._is_active_pdf_file(connection, file_id):
                 return
             connection.execute(
@@ -2369,6 +3285,7 @@ class SQLiteExcelAssetRepository:
         artifacts: list[PdfParseArtifact],
     ) -> None:
         with self._connect() as connection:
+            self._begin_immediate(connection)
             if not self._is_active_pdf_file(connection, file_id):
                 return
             connection.execute(
@@ -2418,6 +3335,7 @@ class SQLiteExcelAssetRepository:
     ) -> None:
         created_at = utc_now_iso()
         with self._connect() as connection:
+            self._begin_immediate(connection)
             if not self._is_active_pdf_file(connection, file_id):
                 return
             connection.execute(
@@ -3802,6 +4720,92 @@ class SQLiteExcelAssetRepository:
             maintenance_runner=self._run_connection_maintenance,
         )
 
+    @staticmethod
+    def _begin_immediate(connection: sqlite3.Connection) -> None:
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+
+    def _insert_pdf_file(self, connection: sqlite3.Connection, file: PdfFile) -> None:
+        connection.execute(
+            """
+            INSERT INTO pdf_files
+              (
+                file_id, user_id, parent_id, display_name, original_filename,
+                kind, size_bytes, storage_path, status, visibility,
+                processing_status, progress, status_detail, error_message,
+                page_count, chunk_count, created_at, updated_at, deleted_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            self._pdf_file_values(file),
+        )
+
+    def _insert_pdf_upload_batch(
+        self,
+        connection: sqlite3.Connection,
+        batch: PdfUploadBatch,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO pdf_upload_batches
+              (
+                batch_id, user_id, source_name, status, total_files,
+                accepted_files, skipped_files, total_bytes, progress, detail,
+                error_message, parser_backend, result_json, created_at, updated_at,
+                completed_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            self._pdf_upload_batch_values(batch),
+        )
+
+    def _insert_pdf_upload_task(
+        self,
+        connection: sqlite3.Connection,
+        task: PdfUploadTask,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO pdf_upload_tasks
+              (
+                task_id, user_id, file_id, original_filename, staging_path,
+                status, progress, detail, error_message, result_json,
+                created_at, updated_at, started_at, finished_at, worker_id,
+                stage, parser_backend, error_code, retry_count, last_retry_at,
+                batch_id, claim_token, lease_expires_at, heartbeat_at, state_revision
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            self._pdf_upload_task_values(task),
+        )
+
+    def _raise_pdf_name_conflict(
+        self,
+        files: list[PdfFile],
+        cause: sqlite3.IntegrityError,
+    ) -> None:
+        seen: dict[tuple[str, str | None, str], PdfFile] = {}
+        for file in files:
+            key = (file.user_id, file.parent_id, file.display_name)
+            previous = seen.get(key)
+            if previous is not None:
+                raise FileNameConflictError(
+                    display_name=file.display_name,
+                    file_id=previous.file_id,
+                ) from cause
+            seen[key] = file
+            conflict = self.find_pdf_file_by_parent_and_name(
+                user_id=file.user_id,
+                parent_id=file.parent_id,
+                display_name=file.display_name,
+            )
+            if conflict is not None:
+                raise FileNameConflictError(
+                    display_name=file.display_name,
+                    file_id=conflict.file_id,
+                ) from cause
+        raise cause
+
     def _to_file(self, row: sqlite3.Row | None) -> ExcelFile | None:
         if row is None:
             return None
@@ -4027,6 +5031,10 @@ class SQLiteExcelAssetRepository:
             task.retry_count,
             task.last_retry_at,
             task.batch_id,
+            task.claim_token,
+            task.lease_expires_at,
+            task.heartbeat_at,
+            task.state_revision,
         )
 
     def _to_pdf_upload_task(self, row: sqlite3.Row | None) -> PdfUploadTask | None:
@@ -4056,6 +5064,10 @@ class SQLiteExcelAssetRepository:
             retry_count=safe_int(row_value(row, "retry_count", 0), 0),
             last_retry_at=row_value(row, "last_retry_at"),
             batch_id=row_value(row, "batch_id"),
+            claim_token=row_value(row, "claim_token"),
+            lease_expires_at=row_value(row, "lease_expires_at"),
+            heartbeat_at=row_value(row, "heartbeat_at"),
+            state_revision=safe_int(row_value(row, "state_revision", 0), 0),
         )
 
     def _pdf_summary_task_values(self, task: PdfSummaryTask) -> tuple[object, ...]:
@@ -4121,6 +5133,232 @@ class SQLiteExcelAssetRepository:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             completed_at=row["completed_at"],
+            worker_id=row_value(row, "worker_id"),
+            claim_token=row_value(row, "claim_token"),
+            lease_expires_at=row_value(row, "lease_expires_at"),
+            heartbeat_at=row_value(row, "heartbeat_at"),
+            state_revision=safe_int(row_value(row, "state_revision", 0), 0),
+        )
+
+    def _replace_pdf_detail_and_chunks_on_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        detail: PdfDocumentDetail,
+        chunks: list[PdfDocumentChunk],
+        created_at: str,
+    ) -> None:
+        connection.execute(
+            "DELETE FROM pdf_preview_blocks WHERE file_id = ?",
+            (detail.file_id,),
+        )
+        connection.execute(
+            "DELETE FROM pdf_schema_items WHERE file_id = ?",
+            (detail.file_id,),
+        )
+        connection.execute(
+            "DELETE FROM pdf_document_tags WHERE file_id = ?",
+            (detail.file_id,),
+        )
+        self._save_pdf_summary(connection, detail.summary)
+        connection.executemany(
+            """
+            INSERT INTO pdf_preview_blocks
+              (block_id, file_id, page_label, title, content, block_index)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    block.block_id,
+                    block.file_id,
+                    block.page_label,
+                    block.title,
+                    block.content,
+                    block.block_index,
+                )
+                for block in detail.preview_blocks
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO pdf_schema_items
+              (item_id, file_id, label, value, item_index)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    item.item_id,
+                    item.file_id,
+                    item.label,
+                    item.value,
+                    item.item_index,
+                )
+                for item in detail.schema
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO pdf_document_tags (file_id, tag, tag_index)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (detail.file_id, tag, index)
+                for index, tag in enumerate(detail.tags)
+            ],
+        )
+        connection.execute(
+            "DELETE FROM pdf_document_chunks WHERE file_id = ?",
+            (detail.file_id,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO pdf_document_chunks
+              (
+                chunk_id, file_id, chunk_index, text, page_label, title,
+                token_count, content_hash, metadata_json, created_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    chunk.chunk_id,
+                    chunk.file_id,
+                    chunk.chunk_index,
+                    chunk.text,
+                    chunk.page_label,
+                    chunk.title,
+                    chunk.token_count,
+                    chunk.content_hash,
+                    dump_json(chunk.metadata),
+                    created_at,
+                )
+                for chunk in chunks
+            ],
+        )
+        connection.execute(
+            "UPDATE pdf_files SET content_fingerprint = ? WHERE file_id = ?",
+            (
+                ordered_content_fingerprint([chunk.content_hash for chunk in chunks]),
+                detail.file_id,
+            ),
+        )
+
+    def _replace_pdf_parse_diagnostics_on_connection(
+        self,
+        connection: sqlite3.Connection,
+        report: PdfParseReport,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO pdf_parse_reports
+              (
+                file_id, parser_backend, parser_version, quality_status,
+                total_pages, parsed_pages, failed_pages, empty_pages,
+                text_block_count, table_block_count, image_block_count,
+                chunk_count, coverage_ratio, warning_count, error_count,
+                warnings_json, started_at, finished_at, created_at, updated_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(file_id) DO UPDATE SET
+              parser_backend = excluded.parser_backend,
+              parser_version = excluded.parser_version,
+              quality_status = excluded.quality_status,
+              total_pages = excluded.total_pages,
+              parsed_pages = excluded.parsed_pages,
+              failed_pages = excluded.failed_pages,
+              empty_pages = excluded.empty_pages,
+              text_block_count = excluded.text_block_count,
+              table_block_count = excluded.table_block_count,
+              image_block_count = excluded.image_block_count,
+              chunk_count = excluded.chunk_count,
+              coverage_ratio = excluded.coverage_ratio,
+              warning_count = excluded.warning_count,
+              error_count = excluded.error_count,
+              warnings_json = excluded.warnings_json,
+              started_at = excluded.started_at,
+              finished_at = excluded.finished_at,
+              updated_at = excluded.updated_at
+            """,
+            (
+                report.file_id,
+                report.parser_backend,
+                report.parser_version,
+                report.quality_status.value,
+                report.total_pages,
+                report.parsed_pages,
+                report.failed_pages,
+                report.empty_pages,
+                report.text_block_count,
+                report.table_block_count,
+                report.image_block_count,
+                report.chunk_count,
+                report.coverage_ratio,
+                report.warning_count,
+                report.error_count,
+                dump_json(report.warnings),
+                report.started_at,
+                report.finished_at,
+                report.created_at,
+                report.updated_at,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM pdf_parse_pages WHERE file_id = ?",
+            (report.file_id,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO pdf_parse_pages
+              (
+                page_id, file_id, page_number, page_label, status,
+                text_block_count, table_block_count, image_block_count,
+                char_count, warning_message, error_message
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    page.page_id,
+                    page.file_id,
+                    page.page_number,
+                    page.page_label,
+                    page.status.value,
+                    page.text_block_count,
+                    page.table_block_count,
+                    page.image_block_count,
+                    page.char_count,
+                    page.warning_message,
+                    page.error_message,
+                )
+                for page in report.pages
+            ],
+        )
+        connection.execute(
+            "DELETE FROM pdf_parse_artifacts WHERE file_id = ?",
+            (report.file_id,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO pdf_parse_artifacts
+              (
+                artifact_id, file_id, artifact_type, name, path,
+                size_bytes, content_hash, created_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    artifact.artifact_id,
+                    artifact.file_id,
+                    artifact.artifact_type,
+                    artifact.name,
+                    artifact.path,
+                    artifact.size_bytes,
+                    artifact.content_hash,
+                    artifact.created_at,
+                )
+                for artifact in report.artifacts
+            ],
         )
 
     def _is_active_pdf_file(

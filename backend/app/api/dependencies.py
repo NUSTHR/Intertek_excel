@@ -23,6 +23,11 @@ from app.adapters.repositories.sqlite.policies import (
     SQLiteMaintenancePolicy,
 )
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
+from app.adapters.retrieval.http_models import (
+    HttpPdfRerankerGateway,
+    OpenAiCompatiblePdfEmbeddingGateway,
+)
+from app.adapters.retrieval.qdrant_store import QdrantPdfVectorStore
 from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStorage
 from app.adapters.workbook.openpyxl_reader import OpenpyxlWorkbookReader
 from app.application.auth.rate_limit import AuthenticationRateLimiter
@@ -37,10 +42,14 @@ from app.application.llm_preferences import WorkspaceLlmPreferenceService
 from app.application.operational.readiness import ReadinessService, WorkerReadinessProbe
 from app.application.pdf_knowledge import (
     PdfChatService,
+    PdfDocumentRankingService,
     PdfKnowledgeService,
     PdfSummaryTaskWorker,
     PdfUploadTaskWorker,
+    PdfVectorIndexingService,
+    PdfVectorIndexTaskWorker,
 )
+from app.application.pdf_knowledge.chat_policy import PdfChatPolicy
 from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError, AuthorizationError
 from app.core.llm_catalog import (
@@ -107,6 +116,7 @@ def get_upload_task_worker() -> UploadTaskWorker:
         excel_assets=get_excel_asset_service(),
         storage_root=settings.storage_root,
         poll_interval_seconds=settings.upload_task_worker_poll_interval_seconds,
+        lease_seconds=settings.upload_task_stale_processing_minutes * 60,
     )
 
 
@@ -128,6 +138,13 @@ def get_pdf_knowledge_service() -> PdfKnowledgeService:
         default_parser_profile_id=get_default_pdf_parser_profile_id(settings),
         llm_client=get_llm_client(),
         llm_preferences=get_llm_preference_service(),
+        vector_embedding_revision=(
+            settings.pdf_embedding_revision
+            if settings.pdf_vector_indexing_active
+            else None
+        ),
+        vector_embedding_dimension=settings.pdf_embedding_dimension,
+        pdf_chunk_max_characters=settings.pdf_document_chunk_max_characters,
     )
 
 
@@ -139,6 +156,11 @@ def get_pdf_upload_task_worker() -> PdfUploadTaskWorker:
         pdf_knowledge=get_pdf_knowledge_service(),
         storage_root=settings.storage_root,
         poll_interval_seconds=settings.pdf_upload_task_worker_poll_interval_seconds,
+        lease_seconds=max(
+            settings.pdf_upload_task_stale_processing_minutes * 60,
+            settings.mineru_timeout_seconds + 60,
+            settings.mineru_cloud_timeout_seconds + 60,
+        ),
     )
 
 
@@ -149,6 +171,85 @@ def get_pdf_summary_task_worker() -> PdfSummaryTaskWorker:
         repository=get_excel_repository(),
         pdf_knowledge=get_pdf_knowledge_service(),
         poll_interval_seconds=settings.pdf_summary_task_worker_poll_interval_seconds,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_embedding_gateway() -> OpenAiCompatiblePdfEmbeddingGateway:
+    settings = get_settings()
+    return OpenAiCompatiblePdfEmbeddingGateway(
+        api_base_url=settings.pdf_embedding_resolved_api_base_url,
+        api_key=settings.pdf_embedding_resolved_api_key,
+        model=settings.pdf_embedding_model,
+        revision=settings.pdf_embedding_revision,
+        embedding_dimension=settings.pdf_embedding_dimension,
+        max_input_characters=settings.pdf_document_chunk_max_characters,
+        timeout_seconds=settings.pdf_embedding_timeout_seconds,
+        batch_size=settings.pdf_embedding_batch_size,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_vector_store() -> QdrantPdfVectorStore:
+    settings = get_settings()
+    return QdrantPdfVectorStore(
+        api_base_url=settings.pdf_qdrant_api_base_url,
+        api_key=settings.pdf_qdrant_api_key,
+        collection_name=settings.pdf_qdrant_collection,
+        embedding_dimension=settings.pdf_embedding_dimension,
+        timeout_seconds=settings.pdf_qdrant_timeout_seconds,
+        auto_bootstrap=settings.pdf_qdrant_auto_bootstrap_active,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_reranker_gateway() -> HttpPdfRerankerGateway:
+    settings = get_settings()
+    return HttpPdfRerankerGateway(
+        api_base_url=settings.pdf_reranker_resolved_api_base_url,
+        api_key=settings.pdf_reranker_resolved_api_key,
+        model=settings.pdf_reranker_model,
+        revision=settings.pdf_reranker_revision,
+        timeout_seconds=settings.pdf_reranker_timeout_seconds,
+        batch_size=settings.pdf_reranker_batch_size,
+        max_batch_characters=settings.pdf_reranker_max_batch_characters,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_document_ranking_service() -> PdfDocumentRankingService:
+    settings = get_settings()
+    return PdfDocumentRankingService(
+        repository=get_excel_repository(),
+        embedding=get_pdf_embedding_gateway(),
+        vector_store=get_pdf_vector_store(),
+        reranker=get_pdf_reranker_gateway(),
+        rerank_max_document_characters=(
+            settings.pdf_reranker_max_document_characters
+        ),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_pdf_vector_index_task_worker() -> PdfVectorIndexTaskWorker:
+    settings = get_settings()
+    return PdfVectorIndexTaskWorker(
+        repository=get_excel_repository(),
+        indexing=PdfVectorIndexingService(
+            repository=get_excel_repository(),
+            embedding=get_pdf_embedding_gateway(),
+            vector_store=get_pdf_vector_store(),
+        ),
+        poll_interval_seconds=settings.pdf_vector_worker_poll_interval_seconds,
+        lease_seconds=settings.pdf_vector_worker_lease_seconds,
+        max_attempts=settings.pdf_vector_worker_max_attempts,
+        retry_max_seconds=settings.pdf_vector_worker_retry_max_seconds,
+        reconciliation_embedding_revision=settings.pdf_embedding_revision,
+        reconciliation_embedding_dimension=settings.pdf_embedding_dimension,
+        reconciliation_interval_seconds=(
+            settings.pdf_vector_reconciliation_interval_seconds
+        ),
+        reconciliation_batch_size=settings.pdf_vector_reconciliation_batch_size,
     )
 
 
@@ -201,15 +302,58 @@ def get_readiness_service(
                     settings.pdf_summary_task_stale_running_minutes * 60,
                 ),
             ),
+            **(
+                {
+                    "pdf_vector_worker": WorkerReadinessProbe(
+                        enabled=True,
+                        status_provider=get_pdf_vector_index_task_worker().runtime_status,
+                        idle_stale_seconds=max(
+                            5.0,
+                            settings.pdf_vector_worker_poll_interval_seconds * 10,
+                        ),
+                        busy_stale_seconds=max(
+                            60.0,
+                            settings.pdf_vector_worker_lease_seconds,
+                        ),
+                    )
+                }
+                if settings.pdf_vector_indexing_active
+                else {}
+            ),
         },
+        vector_queue_inspector=(
+            repository.inspect_pdf_vector_queue
+            if settings.pdf_vector_indexing_active
+            else None
+        ),
+        vector_store_inspector=(
+            get_pdf_vector_store().inspect_runtime
+            if settings.pdf_vector_indexing_active
+            else None
+        ),
     )
 
 
 @lru_cache(maxsize=1)
 def get_pdf_chat_service() -> PdfChatService:
+    settings = get_settings()
     return PdfChatService(
         llm_client=get_llm_client(),
         sessions=get_excel_repository(),
+        document_ranking=(
+            get_pdf_document_ranking_service()
+            if settings.pdf_vector_ranking_active
+            else None
+        ),
+        policy=PdfChatPolicy(
+            max_routed_documents=4,
+            full_document_context=True,
+            max_answer_context_chunks=settings.pdf_answer_max_context_chunks,
+            max_answer_context_characters=(
+                settings.pdf_answer_max_context_characters
+            ),
+            max_answer_context_tokens=settings.pdf_answer_max_context_tokens,
+        ),
     )
 
 

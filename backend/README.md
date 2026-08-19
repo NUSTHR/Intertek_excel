@@ -82,6 +82,23 @@ Windows PowerShell:
 .\.venv\Scripts\python -m pytest
 ```
 
+## PDF Vector Retrieval Operations
+
+Qdrant runs locally from the project-root `compose.qdrant.yml`; SiliconFlow
+provides embedding and reranking inference. Keep online ranking disabled during
+initial backfill and projection changes.
+
+```bash
+docker compose -f ../compose.qdrant.yml up -d qdrant
+./.venv/bin/python scripts/preflight_pdf_retrieval.py --bootstrap-qdrant
+./.venv/bin/python scripts/audit_pdf_vector_store.py
+./.venv/bin/python scripts/rebuild_pdf_vector_indexes.py --confirm
+```
+
+Production application processes run with `PDF_QDRANT_AUTO_BOOTSTRAP=false`.
+The preflight is the only normal path that creates the collection and its
+required payload indexes.
+
 ## Storage
 
 By default runtime files are written under:

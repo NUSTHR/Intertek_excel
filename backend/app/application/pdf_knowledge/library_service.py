@@ -1,7 +1,9 @@
 import shutil
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
+from app.application.operational.task_lease import task_lease_window
 from app.application.pdf_knowledge.models import DeletePdfFileResult
 from app.core.errors import (
     AssetNotFoundError,
@@ -9,6 +11,7 @@ from app.core.errors import (
     FileNameConflictError,
     UploadValidationError,
 )
+from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
     PdfDocumentChunk,
@@ -32,6 +35,8 @@ class PdfLibraryService:
     ) -> None:
         self._repository = repository
         self._storage_root = storage_root.expanduser().resolve() if storage_root else None
+        self._cleanup_worker_id = f"pdf-cleanup-worker-{uuid.uuid4()}"
+        self._cleanup_lease_seconds = 900.0
 
     def list_files(self, *, user_role: UserRole) -> list[PdfFile]:
         files = self._repository.list_pdf_files()
@@ -142,7 +147,24 @@ class PdfLibraryService:
             return 0
         completed = 0
         files_root = (self._storage_root / "pdf-knowledge" / "files").resolve()
-        for job in self._repository.list_pending_pdf_file_cleanup_jobs():
+        available_at = utc_now_iso()
+        candidates = self._repository.list_pending_pdf_file_cleanup_jobs(
+            available_at=available_at
+        )
+        for candidate in candidates:
+            claimed_at, lease_expires_at = task_lease_window(
+                self._cleanup_lease_seconds
+            )
+            claim_token = new_id("pdfcleanupclaim")
+            job = self._repository.claim_pdf_file_cleanup_job(
+                job_id=candidate.job_id,
+                worker_id=self._cleanup_worker_id,
+                claim_token=claim_token,
+                claimed_at=claimed_at,
+                lease_expires_at=lease_expires_at,
+            )
+            if job is None:
+                continue
             now = utc_now_iso()
             try:
                 target = (self._storage_root / job.relative_path).resolve()
@@ -156,16 +178,30 @@ class PdfLibraryService:
                     shutil.rmtree(target)
                 self._repository.complete_pdf_file_cleanup_job(
                     job_id=job.job_id,
+                    worker_id=self._cleanup_worker_id,
+                    claim_token=claim_token,
                     completed_at=now,
                 )
                 completed += 1
             except (OSError, ValueError) as exc:
                 self._repository.fail_pdf_file_cleanup_job(
                     job_id=job.job_id,
+                    worker_id=self._cleanup_worker_id,
+                    claim_token=claim_token,
                     error_message=str(exc),
                     failed_at=now,
                 )
         return completed
+
+    def ensure_deleted_file_cleanup(self, file_id: str) -> bool:
+        job = self._repository.ensure_pdf_file_cleanup_job(
+            file_id=file_id,
+            created_at=utc_now_iso(),
+        )
+        if job is None:
+            return False
+        self.retry_pending_file_cleanups()
+        return True
 
     def get_document_detail(
         self,

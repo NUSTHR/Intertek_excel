@@ -1,9 +1,10 @@
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from app.core.errors import UploadValidationError
+from app.core.errors import FileNameConflictError, UploadValidationError
 from app.core.ids import new_id
 from app.domain.models import (
     PdfFile,
@@ -72,8 +73,23 @@ class PdfUploadRecordBuilder:
             parent_id=parent_id,
             created_at=created_at,
         )
-        staging_path = self.write_staging_file(task_id, original_filename, content)
-        storage_path = self._store_original_file(file_id, original_filename, content)
+        existing_file = self._repository.find_pdf_file_by_parent_and_name(
+            user_id=user_id,
+            parent_id=resolved_parent_id,
+            display_name=sanitized_path.name,
+        )
+        if existing_file is not None:
+            raise FileNameConflictError(
+                display_name=sanitized_path.name,
+                file_id=existing_file.file_id,
+            )
+        try:
+            staging_path = self.write_staging_file(task_id, original_filename, content)
+            storage_path = self._store_original_file(file_id, original_filename, content)
+        except Exception:
+            self._delete_managed_tree(self._staging_root, task_id)
+            self._delete_managed_tree(self._files_root, file_id)
+            raise
         file = PdfFile(
             file_id=file_id,
             user_id=user_id,
@@ -149,6 +165,13 @@ class PdfUploadRecordBuilder:
             raise UploadValidationError("upload staging path is invalid")
         self._write_bytes_atomic(path, content)
         return path
+
+    def delete_staging_task(self, task_id: str) -> None:
+        self._delete_managed_tree(self._staging_root, task_id)
+
+    def delete_upload_records(self, file: PdfFile, task: PdfUploadTask) -> None:
+        self._delete_managed_tree(self._staging_root, task.task_id)
+        self._delete_managed_tree(self._files_root, file.file_id)
 
     def stored_file_path(self, storage_path: str) -> Path:
         path = Path(storage_path).expanduser()
@@ -226,6 +249,12 @@ class PdfUploadRecordBuilder:
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
+
+    def _delete_managed_tree(self, root: Path, child_id: str) -> None:
+        target = (root / child_id).resolve()
+        if target.parent != root or target.name != child_id or target.is_symlink():
+            raise UploadValidationError("managed upload path is invalid")
+        shutil.rmtree(target, ignore_errors=True)
 
 
 def source_name_for_upload_batch(

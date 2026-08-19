@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -239,6 +240,7 @@ def test_rename_file_preserves_version_sheet_summary_and_chat_links(
 
 def test_failed_replacement_does_not_change_active_version(
     service: ExcelAssetService,
+    tmp_path: Path,
 ) -> None:
     first = service.upload_workbook("risk.xlsx", b"first")
 
@@ -257,6 +259,85 @@ def test_failed_replacement_does_not_change_active_version(
         ExcelVersionStatus.FAILED,
         ExcelVersionStatus.READY,
     ]
+    failed_version = next(
+        version for version in versions if version.status == ExcelVersionStatus.FAILED
+    )
+    assert service._repository.list_sheets(failed_version.version_id) == []
+    assert service._repository.list_artifacts(failed_version.version_id) == []
+    assert not (
+        tmp_path / "storage" / "files" / first.file.file_id / failed_version.version_id
+    ).exists()
+
+
+def test_failed_new_upload_is_hidden_and_materialization_is_cleaned(
+    service: ExcelAssetService,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(InvalidExcelFileError):
+        service.upload_workbook("broken.xlsx", b"invalid workbook")
+
+    assert service.list_files() == []
+    with sqlite3.connect(tmp_path / "excel.sqlite3") as connection:
+        file_row = connection.execute(
+            "SELECT file_id, status, active_version_id FROM excel_files"
+        ).fetchone()
+        version_row = connection.execute(
+            "SELECT version_id, status FROM excel_file_versions"
+        ).fetchone()
+        sheet_count = connection.execute("SELECT COUNT(*) FROM excel_sheets").fetchone()[0]
+        artifact_count = connection.execute("SELECT COUNT(*) FROM excel_artifacts").fetchone()[0]
+
+    assert file_row is not None
+    assert file_row[1:] == (ExcelFileStatus.DELETED.value, None)
+    assert version_row is not None
+    assert version_row[1] == ExcelVersionStatus.FAILED.value
+    assert sheet_count == 0
+    assert artifact_count == 0
+    assert not (tmp_path / "storage" / "files" / file_row[0]).exists()
+
+
+def test_mid_processing_failure_removes_partial_excel_materialization(
+    service: ExcelAssetService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_create_artifact = service._repository.create_artifact
+    artifact_calls = 0
+
+    def fail_second_artifact(artifact) -> None:
+        nonlocal artifact_calls
+        artifact_calls += 1
+        if artifact_calls == 2:
+            raise RuntimeError("injected artifact persistence failure")
+        original_create_artifact(artifact)
+
+    monkeypatch.setattr(service._repository, "create_artifact", fail_second_artifact)
+
+    with pytest.raises(RuntimeError, match="injected artifact persistence failure"):
+        service.upload_workbook("partial.xlsx", b"first")
+
+    with sqlite3.connect(tmp_path / "excel.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM excel_sheets").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM excel_artifacts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM excel_row_mappings").fetchone()[0] == 0
+    assert [path for path in (tmp_path / "storage").rglob("*") if path.is_file()] == []
+
+
+def test_deleted_file_cannot_be_reactivated(service: ExcelAssetService) -> None:
+    result = service.upload_workbook("deleted-race.xlsx", b"first")
+    service.delete_file(result.file.file_id, confirm_delete=True)
+
+    activated = service._repository.activate_version(
+        result.file.file_id,
+        result.version.version_id,
+        "2026-08-14T00:00:00+00:00",
+    )
+
+    assert activated is False
+    deleted = service._repository.get_file_including_deleted(result.file.file_id)
+    assert deleted is not None
+    assert deleted.status == ExcelFileStatus.DELETED
+    assert deleted.active_version_id is None
 
 
 def test_atomic_artifact_write_cleans_temporary_file_on_failure(

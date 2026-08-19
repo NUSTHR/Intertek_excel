@@ -21,6 +21,7 @@ from app.core.llm_catalog import (
     is_supported_llm_provider,
     llm_provider_label,
     normalize_llm_provider,
+    supports_deep_thinking,
     supports_json_response_format,
     thinking_request_style,
 )
@@ -1007,6 +1008,10 @@ class MultiProviderLlmClient:
         try:
             choice = payload["choices"][0]
             message = choice["message"]
+            if choice.get("finish_reason") == "length":
+                raise LlmResponseFormatError(
+                    "LLM response reached the output token limit"
+                )
             logger.debug(
                 "llm response metadata stage=%s finish_reason=%s content_length=%s",
                 stage,
@@ -1355,7 +1360,11 @@ class MultiProviderLlmClient:
     ) -> dict[str, Any]:
         request_style = thinking_request_style(provider, model)
         if request_style == "siliconflow_enable_thinking":
-            return {"enable_thinking": bool(enable_deep_thinking)}
+            return {
+                "enable_thinking": bool(
+                    enable_deep_thinking and supports_deep_thinking(provider, model)
+                )
+            }
         if request_style != "deepseek_thinking":
             return {}
         if enable_deep_thinking:
@@ -1371,10 +1380,14 @@ class MultiProviderLlmClient:
         return 0.2
 
     def _max_tokens_for_stage(self, stage: str) -> int | None:
+        if stage == "document_summary_model":
+            return 4096
         if stage == "route_model":
             return 1200
         if stage == "pdf_route_model":
             return 1600
+        if stage in {"answer_model", "pdf_answer_model"}:
+            return 4096
         return None
 
     def _string_list(self, value: Any) -> list[str]:

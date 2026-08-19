@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from app.api.schemas import ErrorResponse
 from app.application.chat.cancellation import ChatRequestCancelledError
 from app.core.errors import (
+    ActiveUploadTaskConflictError,
     AssetNotFoundError,
     AuthenticationError,
     AuthorizationError,
@@ -21,7 +22,13 @@ from app.core.errors import (
     LlmRequestError,
     LlmResponseFormatError,
     PasswordResetTokenError,
+    PdfAnswerContextTooLarge,
+    PdfEmbeddingUnavailable,
+    PdfRankingIncomplete,
+    PdfRerankerUnavailable,
     PdfRoutingError,
+    PdfSelectionIntegrityError,
+    PdfVectorStoreUnavailable,
     RateLimitError,
     UploadValidationError,
     UserAlreadyExistsError,
@@ -34,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(FileNameConflictError, handle_file_name_conflict)
+    app.add_exception_handler(
+        ActiveUploadTaskConflictError,
+        handle_active_upload_task_conflict,
+    )
     app.add_exception_handler(
         FileDeleteConfirmationRequiredError,
         handle_file_delete_confirmation_required,
@@ -50,6 +61,24 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(LlmRequestError, handle_llm_request_error)
     app.add_exception_handler(LlmResponseFormatError, handle_llm_response_format_error)
     app.add_exception_handler(PdfRoutingError, handle_pdf_routing_error)
+    app.add_exception_handler(
+        PdfSelectionIntegrityError,
+        handle_pdf_selection_integrity_error,
+    )
+    for dependency_error in (
+        PdfRankingIncomplete,
+        PdfEmbeddingUnavailable,
+        PdfVectorStoreUnavailable,
+        PdfRerankerUnavailable,
+    ):
+        app.add_exception_handler(
+            dependency_error,
+            handle_pdf_retrieval_dependency_error,
+        )
+    app.add_exception_handler(
+        PdfAnswerContextTooLarge,
+        handle_pdf_answer_context_too_large,
+    )
     app.add_exception_handler(AuthenticationError, handle_authentication_error)
     app.add_exception_handler(AuthorizationError, handle_authorization_error)
     app.add_exception_handler(UserAlreadyExistsError, handle_user_already_exists)
@@ -74,6 +103,22 @@ async def handle_file_name_conflict(
             "display_name": exc.display_name,
             "file_id": exc.file_id,
             "requires_confirmation": True,
+        },
+    )
+
+
+async def handle_active_upload_task_conflict(
+    _request: Request,
+    exc: ActiveUploadTaskConflictError,
+) -> JSONResponse:
+    return _json_response(
+        HTTPStatus.CONFLICT,
+        {
+            "detail": str(exc),
+            "code": exc.code,
+            "retryable": exc.retryable,
+            "file_id": exc.file_id,
+            "task_id": exc.task_id,
         },
     )
 
@@ -148,6 +193,60 @@ async def handle_pdf_routing_error(
     logger.warning("pdf document routing failed error=%s", exc)
     return _error_response(
         HTTPStatus.BAD_GATEWAY,
+        str(exc),
+        code=exc.code,
+        retryable=exc.retryable,
+    )
+
+
+async def handle_pdf_answer_context_too_large(
+    _request: Request,
+    exc: PdfAnswerContextTooLarge,
+) -> JSONResponse:
+    return _json_response(
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        {
+            "detail": str(exc),
+            "code": exc.code,
+            "retryable": False,
+            "actual": {
+                "chunks": exc.chunk_count,
+                "characters": exc.character_count,
+                "tokens": exc.token_count,
+            },
+            "limits": {
+                "chunks": exc.max_chunks,
+                "characters": exc.max_characters,
+                "tokens": exc.max_tokens,
+            },
+        },
+    )
+
+
+async def handle_pdf_selection_integrity_error(
+    _request: Request,
+    exc: PdfSelectionIntegrityError,
+) -> JSONResponse:
+    return _error_response(
+        HTTPStatus.CONFLICT,
+        str(exc),
+        code=exc.code,
+        retryable=False,
+    )
+
+
+async def handle_pdf_retrieval_dependency_error(
+    _request: Request,
+    exc: (
+        PdfRankingIncomplete
+        | PdfEmbeddingUnavailable
+        | PdfVectorStoreUnavailable
+        | PdfRerankerUnavailable
+    ),
+) -> JSONResponse:
+    logger.warning("pdf retrieval dependency unavailable code=%s error=%s", exc.code, exc)
+    return _error_response(
+        HTTPStatus.SERVICE_UNAVAILABLE,
         str(exc),
         code=exc.code,
         retryable=exc.retryable,

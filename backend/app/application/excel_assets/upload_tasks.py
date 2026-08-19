@@ -7,8 +7,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app.application.excel_assets.models import UploadExcelResult
 from app.application.excel_assets.service import ExcelAssetService
+from app.application.operational.task_lease import TaskLeaseHeartbeat, task_lease_window
 from app.application.operational.worker_status import (
     WorkerRuntimeStatus,
     WorkerRuntimeTracker,
@@ -132,6 +132,7 @@ class UploadTaskWorker:
         excel_assets: ExcelAssetService,
         storage_root: Path | None = None,
         poll_interval_seconds: float = 0.5,
+        lease_seconds: float = 300.0,
     ) -> None:
         self._repository = repository
         self._excel_assets = excel_assets
@@ -142,6 +143,7 @@ class UploadTaskWorker:
             else None
         )
         self._poll_interval_seconds = max(0.1, poll_interval_seconds)
+        self._lease_seconds = max(5.0, lease_seconds)
         self._worker_id = f"worker-{uuid.uuid4()}"
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -172,17 +174,36 @@ class UploadTaskWorker:
         )
 
     def run_once(self) -> bool:
+        started_at, lease_expires_at = task_lease_window(self._lease_seconds)
         task = self._repository.claim_next_upload_task(
             worker_id=self._worker_id,
-            started_at=utc_now_iso(),
+            started_at=started_at,
+            lease_expires_at=lease_expires_at,
         )
         if task is None:
             return False
         self._runtime.mark_task_started()
+        succeeded = False
         try:
-            self._process_task(task)
+            claim_token = task.claim_token
+            if not claim_token:
+                raise RuntimeError("claimed Excel upload task is missing a claim token")
+            with TaskLeaseHeartbeat(
+                callback=lambda heartbeat_at, renewed_until: (
+                    self._repository.heartbeat_upload_task(
+                        task_id=task.task_id,
+                        worker_id=self._worker_id,
+                        claim_token=claim_token,
+                        heartbeat_at=heartbeat_at,
+                        lease_expires_at=renewed_until,
+                    )
+                ),
+                lease_seconds=self._lease_seconds,
+                task_id=task.task_id,
+            ):
+                succeeded = self._process_task(task)
         finally:
-            self._runtime.mark_task_finished()
+            self._runtime.mark_task_finished(succeeded=succeeded)
         return True
 
     def _run(self) -> None:
@@ -200,7 +221,9 @@ class UploadTaskWorker:
         finally:
             self._runtime.mark_stopped()
 
-    def _process_task(self, task: ExcelUploadTask) -> None:
+    def _process_task(self, task: ExcelUploadTask) -> bool:
+        if not task.claim_token or not task.worker_id:
+            raise RuntimeError("Excel upload task claim is incomplete")
         try:
             staging_path = self._validated_staging_path(task)
             content = staging_path.read_bytes()
@@ -208,25 +231,27 @@ class UploadTaskWorker:
                 original_filename=task.original_filename,
                 content=content,
                 replace_existing=task.replace_existing,
-            )
-            self._repository.complete_upload_task(
-                task_id=task.task_id,
-                result=_upload_result_payload(result),
-                finished_at=utc_now_iso(),
+                upload_task_id=task.task_id,
+                upload_worker_id=task.worker_id,
+                upload_claim_token=task.claim_token,
             )
             self._delete_staging_tree(task)
+            return bool(result.file.file_id and result.version.version_id)
         except Exception as exc:
             failure_recorded = False
             try:
-                self._repository.fail_upload_task(
+                failed = self._repository.fail_upload_task(
                     task_id=task.task_id,
+                    worker_id=task.worker_id,
+                    claim_token=task.claim_token,
                     error_message=str(exc),
                     finished_at=utc_now_iso(),
                 )
-                failure_recorded = True
+                failure_recorded = failed is not None
             finally:
                 if failure_recorded:
                     self._delete_staging_tree(task)
+            return False
 
     def _delete_staging_tree(self, task: ExcelUploadTask) -> None:
         try:
@@ -260,13 +285,6 @@ class UploadTaskWorker:
         if self._storage_root is None:
             return path.resolve()
         return (self._storage_root / path).resolve()
-
-
-def _upload_result_payload(result: UploadExcelResult) -> dict[str, object]:
-    return {
-        "file_id": result.file.file_id,
-        "version_id": result.version.version_id,
-    }
 
 
 def _delete_staging_path(

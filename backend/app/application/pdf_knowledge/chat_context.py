@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from app.application.pdf_knowledge.chat_policy import PdfChatPolicy
 from app.application.pdf_knowledge.chat_scope import is_visible_ready_pdf
 from app.application.pdf_knowledge.models import PdfGroundingChunk
+from app.core.errors import PdfAnswerContextTooLarge
 from app.domain.models import SelectedDocument, UserRole
 from app.ports.repository import PdfChatRepository
 
@@ -43,6 +44,8 @@ class PdfContextAssembler:
         )
         chunks_by_document: list[list[PdfGroundingChunk]] = []
         total_available_chunks = 0
+        total_available_characters = 0
+        total_available_tokens = 0
         for document in documents:
             file = files.get(document.file_id)
             if file is None:
@@ -58,6 +61,27 @@ class PdfContextAssembler:
             if document_chunks:
                 chunks_by_document.append(document_chunks)
                 total_available_chunks += len(document_chunks)
+                total_available_characters += sum(
+                    len(item.chunk.text) for item in document_chunks
+                )
+                total_available_tokens += sum(
+                    item.chunk.token_count for item in document_chunks
+                )
+
+        if self._policy.full_document_context and (
+            total_available_chunks > self._policy.max_answer_context_chunks
+            or total_available_characters
+            > self._policy.max_answer_context_characters
+            or total_available_tokens > self._policy.max_answer_context_tokens
+        ):
+            raise PdfAnswerContextTooLarge(
+                chunk_count=total_available_chunks,
+                character_count=total_available_characters,
+                token_count=total_available_tokens,
+                max_chunks=self._policy.max_answer_context_chunks,
+                max_characters=self._policy.max_answer_context_characters,
+                max_tokens=self._policy.max_answer_context_tokens,
+            )
 
         grounding_chunks: list[PdfGroundingChunk] = []
         used_characters = 0
@@ -70,26 +94,37 @@ class PdfContextAssembler:
                 if chunk_index >= len(document_chunks):
                     continue
                 item = document_chunks[chunk_index]
-                payload_characters = min(
-                    len(item.chunk.text),
-                    self._policy.max_single_chunk_characters,
+                payload_characters = (
+                    len(item.chunk.text)
+                    if self._policy.full_document_context
+                    else min(
+                        len(item.chunk.text),
+                        self._policy.max_single_chunk_characters,
+                    )
                 )
-                payload_tokens = min(
-                    item.chunk.token_count,
-                    max(1, payload_characters // 4),
+                payload_tokens = (
+                    item.chunk.token_count
+                    if self._policy.full_document_context
+                    else min(
+                        item.chunk.token_count,
+                        max(1, payload_characters // 4),
+                    )
                 )
                 if (
-                    len(grounding_chunks)
-                    >= self._policy.max_answer_context_chunks
-                    or (
-                        grounding_chunks
-                        and used_characters + payload_characters
-                        > self._policy.max_answer_context_characters
-                    )
-                    or (
-                        grounding_chunks
-                        and used_tokens + payload_tokens
-                        > self._policy.max_answer_context_tokens
+                    not self._policy.full_document_context
+                    and (
+                        len(grounding_chunks)
+                        >= self._policy.max_answer_context_chunks
+                        or (
+                            grounding_chunks
+                            and used_characters + payload_characters
+                            > self._policy.max_answer_context_characters
+                        )
+                        or (
+                            grounding_chunks
+                            and used_tokens + payload_tokens
+                            > self._policy.max_answer_context_tokens
+                        )
                     )
                 ):
                     return PdfContextAllocation(

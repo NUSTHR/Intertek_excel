@@ -455,6 +455,93 @@ MINERU_COMMAND=mineru
 MINERU_TIMEOUT_SECONDS=300
 ```
 
+PDF vector indexing and ranking settings:
+
+```text
+PDF_VECTOR_INDEXING_ENABLED=false
+PDF_VECTOR_RANKING_ENABLED=false
+PDF_VECTOR_WORKER_POLL_INTERVAL_SECONDS=1
+PDF_VECTOR_WORKER_LEASE_SECONDS=900
+PDF_VECTOR_WORKER_MAX_ATTEMPTS=20
+PDF_VECTOR_WORKER_RETRY_MAX_SECONDS=900
+PDF_VECTOR_RECONCILIATION_INTERVAL_SECONDS=60
+PDF_VECTOR_RECONCILIATION_BATCH_SIZE=100
+PDF_ANSWER_MAX_CONTEXT_CHUNKS=160
+PDF_ANSWER_MAX_CONTEXT_CHARACTERS=120000
+PDF_ANSWER_MAX_CONTEXT_TOKENS=30000
+PDF_EMBEDDING_API_BASE_URL=
+PDF_EMBEDDING_API_KEY=
+PDF_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B
+PDF_EMBEDDING_REVISION=siliconflow-qwen3-embedding-8b-d4096-query-v1-doc-v1
+PDF_EMBEDDING_DIMENSION=4096
+PDF_DOCUMENT_CHUNK_MAX_CHARACTERS=12000
+PDF_RERANKER_API_BASE_URL=
+PDF_RERANKER_API_KEY=
+PDF_RERANKER_MODEL=Qwen/Qwen3-Reranker-8B
+PDF_RERANKER_REVISION=siliconflow-qwen3-reranker-8b-v1
+PDF_RERANKER_BATCH_SIZE=16
+PDF_RERANKER_MAX_DOCUMENT_CHARACTERS=24000
+PDF_RERANKER_MAX_BATCH_CHARACTERS=120000
+PDF_QDRANT_API_BASE_URL=http://127.0.0.1:6333
+PDF_QDRANT_COLLECTION=pdf_chunks_qwen3_4096_v1
+PDF_QDRANT_AUTO_BOOTSTRAP=true
+```
+
+Empty PDF embedding/reranker endpoint and API-key values inherit the existing
+SiliconFlow `LLM_API_BASE_URL` and `LLM_API_KEY`. The embedding endpoint must
+expose `/embeddings`, the reranker endpoint must expose `/rerank`, and Qdrant
+uses its REST API. `PDF_EMBEDDING_REVISION` is the persisted projection
+contract identity; change it whenever the model, dimensions, instructions, or
+text preprocessing changes. The router continues to
+select every relevant document. Four or fewer candidates bypass retrieval;
+more than four are all retrieved and reranked, and only the top four full
+documents are sent to the answer model. Missing or stale projections fail
+explicitly instead of silently changing the router decision. The vector worker
+periodically and idempotently backfills missing or stale projections; exhausted
+or non-retryable failures remain in `dead_letter` until explicitly requeued.
+Projection generations isolate stale workers, while bounded deletes prevent an
+older delete task from removing a newer projection. Full-document answer input
+is never silently truncated: requests that exceed the configured chunk,
+character, or token capacity fail with `PDF_ANSWER_CONTEXT_TOO_LARGE` (HTTP
+413), including actual and configured sizes.
+
+Run the pinned, loopback-only local Qdrant service from the project root:
+
+```bash
+docker compose -f compose.qdrant.yml up -d qdrant
+docker compose -f compose.qdrant.yml ps
+```
+
+Use the production rollout sequence below. `PDF_QDRANT_AUTO_BOOTSTRAP` must be
+`false` in production; collection creation is a deliberate deployment action,
+not an application runtime side effect.
+
+```bash
+cd backend
+# 1. Set PDF_VECTOR_INDEXING_ENABLED=true and PDF_VECTOR_RANKING_ENABLED=false.
+./.venv/bin/python scripts/preflight_pdf_retrieval.py --bootstrap-qdrant
+
+# 2. Wait for vector queue backfill, then verify live point counts.
+./.venv/bin/python scripts/audit_pdf_vector_store.py
+
+# 3. Run retrieval quality evaluation, then enable PDF_VECTOR_RANKING_ENABLED.
+./.venv/bin/python scripts/preflight_pdf_retrieval.py
+```
+
+After Qdrant volume loss or an intentional embedding projection change, keep
+online ranking disabled and explicitly enqueue a new generation for every
+eligible PDF:
+
+```bash
+cd backend
+./.venv/bin/python scripts/rebuild_pdf_vector_indexes.py --confirm
+```
+
+The preflight refuses to create an empty collection when SQLite already reports
+READY vector indexes. This prevents storage loss from being mistaken for a
+fresh installation. Rollback disables only `PDF_VECTOR_RANKING_ENABLED`; it
+does not delete the Qdrant volume or authoritative SQLite state.
+
 `PDF_PARSER_BACKEND=fake` is intended for local development and automated
 tests. Use `PDF_PARSER_BACKEND=mineru` only when the MinerU command is
 installed and available to the backend process. The `/api/pdf/parser/status`
@@ -464,7 +551,7 @@ Chat cancellation and guardrails:
 
 ```text
 CHAT_CANCELLATION_RETENTION_SECONDS=300
-LLM_REQUEST_TIMEOUT_SECONDS=60
+LLM_REQUEST_TIMEOUT_SECONDS=120
 LLM_SUMMARY_MAX_PROFILE_ROWS=10
 LLM_ANSWER_MAX_ROWS=20000
 ```

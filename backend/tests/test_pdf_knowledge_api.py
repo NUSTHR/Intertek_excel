@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,11 @@ from app.application.pdf_knowledge import (
     PdfUploadTaskWorker,
 )
 from app.application.pdf_knowledge.chat import PdfChatService
+from app.application.pdf_knowledge.document_selection import (
+    PdfFinalDocumentSelection,
+    PdfRankedDocument,
+    PdfRoutingCandidateSet,
+)
 from app.core.config import Settings
 from app.core.errors import AuthorizationError, LlmRequestError, PdfRoutingError
 from app.core.llm_catalog import (
@@ -46,6 +52,7 @@ from app.core.llm_catalog import (
     list_supported_llm_models,
     list_supported_llm_provider_options,
 )
+from app.core.time import utc_now_iso
 from app.domain.models import (
     AuthenticatedUser,
     PdfFileVisibility,
@@ -53,6 +60,8 @@ from app.domain.models import (
     PdfParsePageStatus,
     PdfParseQualityStatus,
     PdfProcessingStatus,
+    PdfSummaryTask,
+    PdfSummaryTaskStatus,
     PdfUploadTaskStatus,
     SelectedDocument,
     UserRole,
@@ -227,6 +236,33 @@ def test_pdf_upload_collection_routes_are_not_shadowed(client: TestClient) -> No
     assert tasks_response.json() == {"tasks": []}
     assert batches_response.status_code == 200
     assert batches_response.json() == {"batches": []}
+
+
+def test_pdf_upload_batch_get_requests_do_not_write_rollup_state(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("read-only-batch.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    batch_id = response.json()["batch"]["batch_id"]
+
+    def reject_write(**_kwargs):
+        raise AssertionError("GET attempted to update PDF batch state")
+
+    monkeypatch.setattr(
+        pdf_repository,
+        "update_pdf_upload_batch_status",
+        reject_write,
+    )
+
+    list_response = client.get("/api/pdf/files/upload-batches")
+    detail_response = client.get(f"/api/pdf/files/upload-batches/{batch_id}")
+
+    assert list_response.status_code == 200
+    assert detail_response.status_code == 200
 
 
 def test_static_http_routes_are_not_shadowed_by_dynamic_routes() -> None:
@@ -443,7 +479,9 @@ def test_pdf_file_can_be_renamed_hidden_and_deleted_from_directory(
     assert pdf_repository.get_pdf_document_detail(file_id) is None
     assert pdf_repository.list_pdf_document_chunks(file_id) == []
     assert pdf_repository.get_pdf_parse_report(file_id) is None
-    assert pdf_repository.list_pending_pdf_file_cleanup_jobs() == []
+    assert pdf_repository.list_pending_pdf_file_cleanup_jobs(
+        available_at="9999-01-01T00:00:00+00:00"
+    ) == []
     assert not (tmp_path / "storage" / "pdf-knowledge" / "files" / file_id).exists()
 
 
@@ -659,19 +697,34 @@ def test_pdf_queued_upload_task_can_be_cancelled(client: TestClient) -> None:
     assert batch_response.json()["batch"]["status"] == "cancelled"
 
 
-def test_pdf_failed_upload_task_can_be_retried(client: TestClient) -> None:
+def test_pdf_failed_upload_task_can_be_retried(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
     response = client.post(
         "/api/pdf/files/upload-tasks",
         files=[("files", ("retry.pdf", _pdf_bytes(), "application/pdf"))],
     )
     task = response.json()["tasks"][0]
-    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
-    assert worker.run_once() is True
-
-    # The default fake parser succeeds, so force a retryable state through the service.
+    started_at = datetime.fromisoformat(utc_now_iso())
+    claimed = pdf_repository.claim_next_pdf_upload_task(
+        worker_id="forced-failure-worker",
+        started_at=started_at.isoformat(timespec="seconds"),
+        lease_expires_at=(started_at + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+    )
+    assert claimed is not None
+    assert pdf_repository.update_pdf_upload_task_progress(
+        task_id=claimed.task_id,
+        worker_id=claimed.worker_id or "",
+        claim_token="wrong-claim-token",
+        progress=50,
+        detail="intruder progress",
+        updated_at=(started_at + timedelta(minutes=1)).isoformat(timespec="seconds"),
+    ) is None
     service = app.dependency_overrides[get_pdf_knowledge_service]()
-    original_task = service.get_upload_task(task["task_id"], user_id=admin_user().user_id)
-    service.fail_task(original_task, "forced retry test failure", error_code="forced_failure")
+    service.fail_task(claimed, "forced retry test failure", error_code="forced_failure")
 
     retry_response = client.post(f"/api/pdf/files/upload-tasks/{task['task_id']}/retry")
 
@@ -680,6 +733,170 @@ def test_pdf_failed_upload_task_can_be_retried(client: TestClient) -> None:
     assert retry_task["status"] == "queued"
     assert retry_task["retry_count"] == 1
     assert retry_task["batch_id"] == task["batch_id"]
+
+
+def test_pdf_delete_makes_processing_task_terminal(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("delete-race.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    task = response.json()["tasks"][0]
+    claimed = pdf_repository.claim_next_pdf_upload_task(
+        worker_id="delete-race-worker",
+        started_at="2026-08-14T00:00:00+00:00",
+        lease_expires_at="2026-08-14T01:00:00+00:00",
+    )
+    assert claimed is not None
+
+    delete_response = client.delete(
+        f"/api/pdf/files/{task['file_id']}?confirm_delete=true"
+    )
+    assert delete_response.status_code == 200
+
+    completed = pdf_repository.complete_pdf_upload_task(
+        task_id=task["task_id"],
+        worker_id=claimed.worker_id or "",
+        claim_token=claimed.claim_token or "",
+        result={"unexpected": True},
+        detail="late worker completion",
+        finished_at="2026-08-14T00:01:00+00:00",
+    )
+    failed = pdf_repository.fail_pdf_upload_task(
+        task_id=task["task_id"],
+        worker_id=claimed.worker_id or "",
+        claim_token=claimed.claim_token or "",
+        error_message="late worker failure",
+        failed_at="2026-08-14T00:02:00+00:00",
+    )
+
+    assert completed is None
+    assert failed is None
+    persisted = pdf_repository.get_pdf_upload_task(task["task_id"])
+    assert persisted is not None
+    assert persisted.status == PdfUploadTaskStatus.CANCELLED
+
+
+def test_pdf_late_worker_artifacts_are_cleaned_after_delete(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("late-artifact.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    task = response.json()["tasks"][0]
+    delete_response = client.delete(
+        f"/api/pdf/files/{task['file_id']}?confirm_delete=true"
+    )
+    assert delete_response.status_code == 200
+
+    late_artifact = (
+        tmp_path
+        / "storage"
+        / "pdf-knowledge"
+        / "files"
+        / task["file_id"]
+        / "artifacts"
+        / "late.md"
+    )
+    late_artifact.parent.mkdir(parents=True)
+    late_artifact.write_text("late worker output", encoding="utf-8")
+
+    service = app.dependency_overrides[get_pdf_knowledge_service]()
+    assert service.ensure_deleted_file_cleanup(task["file_id"]) is True
+    assert not late_artifact.parent.parent.exists()
+
+
+def test_pdf_reparse_rejects_an_existing_active_task(client: TestClient) -> None:
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("already-queued.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    task = response.json()["tasks"][0]
+
+    conflict = client.post(f"/api/pdf/files/{task['file_id']}/reparse")
+
+    assert conflict.status_code == 409
+    assert conflict.json() == {
+        "detail": "This file already has an active upload or reparse task.",
+        "code": "ACTIVE_UPLOAD_TASK_EXISTS",
+        "retryable": True,
+        "file_id": task["file_id"],
+        "task_id": task["task_id"],
+    }
+
+
+def test_pdf_batch_database_failure_rolls_back_records_and_disk_files(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_insert = pdf_repository._insert_pdf_upload_task
+    insert_count = 0
+
+    def fail_second_task_insert(connection, task) -> None:
+        nonlocal insert_count
+        insert_count += 1
+        original_insert(connection, task)
+        if insert_count == 2:
+            raise RuntimeError("injected second task insert failure")
+
+    monkeypatch.setattr(
+        pdf_repository,
+        "_insert_pdf_upload_task",
+        fail_second_task_insert,
+    )
+
+    with pytest.raises(RuntimeError, match="injected second task insert failure"):
+        client.post(
+            "/api/pdf/files/upload-tasks",
+            files=[
+                ("files", ("first.pdf", _pdf_bytes(), "application/pdf")),
+                ("files", ("second.pdf", _pdf_bytes(), "application/pdf")),
+            ],
+        )
+
+    assert pdf_repository.list_pdf_files() == []
+    assert pdf_repository.list_pdf_upload_tasks(admin_user().user_id) == []
+    assert pdf_repository.list_pdf_upload_batches(admin_user().user_id) == []
+    pdf_storage = tmp_path / "storage" / "pdf-knowledge"
+    assert [path for path in pdf_storage.rglob("*") if path.is_file()] == []
+
+
+def test_pdf_upload_rejects_duplicate_active_sibling_name(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+    tmp_path: Path,
+) -> None:
+    first = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("duplicate.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    assert first.status_code == 202
+    files_before = {
+        path.relative_to(tmp_path / "storage").as_posix()
+        for path in (tmp_path / "storage").rglob("*")
+        if path.is_file()
+    }
+
+    duplicate = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("duplicate.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "file 'duplicate.pdf' already exists"
+    assert len(pdf_repository.list_pdf_files()) == 1
+    files_after = {
+        path.relative_to(tmp_path / "storage").as_posix()
+        for path in (tmp_path / "storage").rglob("*")
+        if path.is_file()
+    }
+    assert files_after == files_before
 
 
 def test_pdf_parser_status_is_exposed(client: TestClient) -> None:
@@ -1010,6 +1227,42 @@ def test_pdf_summary_tasks_queue_ready_documents_and_worker_generates_summaries(
         detail_response = client.get(f"/api/pdf/files/{file_id}/detail")
         assert detail_response.status_code == 200
         assert detail_response.json()["summary"]["status"] == "ready"
+
+
+def test_pdf_summary_tasks_are_isolated_by_user(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_id = _upload_pdf(client, filename="isolated-summary.pdf")
+    other_task = PdfSummaryTask(
+        task_id="summary_other_user",
+        user_id="user_other_admin",
+        file_id=file_id,
+        status=PdfSummaryTaskStatus.SKIPPED,
+        progress=100,
+        detail="Skipped for isolation test.",
+        error_message=None,
+        result={"reason": "test"},
+        created_at="2026-08-14T00:00:00+00:00",
+        updated_at="2026-08-14T00:00:00+00:00",
+        finished_at="2026-08-14T00:00:00+00:00",
+    )
+    pdf_repository.create_pdf_summary_task(other_task)
+
+    list_response = client.get("/api/pdf/summary-tasks")
+    get_response = client.get(f"/api/pdf/summary-tasks/{other_task.task_id}")
+    cancel_response = client.post(
+        f"/api/pdf/summary-tasks/{other_task.task_id}/cancel"
+    )
+    retry_response = client.post(f"/api/pdf/summary-tasks/{other_task.task_id}/retry")
+
+    assert list_response.status_code == 200
+    assert other_task.task_id not in {
+        task["task_id"] for task in list_response.json()["tasks"]
+    }
+    assert get_response.status_code == 404
+    assert cancel_response.status_code == 404
+    assert retry_response.status_code == 404
 
 
 def test_pdf_summary_task_skips_non_ready_file_and_retry_generates_after_parse(
@@ -1533,7 +1786,7 @@ def test_pdf_chat_folder_scope_limits_route_and_answer(
     }
 
 
-def test_pdf_folder_router_is_scope_bound_and_capped_at_nine_documents(
+def test_pdf_folder_router_is_scope_bound_and_ranked_to_four_documents(
     client: TestClient,
     pdf_repository: SQLiteExcelAssetRepository,
 ) -> None:
@@ -1605,7 +1858,12 @@ def test_pdf_folder_router_is_scope_bound_and_capped_at_nine_documents(
             ]
         }
     )
-    chat_service = PdfChatService(llm_client=llm_client, sessions=pdf_repository)
+    ranking = DeterministicPdfDocumentRanking()
+    chat_service = PdfChatService(
+        llm_client=llm_client,
+        sessions=pdf_repository,
+        document_ranking=ranking,  # type: ignore[arg-type]
+    )
     original_override = app.dependency_overrides[get_pdf_chat_service]
     app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
     try:
@@ -1622,14 +1880,15 @@ def test_pdf_folder_router_is_scope_bound_and_capped_at_nine_documents(
     assert set(request["candidate_file_ids"]) == set(scoped_file_ids)
     assert pending_file_id not in request["candidate_file_ids"]
     assert outside_file["file_id"] not in request["candidate_file_ids"]
-    assert request["max_documents"] == 9
+    assert request["max_documents"] == len(scoped_file_ids)
     duplicate_groups = request["duplicate_content_groups"]
     assert all(duplicate_groups)
     assert len(set(duplicate_groups)) == 1
     selected_file_ids = {
         document["file_id"] for document in route_response.json()["selected_documents"]
     }
-    assert len(selected_file_ids) == 9
+    assert ranking.candidate_file_ids == scoped_file_ids
+    assert len(selected_file_ids) == 4
     assert selected_file_ids.issubset(set(scoped_file_ids))
 
 
@@ -1685,7 +1944,7 @@ def test_pdf_all_sources_passes_every_visible_ready_candidate_to_router(
     } == {second_file_id}
 
 
-def test_pdf_chat_gives_each_of_nine_selected_documents_grounding_context(
+def test_pdf_chat_ranks_nine_router_candidates_and_grounds_top_four(
     client: TestClient,
     pdf_repository: SQLiteExcelAssetRepository,
 ) -> None:
@@ -1699,7 +1958,12 @@ def test_pdf_chat_gives_each_of_nine_selected_documents_grounding_context(
 
     question = "Compare the evidence across all nine documents."
     llm_client = ContextRecordingPdfLlmClient({question: file_ids})
-    chat_service = PdfChatService(llm_client=llm_client, sessions=pdf_repository)
+    ranking = DeterministicPdfDocumentRanking()
+    chat_service = PdfChatService(
+        llm_client=llm_client,
+        sessions=pdf_repository,
+        document_ranking=ranking,  # type: ignore[arg-type]
+    )
     original_override = app.dependency_overrides[get_pdf_chat_service]
     app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
     try:
@@ -1712,8 +1976,9 @@ def test_pdf_chat_gives_each_of_nine_selected_documents_grounding_context(
         app.dependency_overrides[get_pdf_chat_service] = original_override
 
     assert answer_response.status_code == 200
-    assert len(answer_response.json()["selected_documents"]) == 9
-    assert set(llm_client.answer_chunk_file_ids) == set(file_ids)
+    assert ranking.candidate_file_ids == file_ids
+    assert len(answer_response.json()["selected_documents"]) == 4
+    assert set(llm_client.answer_chunk_file_ids) == set(file_ids[:4])
 
 
 def test_pdf_router_format_failure_returns_typed_retryable_error(
@@ -2669,6 +2934,10 @@ def test_pdf_worker_records_parser_failure(
 
     assert worker.run_once() is True
 
+    runtime = worker.runtime_status()
+    assert runtime.last_failure_at is not None
+    assert runtime.last_success_at is None
+
     failed_task = pdf_repository.get_pdf_upload_task(task.task_id)
     failed_file = pdf_repository.get_pdf_file(str(task.file_id))
     assert failed_task is not None
@@ -2688,6 +2957,42 @@ def test_pdf_worker_records_parser_failure(
     assert report.quality_status == PdfParseQualityStatus.FAILED
     assert report.failed_pages == 1
     assert "parser exploded" in report.warnings[0]
+
+
+def test_pdf_parse_publication_rolls_back_all_content_on_mid_commit_failure(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("atomic-publication.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    task_payload = response.json()["tasks"][0]
+    claimed = pdf_repository.claim_next_pdf_upload_task(
+        worker_id="atomic-publication-worker",
+        started_at="2026-08-14T00:00:00+00:00",
+        lease_expires_at="9999-01-01T00:00:00+00:00",
+    )
+    assert claimed is not None
+
+    def fail_diagnostics(*_args, **_kwargs):
+        raise RuntimeError("diagnostic persistence failed")
+
+    monkeypatch.setattr(
+        pdf_repository,
+        "_replace_pdf_parse_diagnostics_on_connection",
+        fail_diagnostics,
+    )
+    service = app.dependency_overrides[get_pdf_knowledge_service]()
+
+    with pytest.raises(RuntimeError, match="diagnostic persistence failed"):
+        service.parse_and_index_task(claimed, _pdf_bytes())
+
+    file_id = str(task_payload["file_id"])
+    assert pdf_repository.get_pdf_document_detail(file_id) is None
+    assert pdf_repository.list_pdf_document_chunks(file_id) == []
+    assert pdf_repository.get_pdf_parse_report(file_id) is None
 
 
 def test_pdf_worker_marks_partial_parse_quality(
@@ -2779,7 +3084,12 @@ def test_pdf_worker_archives_parser_artifacts(
     assert report.artifacts
     artifact = report.artifacts[0]
     assert artifact.path is not None
-    assert artifact.path.startswith(f"pdf-knowledge/files/{task.file_id}/artifacts/")
+    persisted_task = pdf_repository.get_pdf_upload_task(task.task_id)
+    assert persisted_task is not None and persisted_task.claim_token
+    assert artifact.path.startswith(
+        "pdf-knowledge/files/"
+        f"{task.file_id}/task-artifacts/{task.task_id}/{persisted_task.claim_token}/"
+    )
     archived_path = tmp_path / "storage" / artifact.path
     assert archived_path.read_text(encoding="utf-8") == "Parsed markdown"
 
@@ -2820,6 +3130,7 @@ def test_pdf_worker_marks_stale_processing_task_with_diagnostics(
     claimed = pdf_repository.claim_next_pdf_upload_task(
         worker_id="stale-test-worker",
         started_at="2020-01-01T00:00:00+00:00",
+        lease_expires_at="2020-01-01T00:01:00+00:00",
     )
     assert claimed is not None
 
@@ -3034,6 +3345,31 @@ class ContextRecordingPdfLlmClient(RoutingProbePdfLlmClient):
     def answer_with_pdf_chunks(self, question, chunks, **kwargs):
         self.answer_chunk_file_ids = [str(chunk["file_id"]) for chunk in chunks]
         return super().answer_with_pdf_chunks(question, chunks, **kwargs)
+
+
+class DeterministicPdfDocumentRanking:
+    def __init__(self) -> None:
+        self.candidate_file_ids: list[str] = []
+
+    def select(self, *, question, router_documents, cancellation_checker=None):
+        _ = question
+        if cancellation_checker is not None:
+            cancellation_checker()
+        candidates = PdfRoutingCandidateSet(tuple(router_documents))
+        self.candidate_file_ids = list(candidates.file_ids)
+        return PdfFinalDocumentSelection.vector_rerank(
+            candidates=candidates,
+            rankings=tuple(
+                PdfRankedDocument(
+                    file_id=document.file_id,
+                    rank=index,
+                    score=float(len(router_documents) - index),
+                    evidence_chunk_ids=(f"ranking-evidence-{document.file_id}",),
+                )
+                for index, document in enumerate(router_documents, start=1)
+            ),
+            ranking_revision="deterministic-test-ranking@1",
+        )
 
 
 class VisibilityHidingPdfLlmClient(FakeLlmClient):

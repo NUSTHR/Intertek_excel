@@ -10,9 +10,11 @@
 ## Persistence Rules
 
 - SQLite is the source of truth for workbook metadata, summaries, chat sessions, chat turns, citation snapshots, attached documents, and workspace model preferences.
+- SQLite is also the source of truth for PDF vector projection generations and task state. Qdrant contains rebuildable derived points only; it must never become the authority for document existence or visibility.
 - Persist user-visible history as immutable turn snapshots. A chat turn must keep its question, answer blocks, selected documents, attached document snapshot, citations, warnings, timings, and creation time together.
 - Preserve historical evidence snapshots even if the underlying workbook is later deleted. Future attachments may be removed, but past chat answers must remain readable and internally consistent.
 - Add schema changes through ordered migrations only. Do not edit already-applied migration text; add a new migration version.
+- Vector writes must be fenced by source fingerprint, embedding contract revision, generation, worker identity, claim token, and a valid lease. Older generations may be deleted only with an upper-bound generation filter.
 - Use JSON columns only for bounded nested snapshots owned by a single aggregate, such as a chat turn's citations or timings.
 
 ## State Consistency
@@ -35,6 +37,7 @@
 ## Testing And Verification
 
 - Backend persistence changes require repository/API tests for migration, write, read, and compatibility behavior.
+- Retrieval adapters require malformed-response, dimension, non-finite value, timeout, authentication, rate-limit, and server-error tests. Live SiliconFlow tests are opt-in deployment checks and must never print prompts, vectors, or credentials.
 - Chat changes must test both real-time answer responses and history reload responses.
 - Frontend changes must pass `vue-tsc` and production build checks.
 - File-workspace changes must verify Excel/PDF pane geometry at the same viewport and confirm that only the source list and insight content scroll.

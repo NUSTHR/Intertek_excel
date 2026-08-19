@@ -64,8 +64,37 @@ treated as compatibility contracts during refactoring.
 PDF document selection follows
 [`ADR 0001`](adr/0001-pdf-document-routing-authority.md). Multi-document
 candidates are selected only by the PDF document router. Application code owns
-the hard visible/READY scope and validates router output, while answer-context
-allocation is limited to documents already selected by the router.
+the hard visible/READY scope and validates router output. Up to four router
+candidates pass through unchanged. Larger candidate sets are retrieved and
+reranked in full, then reduced to four; retrieval cannot introduce a document
+outside the router result. The answer stage receives every parsed chunk of the
+four final documents. A configured hard capacity is checked before the answer
+request; overflow fails closed instead of truncating a selected document.
+
+Vector projections are derived state. SQLite owns a monotonic per-file
+generation and a tombstone flag, while Qdrant points carry the same generation.
+Searches always filter by the current READY generation and delete tasks may
+remove only generations at or below their own fence. Vector tasks use the
+explicit lifecycle `pending -> running -> retry_wait -> succeeded`, with
+`dead_letter` and `cancelled` as terminal alternatives. A periodic reconciler
+backfills missing or stale projections but deliberately leaves matching dead
+letters for an auditable manual requeue.
+
+Projection production has an independent release state from online ranking.
+`PDF_VECTOR_INDEXING_ENABLED=true` with ranking disabled is the supported
+shadow-backfill state. Ranking cannot be enabled unless indexing is enabled.
+When ranking is active, an unavailable model, missing collection, stale index,
+or incomplete reranker response fails closed; it never reduces the router
+result by accident. Four-or-fewer candidate requests do not touch any vector
+dependency and remain available during a Qdrant or model-provider outage.
+
+SiliconFlow supplies embedding and reranking inference over HTTPS. The local
+Qdrant service is accessed over loopback REST and persists only derived data in
+a dedicated Docker volume. Development may bootstrap its collection
+automatically. Production runtime is validate-only: collection creation and
+payload-index creation happen through the deployment preflight command. SQLite
+READY state combined with a missing collection is treated as data loss and
+requires an explicit full rebuild.
 
 API DTOs follow the same bounded-context rule:
 

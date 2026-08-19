@@ -49,11 +49,14 @@ class WorkerRuntimeTracker:
             self._state = "busy"
             self._current_task_started_at = utc_now_iso()
 
-    def mark_task_finished(self) -> None:
+    def mark_task_finished(self, *, succeeded: bool) -> None:
         now = utc_now_iso()
         with self._lock:
             self._state = "idle"
-            self._last_success_at = now
+            if succeeded:
+                self._last_success_at = now
+            else:
+                self._last_failure_at = now
             self._last_poll_at = now
             self._current_task_started_at = None
             self._consecutive_loop_failures = 0

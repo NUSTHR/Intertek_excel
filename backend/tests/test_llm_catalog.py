@@ -74,7 +74,7 @@ def test_provider_options_expose_deep_thinking_capabilities() -> None:
 
 def test_provider_request_capabilities_are_explicit() -> None:
     assert supports_json_response_format(DEEPSEEK_PROVIDER)
-    assert not supports_json_response_format(SILICONFLOW_PROVIDER)
+    assert supports_json_response_format(SILICONFLOW_PROVIDER)
     assert not supports_json_response_format(VOLCENGINE_ARK_PROVIDER)
 
     assert (
@@ -83,4 +83,11 @@ def test_provider_request_capabilities_are_explicit() -> None:
     )
     assert thinking_request_style(DEEPSEEK_PROVIDER, "deepseek-v4-pro") == "deepseek_thinking"
     assert thinking_request_style(VOLCENGINE_ARK_PROVIDER, "deepseek-v4-pro-260425") is None
-    assert thinking_request_style(SILICONFLOW_PROVIDER, "Qwen/Qwen3.6-27B") is None
+    assert (
+        thinking_request_style(SILICONFLOW_PROVIDER, "Qwen/Qwen3.6-27B")
+        == "siliconflow_enable_thinking"
+    )
+    assert (
+        thinking_request_style(SILICONFLOW_PROVIDER, "Qwen/Qwen3.6-35B-A3B")
+        == "siliconflow_enable_thinking"
+    )

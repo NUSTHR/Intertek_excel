@@ -112,6 +112,16 @@ class UploadValidationError(ExcelWorkspaceError):
     pass
 
 
+class ActiveUploadTaskConflictError(ExcelWorkspaceError):
+    code = "ACTIVE_UPLOAD_TASK_EXISTS"
+    retryable = True
+
+    def __init__(self, file_id: str, task_id: str) -> None:
+        self.file_id = file_id
+        self.task_id = task_id
+        super().__init__("This file already has an active upload or reparse task.")
+
+
 class AuthenticationError(ExcelWorkspaceError):
     pass
 
@@ -143,6 +153,71 @@ class PdfRoutingError(WorkspaceError):
 
     def __init__(self, detail: str = "PDF document routing failed. Please retry.") -> None:
         super().__init__(detail)
+
+
+class PdfSelectionIntegrityError(WorkspaceError):
+    code = "PDF_SELECTION_INTEGRITY_ERROR"
+
+
+class PdfRankingIncomplete(WorkspaceError):
+    code = "PDF_RANKING_INCOMPLETE"
+    retryable = True
+
+
+class PdfRetrievalDependencyError(WorkspaceError):
+    """A sanitized external retrieval failure with explicit retry semantics."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        retryable: bool = True,
+        status_code: int | None = None,
+        retry_after_seconds: int | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        self.retryable = retryable
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+        self.trace_id = trace_id
+        super().__init__(detail)
+
+
+class PdfEmbeddingUnavailable(PdfRetrievalDependencyError):
+    code = "PDF_EMBEDDING_UNAVAILABLE"
+
+
+class PdfVectorStoreUnavailable(PdfRetrievalDependencyError):
+    code = "PDF_VECTOR_STORE_UNAVAILABLE"
+
+
+class PdfRerankerUnavailable(PdfRetrievalDependencyError):
+    code = "PDF_RERANKER_UNAVAILABLE"
+
+
+class PdfAnswerContextTooLarge(WorkspaceError):
+    code = "PDF_ANSWER_CONTEXT_TOO_LARGE"
+
+    def __init__(
+        self,
+        *,
+        chunk_count: int,
+        character_count: int,
+        token_count: int,
+        max_chunks: int,
+        max_characters: int,
+        max_tokens: int,
+    ) -> None:
+        self.chunk_count = chunk_count
+        self.character_count = character_count
+        self.token_count = token_count
+        self.max_chunks = max_chunks
+        self.max_characters = max_characters
+        self.max_tokens = max_tokens
+        super().__init__(
+            "The four selected documents exceed the configured full-document "
+            "answer context capacity. No document was truncated."
+        )
 
 
 class UserAlreadyExistsError(ExcelWorkspaceError):

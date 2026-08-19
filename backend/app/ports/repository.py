@@ -36,6 +36,8 @@ from app.domain.models import (
     PdfUploadBatchStatus,
     PdfUploadTask,
     PdfUploadTaskStage,
+    PdfVectorIndex,
+    PdfVectorIndexTask,
     UserAccount,
 )
 
@@ -95,7 +97,23 @@ class ExcelAssetRepository(Protocol):
     ) -> None:
         ...
 
-    def activate_version(self, file_id: str, version_id: str, activated_at: str) -> None:
+    def cleanup_failed_version_materialization(self, version_id: str) -> bool:
+        ...
+
+    def activate_version(self, file_id: str, version_id: str, activated_at: str) -> bool:
+        ...
+
+    def activate_version_for_upload_task(
+        self,
+        *,
+        file_id: str,
+        version_id: str,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        activated_at: str,
+        task_result: dict[str, object],
+    ) -> bool:
         ...
 
     def create_sheet(self, sheet: ExcelSheet) -> None:
@@ -167,13 +185,37 @@ class ExcelUploadTaskRepository(Protocol):
         *,
         worker_id: str,
         started_at: str,
+        lease_expires_at: str,
     ) -> ExcelUploadTask | None:
+        ...
+
+    def heartbeat_upload_task(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        ...
+
+    def is_upload_task_claim_active(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        checked_at: str,
+    ) -> bool:
         ...
 
     def complete_upload_task(
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         result: dict[str, object],
         finished_at: str,
     ) -> ExcelUploadTask | None:
@@ -183,6 +225,8 @@ class ExcelUploadTaskRepository(Protocol):
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         finished_at: str,
     ) -> ExcelUploadTask | None:
@@ -381,6 +425,9 @@ class ChatSessionRepository(Protocol):
 
 
 class PdfChatRepository(ChatSessionRepository, Protocol):
+    def get_pdf_vector_index(self, file_id: str) -> PdfVectorIndex | None:
+        ...
+
     def get_pdf_file(self, file_id: str) -> PdfFile | None:
         ...
 
@@ -542,6 +589,9 @@ class PdfKnowledgeRepository(Protocol):
     def create_pdf_file(self, file: PdfFile) -> None:
         ...
 
+    def create_pdf_upload(self, file: PdfFile, task: PdfUploadTask) -> None:
+        ...
+
     def get_pdf_file(self, file_id: str) -> PdfFile | None:
         ...
 
@@ -591,6 +641,9 @@ class PdfKnowledgeRepository(Protocol):
         error_message: str | None = None,
         page_count: int | None = None,
         chunk_count: int | None = None,
+        task_id: str | None = None,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
     ) -> PdfFile | None:
         ...
 
@@ -613,13 +666,38 @@ class PdfKnowledgeRepository(Protocol):
     def delete_pdf_file_tree(self, file_id: str) -> dict[str, int]:
         ...
 
-    def list_pending_pdf_file_cleanup_jobs(self) -> list[PdfFileCleanupJob]:
+    def list_pending_pdf_file_cleanup_jobs(
+        self,
+        *,
+        available_at: str,
+    ) -> list[PdfFileCleanupJob]:
+        ...
+
+    def claim_pdf_file_cleanup_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> PdfFileCleanupJob | None:
+        ...
+
+    def ensure_pdf_file_cleanup_job(
+        self,
+        *,
+        file_id: str,
+        created_at: str,
+    ) -> PdfFileCleanupJob | None:
         ...
 
     def complete_pdf_file_cleanup_job(
         self,
         *,
         job_id: str,
+        worker_id: str,
+        claim_token: str,
         completed_at: str,
     ) -> PdfFileCleanupJob | None:
         ...
@@ -628,12 +706,21 @@ class PdfKnowledgeRepository(Protocol):
         self,
         *,
         job_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         failed_at: str,
     ) -> PdfFileCleanupJob | None:
         ...
 
     def create_pdf_upload_batch(self, batch: PdfUploadBatch) -> None:
+        ...
+
+    def create_pdf_upload_batch_records(
+        self,
+        batch: PdfUploadBatch,
+        records: list[tuple[PdfFile, PdfUploadTask]],
+    ) -> None:
         ...
 
     def get_pdf_upload_batch(self, batch_id: str) -> PdfUploadBatch | None:
@@ -659,7 +746,19 @@ class PdfKnowledgeRepository(Protocol):
     def create_pdf_upload_task(self, task: PdfUploadTask) -> None:
         ...
 
+    def queue_pdf_upload_task_for_existing_file(
+        self,
+        task: PdfUploadTask,
+        *,
+        status_detail: str,
+        mark_summary_stale: bool,
+    ) -> None:
+        ...
+
     def get_pdf_upload_task(self, task_id: str) -> PdfUploadTask | None:
+        ...
+
+    def get_active_pdf_upload_task_for_file(self, file_id: str) -> PdfUploadTask | None:
         ...
 
     def list_pdf_upload_tasks(self, user_id: str) -> list[PdfUploadTask]:
@@ -673,13 +772,37 @@ class PdfKnowledgeRepository(Protocol):
         *,
         worker_id: str,
         started_at: str,
+        lease_expires_at: str,
     ) -> PdfUploadTask | None:
+        ...
+
+    def heartbeat_pdf_upload_task(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        ...
+
+    def is_pdf_upload_task_claim_active(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        checked_at: str,
+    ) -> bool:
         ...
 
     def update_pdf_upload_task_progress(
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         progress: int,
         detail: str,
         updated_at: str,
@@ -691,9 +814,43 @@ class PdfKnowledgeRepository(Protocol):
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         result: dict[str, object],
         detail: str,
         finished_at: str,
+    ) -> PdfUploadTask | None:
+        ...
+
+    def publish_pdf_parse_result(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        detail: PdfDocumentDetail,
+        chunks: list[PdfDocumentChunk],
+        report: PdfParseReport,
+        processing_status: PdfProcessingStatus,
+        status_detail: str,
+        error_message: str | None,
+        result: dict[str, object],
+        published_at: str,
+        vector_index: PdfVectorIndex | None = None,
+        vector_index_task: PdfVectorIndexTask | None = None,
+    ) -> PdfUploadTask | None:
+        ...
+
+    def fail_pdf_parse_result(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        report: PdfParseReport | None,
+        error_message: str,
+        error_code: str | None,
+        failed_at: str,
     ) -> PdfUploadTask | None:
         ...
 
@@ -701,6 +858,8 @@ class PdfKnowledgeRepository(Protocol):
         self,
         *,
         task_id: str,
+        worker_id: str,
+        claim_token: str,
         error_message: str,
         failed_at: str,
         error_code: str | None = None,

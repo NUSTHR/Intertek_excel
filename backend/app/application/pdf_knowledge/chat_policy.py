@@ -3,7 +3,9 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class PdfChatPolicy:
-    max_routed_documents: int = 9
+    max_routed_documents: int = 4
+    vector_hits_per_document: int = 8
+    full_document_context: bool = True
     max_answer_context_chunks: int = 160
     max_answer_context_characters: int = 120_000
     max_answer_context_tokens: int = 30_000

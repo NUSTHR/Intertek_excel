@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -42,6 +43,8 @@ from app.domain.models import (
 from app.ports.repository import ExcelAssetRepository
 from app.ports.storage import ExcelArtifactStorage
 from app.ports.workbook_reader import WorkbookReader
+
+logger = logging.getLogger(__name__)
 
 
 class ExcelAssetService:
@@ -92,6 +95,10 @@ class ExcelAssetService:
         original_filename: str,
         content: bytes,
         replace_existing: bool = False,
+        *,
+        upload_task_id: str | None = None,
+        upload_worker_id: str | None = None,
+        upload_claim_token: str | None = None,
     ) -> UploadExcelResult:
         display_name = self._normalize_display_name(original_filename)
         existing_file = self._repository.find_file_by_display_name(display_name)
@@ -99,6 +106,7 @@ class ExcelAssetService:
             raise FileNameConflictError(display_name=display_name, file_id=existing_file.file_id)
 
         now = utc_now_iso()
+        created_new_file = existing_file is None
         file = existing_file or ExcelFile(
             file_id=new_id("file"),
             display_name=display_name,
@@ -127,19 +135,40 @@ class ExcelAssetService:
             created_at=now,
             activated_at=None,
         )
-        self._repository.create_version(version)
-
         try:
+            self._repository.create_version(version)
             result = self._version_processor.process_version(
                 file=file,
                 version=version,
                 content=content,
             )
-            self._repository.activate_version(
-                file_id=file.file_id,
-                version_id=version.version_id,
-                activated_at=utc_now_iso(),
-            )
+            activated_at = utc_now_iso()
+            claim_fields = (upload_task_id, upload_worker_id, upload_claim_token)
+            if all(claim_fields):
+                activated = self._repository.activate_version_for_upload_task(
+                    file_id=file.file_id,
+                    version_id=version.version_id,
+                    task_id=upload_task_id or "",
+                    worker_id=upload_worker_id or "",
+                    claim_token=upload_claim_token or "",
+                    activated_at=activated_at,
+                    task_result={
+                        "file_id": file.file_id,
+                        "version_id": version.version_id,
+                    },
+                )
+            elif any(claim_fields):
+                raise VersionActivationError("the upload task claim is incomplete")
+            else:
+                activated = self._repository.activate_version(
+                    file_id=file.file_id,
+                    version_id=version.version_id,
+                    activated_at=activated_at,
+                )
+            if not activated:
+                raise VersionActivationError(
+                    "the workbook could not be activated because the file changed"
+                )
             activated_file = self._require_file(file.file_id)
             activated_version = self._require_version(version.version_id)
             return UploadExcelResult(
@@ -150,10 +179,22 @@ class ExcelAssetService:
                 artifacts=result.artifacts,
             )
         except Exception as exc:
-            self._repository.update_version_status(
-                version.version_id,
-                ExcelVersionStatus.FAILED,
-                error_message=str(exc),
+            try:
+                self._repository.update_version_status(
+                    version.version_id,
+                    ExcelVersionStatus.FAILED,
+                    error_message=str(exc),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to mark workbook version as failed",
+                    extra={"file_id": file.file_id, "version_id": version.version_id},
+                    exc_info=True,
+                )
+            self._cleanup_failed_upload(
+                file=file,
+                version=version,
+                created_new_file=created_new_file,
             )
             raise
 
@@ -272,11 +313,15 @@ class ExcelAssetService:
             raise AssetNotFoundError("version does not belong to the requested file")
         if version.status != ExcelVersionStatus.READY:
             raise VersionActivationError("only ready versions can be activated")
-        self._repository.activate_version(
+        activated = self._repository.activate_version(
             file_id=file_id,
             version_id=version_id,
             activated_at=utc_now_iso(),
         )
+        if not activated:
+            raise VersionActivationError(
+                "the workbook could not be activated because the file changed"
+            )
         return self._require_version(version_id)
 
     def list_sheets(
@@ -509,6 +554,42 @@ class ExcelAssetService:
 
     def _artifact_path(self, reference: str) -> Path:
         return self._storage.resolve_artifact_reference(reference)
+
+    def _cleanup_failed_upload(
+        self,
+        *,
+        file: ExcelFile,
+        version: ExcelFileVersion,
+        created_new_file: bool,
+    ) -> None:
+        try:
+            self._repository.cleanup_failed_version_materialization(version.version_id)
+        except Exception:
+            logger.warning(
+                "Failed to clean database materialization for workbook version",
+                extra={"file_id": file.file_id, "version_id": version.version_id},
+                exc_info=True,
+            )
+        if created_new_file:
+            try:
+                self._repository.delete_file(file.file_id)
+            except Exception:
+                logger.warning(
+                    "Failed to hide a newly-created workbook after upload failure",
+                    extra={"file_id": file.file_id, "version_id": version.version_id},
+                    exc_info=True,
+                )
+        try:
+            if created_new_file:
+                self._storage.delete_file_tree(file.file_id)
+            else:
+                self._storage.delete_version_tree(file.file_id, version.version_id)
+        except Exception:
+            logger.warning(
+                "Failed to clean workbook files after upload failure",
+                extra={"file_id": file.file_id, "version_id": version.version_id},
+                exc_info=True,
+            )
 
     def _read_csv_rows(self, path: Path) -> list[list[str]]:
         return self._csv_reader.read_rows(path)

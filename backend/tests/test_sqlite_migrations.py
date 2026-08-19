@@ -5,15 +5,27 @@ from pathlib import Path
 import pytest
 
 from app.adapters.repositories import sqlite_repository
+from app.adapters.repositories.sqlite.migrations import SQLiteMigrationRunner
+from app.adapters.repositories.sqlite.schema import SchemaMigration
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.core.config import Settings
-from app.core.errors import ChatSessionRevisionConflict
+from app.core.errors import ActiveUploadTaskConflictError, ChatSessionRevisionConflict
 from app.domain.models import (
     ChatSession,
     ChatTurn,
     ChatWorkspace,
+    ExcelFile,
+    ExcelFileVersion,
     ExcelUploadTask,
     ExcelUploadTaskStatus,
+    ExcelVersionStatus,
+    PdfFile,
+    PdfFileKind,
+    PdfFileStatus,
+    PdfFileVisibility,
+    PdfProcessingStatus,
+    PdfUploadTask,
+    PdfUploadTaskStatus,
 )
 
 
@@ -51,6 +63,185 @@ def test_repository_initialization_records_schema_migration(tmp_path: Path) -> N
             """
         ).fetchone()
     assert search_index is not None
+
+
+def test_schema_migration_failure_rolls_back_all_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "failed-migration.sqlite3"
+    runner = SQLiteMigrationRunner(
+        (
+            SchemaMigration(
+                version=1,
+                name="fault_injection",
+                statements=(
+                    "CREATE TABLE partial_table(id INTEGER PRIMARY KEY)",
+                    "THIS IS INVALID SQL",
+                ),
+            ),
+        )
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(sqlite3.Error):
+            runner.initialize_schema(connection)
+        tables = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+    assert "partial_table" not in tables
+    assert "schema_migrations" not in tables
+
+
+def test_deleted_pdf_reconciliation_migration_purges_content_and_queues_cleanup(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "deleted-pdf-reconciliation.sqlite3"
+    legacy_runner = SQLiteMigrationRunner(
+        [
+            migration
+            for migration in sqlite_repository.SCHEMA_MIGRATIONS
+            if migration.version < 35
+        ]
+    )
+    with sqlite3.connect(database_path) as connection:
+        legacy_runner.initialize_schema(connection)
+    repository = SQLiteExcelAssetRepository(database_path)
+    now = "2026-08-14T00:00:00+00:00"
+    file = _existing_pdf_file("file_historical_deleted", now)
+    repository.create_pdf_file(file)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO pdf_document_tags (file_id, tag, tag_index)
+            VALUES (?, 'historical-tag', 0)
+            """,
+            (file.file_id,),
+        )
+        connection.execute(
+            """
+            UPDATE pdf_files
+            SET status = 'deleted', deleted_at = ?, updated_at = ?
+            WHERE file_id = ?
+            """,
+            (now, now, file.file_id),
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        SQLiteMigrationRunner(sqlite_repository.SCHEMA_MIGRATIONS).initialize_schema(
+            connection
+        )
+        tag_count = connection.execute(
+            "SELECT COUNT(*) FROM pdf_document_tags WHERE file_id = ?",
+            (file.file_id,),
+        ).fetchone()[0]
+        cleanup_job = connection.execute(
+            """
+            SELECT status, relative_path
+            FROM pdf_file_cleanup_jobs
+            WHERE file_id = ?
+            """,
+            (file.file_id,),
+        ).fetchone()
+
+    assert tag_count == 0
+    assert cleanup_job is not None
+    assert tuple(cleanup_job) == (
+        "pending",
+        f"pdf-knowledge/files/{file.file_id}",
+    )
+
+
+def test_vector_task_lifecycle_migration_normalizes_legacy_failures(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy-vector-tasks.sqlite3"
+    legacy_runner = SQLiteMigrationRunner(
+        [
+            migration
+            for migration in sqlite_repository.SCHEMA_MIGRATIONS
+            if migration.version <= 37
+        ]
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        legacy_runner.initialize_schema(connection)
+        connection.executemany(
+            """
+            INSERT INTO pdf_vector_index_tasks (
+              task_id, file_id, action, source_fingerprint, embedding_revision,
+              status, attempt_count, error_message, created_at, updated_at,
+              started_at, finished_at, worker_id, claim_token, lease_expires_at,
+              heartbeat_at, state_revision, next_attempt_at
+            )
+            VALUES (?, ?, 'index', 'fingerprint', 'embedding@1', 'failed', ?,
+                    'legacy failure', ?, ?, ?, ?, 'legacy-worker', 'legacy-claim',
+                    ?, ?, 3, ?)
+            """,
+            (
+                (
+                    "task-retry",
+                    "file-retry",
+                    2,
+                    "2026-08-14T00:00:00+00:00",
+                    "2026-08-14T00:02:00+00:00",
+                    "2026-08-14T00:01:00+00:00",
+                    "2026-08-14T00:02:00+00:00",
+                    "2026-08-14T00:10:00+00:00",
+                    "2026-08-14T00:01:30+00:00",
+                    "2026-08-14T00:02:04+00:00",
+                ),
+                (
+                    "task-exhausted",
+                    "file-exhausted",
+                    10,
+                    "2026-08-14T00:00:00+00:00",
+                    "2026-08-14T00:02:00+00:00",
+                    "2026-08-14T00:01:00+00:00",
+                    "2026-08-14T00:02:00+00:00",
+                    "2026-08-14T00:10:00+00:00",
+                    "2026-08-14T00:01:30+00:00",
+                    "2026-08-14T00:07:00+00:00",
+                ),
+            ),
+        )
+        SQLiteMigrationRunner(sqlite_repository.SCHEMA_MIGRATIONS).initialize_schema(
+            connection
+        )
+        rows = connection.execute(
+            """
+            SELECT task_id, status, error_code, finished_at, worker_id,
+                   claim_token, lease_expires_at, heartbeat_at, next_attempt_at
+            FROM pdf_vector_index_tasks
+            ORDER BY task_id
+            """
+        ).fetchall()
+
+    assert dict(rows[0]) == {
+        "task_id": "task-exhausted",
+        "status": "dead_letter",
+        "error_code": "LEGACY_RETRY_EXHAUSTED",
+        "finished_at": "2026-08-14T00:02:00+00:00",
+        "worker_id": None,
+        "claim_token": None,
+        "lease_expires_at": None,
+        "heartbeat_at": None,
+        "next_attempt_at": None,
+    }
+    assert dict(rows[1]) == {
+        "task_id": "task-retry",
+        "status": "retry_wait",
+        "error_code": "LEGACY_RETRYABLE_FAILURE",
+        "finished_at": None,
+        "worker_id": None,
+        "claim_token": None,
+        "lease_expires_at": None,
+        "heartbeat_at": None,
+        "next_attempt_at": "2026-08-14T00:02:04+00:00",
+    }
 
 
 def test_repository_configures_connections_for_long_running_use(tmp_path: Path) -> None:
@@ -101,6 +292,7 @@ def test_repository_concurrent_upload_task_claims_are_unique(tmp_path: Path) -> 
         task = repository.claim_next_upload_task(
             worker_id=f"worker_{worker_index}",
             started_at=f"2026-06-14T00:00:{worker_index:02d}+00:00",
+            lease_expires_at="2026-06-14T01:00:00+00:00",
         )
         return task.task_id if task is not None else None
 
@@ -116,7 +308,347 @@ def test_repository_concurrent_upload_task_claims_are_unique(tmp_path: Path) -> 
     assert repository.claim_next_upload_task(
         worker_id="worker_extra",
         started_at="2026-06-14T00:01:00+00:00",
+        lease_expires_at="2026-06-14T01:01:00+00:00",
     ) is None
+
+
+def test_excel_upload_task_claim_token_and_lease_fence_terminal_writes(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    repository.initialize()
+    repository.create_upload_task(
+        ExcelUploadTask(
+            task_id="task_fenced",
+            user_id="user_admin",
+            original_filename="fenced.xlsx",
+            staging_path="staging/fenced.xlsx",
+            replace_existing=False,
+            status=ExcelUploadTaskStatus.QUEUED,
+            error_message=None,
+            result={},
+            created_at="2026-08-14T00:00:00+00:00",
+            updated_at="2026-08-14T00:00:00+00:00",
+        )
+    )
+    claimed = repository.claim_next_upload_task(
+        worker_id="worker_owner",
+        started_at="2026-08-14T00:00:00+00:00",
+        lease_expires_at="2026-08-14T00:10:00+00:00",
+    )
+    assert claimed is not None and claimed.claim_token
+
+    assert repository.complete_upload_task(
+        task_id=claimed.task_id,
+        worker_id="worker_intruder",
+        claim_token=claimed.claim_token,
+        result={},
+        finished_at="2026-08-14T00:01:00+00:00",
+    ) is None
+    assert repository.heartbeat_upload_task(
+        task_id=claimed.task_id,
+        worker_id="worker_owner",
+        claim_token=claimed.claim_token,
+        heartbeat_at="2026-08-14T00:05:00+00:00",
+        lease_expires_at="2026-08-14T00:20:00+00:00",
+    )
+    completed = repository.complete_upload_task(
+        task_id=claimed.task_id,
+        worker_id="worker_owner",
+        claim_token=claimed.claim_token,
+        result={"file_id": "file_ready"},
+        finished_at="2026-08-14T00:15:00+00:00",
+    )
+    assert completed is not None
+    assert completed.status == ExcelUploadTaskStatus.READY
+    assert completed.state_revision >= 3
+
+
+def test_expired_excel_upload_claim_cannot_activate_materialized_version(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "activation.sqlite3")
+    repository.initialize()
+    now = "2026-08-14T00:00:00+00:00"
+    repository.create_file(
+        ExcelFile(
+            file_id="file_claim_guard",
+            display_name="claim-guard.xlsx",
+            active_version_id=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    repository.create_version(
+        ExcelFileVersion(
+            version_id="version_claim_guard",
+            file_id="file_claim_guard",
+            original_filename="claim-guard.xlsx",
+            file_hash="hash",
+            status=ExcelVersionStatus.PROCESSING,
+            error_message=None,
+            created_at=now,
+            activated_at=None,
+        )
+    )
+    repository.create_upload_task(
+        ExcelUploadTask(
+            task_id="task_claim_guard",
+            user_id="user_admin",
+            original_filename="claim-guard.xlsx",
+            staging_path="staging/claim-guard.xlsx",
+            replace_existing=False,
+            status=ExcelUploadTaskStatus.QUEUED,
+            error_message=None,
+            result={},
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    claimed = repository.claim_next_upload_task(
+        worker_id="worker_claim_guard",
+        started_at=now,
+        lease_expires_at="2026-08-14T00:01:00+00:00",
+    )
+    assert claimed is not None and claimed.claim_token
+
+    activated = repository.activate_version_for_upload_task(
+        file_id="file_claim_guard",
+        version_id="version_claim_guard",
+        task_id=claimed.task_id,
+        worker_id=claimed.worker_id or "",
+        claim_token=claimed.claim_token,
+        activated_at="2026-08-14T00:02:00+00:00",
+        task_result={
+            "file_id": "file_claim_guard",
+            "version_id": "version_claim_guard",
+        },
+    )
+
+    assert activated is False
+    file = repository.get_file("file_claim_guard")
+    assert file is not None
+    assert file.active_version_id is None
+
+
+def test_excel_upload_publication_activates_version_and_completes_task_atomically(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "atomic-activation.sqlite3")
+    repository.initialize()
+    now = "2026-08-14T00:00:00+00:00"
+    repository.create_file(
+        ExcelFile(
+            file_id="file_atomic_publish",
+            display_name="atomic-publish.xlsx",
+            active_version_id=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    repository.create_version(
+        ExcelFileVersion(
+            version_id="version_atomic_publish",
+            file_id="file_atomic_publish",
+            original_filename="atomic-publish.xlsx",
+            file_hash="hash",
+            status=ExcelVersionStatus.PROCESSING,
+            error_message=None,
+            created_at=now,
+            activated_at=None,
+        )
+    )
+    repository.create_upload_task(
+        ExcelUploadTask(
+            task_id="task_atomic_publish",
+            user_id="user_admin",
+            original_filename="atomic-publish.xlsx",
+            staging_path="staging/atomic-publish.xlsx",
+            replace_existing=False,
+            status=ExcelUploadTaskStatus.QUEUED,
+            error_message=None,
+            result={},
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    claimed = repository.claim_next_upload_task(
+        worker_id="worker_atomic_publish",
+        started_at=now,
+        lease_expires_at="2026-08-14T00:05:00+00:00",
+    )
+    assert claimed is not None and claimed.claim_token
+    task_result = {
+        "file_id": "file_atomic_publish",
+        "version_id": "version_atomic_publish",
+    }
+
+    activated = repository.activate_version_for_upload_task(
+        file_id="file_atomic_publish",
+        version_id="version_atomic_publish",
+        task_id=claimed.task_id,
+        worker_id=claimed.worker_id or "",
+        claim_token=claimed.claim_token,
+        activated_at="2026-08-14T00:01:00+00:00",
+        task_result=task_result,
+    )
+
+    assert activated is True
+    file = repository.get_file("file_atomic_publish")
+    version = repository.get_version("version_atomic_publish")
+    task = repository.get_upload_task("task_atomic_publish")
+    assert file is not None and file.active_version_id == "version_atomic_publish"
+    assert version is not None and version.status == ExcelVersionStatus.READY
+    assert task is not None and task.status == ExcelUploadTaskStatus.READY
+    assert task.result == task_result
+    assert task.finished_at == "2026-08-14T00:01:00+00:00"
+
+
+def test_pdf_existing_file_queue_and_cancel_update_file_in_same_transaction(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "pdf-queue-cancel.sqlite3")
+    repository.initialize()
+    now = "2026-08-14T00:00:00+00:00"
+    file = _existing_pdf_file("file_queue_cancel", now)
+    repository.create_pdf_file(file)
+    task = _queued_pdf_task("task_queue_cancel", file.file_id, now)
+
+    repository.queue_pdf_upload_task_for_existing_file(
+        task,
+        status_detail="Queued for test.",
+        mark_summary_stale=False,
+    )
+
+    queued_file = repository.get_pdf_file(file.file_id)
+    assert queued_file is not None
+    assert queued_file.processing_status == PdfProcessingStatus.QUEUED
+    cancelled = repository.cancel_pdf_upload_task(
+        task_id=task.task_id,
+        cancelled_at="2026-08-14T00:01:00+00:00",
+        detail="Cancelled for test.",
+    )
+    cancelled_file = repository.get_pdf_file(file.file_id)
+    assert cancelled is not None
+    assert cancelled.status == PdfUploadTaskStatus.CANCELLED
+    assert cancelled_file is not None
+    assert cancelled_file.processing_status == PdfProcessingStatus.CANCELLED
+
+
+def test_pdf_queue_conflict_rolls_back_file_state_change(tmp_path: Path) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "pdf-queue-conflict.sqlite3")
+    repository.initialize()
+    now = "2026-08-14T00:00:00+00:00"
+    file = _existing_pdf_file("file_queue_conflict", now)
+    repository.create_pdf_file(file)
+    first_task = _queued_pdf_task("task_queue_first", file.file_id, now)
+    repository.create_pdf_upload_task(first_task)
+
+    with pytest.raises(ActiveUploadTaskConflictError):
+        repository.queue_pdf_upload_task_for_existing_file(
+            _queued_pdf_task("task_queue_second", file.file_id, now),
+            status_detail="This update must roll back.",
+            mark_summary_stale=False,
+        )
+
+    unchanged_file = repository.get_pdf_file(file.file_id)
+    assert unchanged_file is not None
+    assert unchanged_file.processing_status == PdfProcessingStatus.READY
+    assert unchanged_file.status_detail == "Ready before queue attempt."
+
+
+def _existing_pdf_file(file_id: str, now: str) -> PdfFile:
+    return PdfFile(
+        file_id=file_id,
+        user_id="user_admin",
+        parent_id=None,
+        display_name=f"{file_id}.pdf",
+        original_filename=f"{file_id}.pdf",
+        kind=PdfFileKind.PDF,
+        size_bytes=100,
+        storage_path=f"pdf-knowledge/files/{file_id}/{file_id}.pdf",
+        status=PdfFileStatus.ACTIVE,
+        visibility=PdfFileVisibility.VISIBLE,
+        processing_status=PdfProcessingStatus.READY,
+        progress=100,
+        status_detail="Ready before queue attempt.",
+        error_message=None,
+        page_count=1,
+        chunk_count=1,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _queued_pdf_task(task_id: str, file_id: str, now: str) -> PdfUploadTask:
+    return PdfUploadTask(
+        task_id=task_id,
+        user_id="user_admin",
+        file_id=file_id,
+        original_filename=f"{file_id}.pdf",
+        staging_path=f"pdf-knowledge/upload-tasks/{task_id}/{file_id}.pdf",
+        status=PdfUploadTaskStatus.QUEUED,
+        progress=5,
+        detail="Queued for test.",
+        error_message=None,
+        result={},
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_pdf_cleanup_job_can_only_be_claimed_and_completed_once(tmp_path: Path) -> None:
+    database_path = tmp_path / "cleanup.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    repository.initialize()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO pdf_file_cleanup_jobs
+              (
+                job_id, file_id, relative_path, status, attempt_count,
+                error_message, created_at, updated_at, completed_at
+              )
+            VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, NULL)
+            """,
+            (
+                "cleanup_once",
+                "file_deleted",
+                "pdf-knowledge/files/file_deleted",
+                "2026-08-14T00:00:00+00:00",
+                "2026-08-14T00:00:00+00:00",
+            ),
+        )
+
+    def claim(worker_index: int):
+        return repository.claim_pdf_file_cleanup_job(
+            job_id="cleanup_once",
+            worker_id=f"cleanup_worker_{worker_index}",
+            claim_token=f"cleanup_claim_{worker_index}",
+            claimed_at="2026-08-14T00:01:00+00:00",
+            lease_expires_at="2026-08-14T01:00:00+00:00",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claims = [job for job in executor.map(claim, range(2)) if job is not None]
+
+    assert len(claims) == 1
+    claimed = claims[0]
+    assert repository.complete_pdf_file_cleanup_job(
+        job_id=claimed.job_id,
+        worker_id="wrong_worker",
+        claim_token=claimed.claim_token or "",
+        completed_at="2026-08-14T00:02:00+00:00",
+    ) is None
+    completed = repository.complete_pdf_file_cleanup_job(
+        job_id=claimed.job_id,
+        worker_id=claimed.worker_id or "",
+        claim_token=claimed.claim_token or "",
+        completed_at="2026-08-14T00:02:00+00:00",
+    )
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.attempt_count == 1
 
 
 def test_repository_creates_raw_row_mapping_pagination_index(tmp_path: Path) -> None:

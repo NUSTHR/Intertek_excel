@@ -7,6 +7,7 @@ from app.adapters.repositories.sqlite.health import SQLiteRuntimeInspection
 from app.application.operational.worker_status import WorkerRuntimeStatus
 from app.core.config import Settings
 from app.ports.pdf_parser import PdfParserRuntimeStatus
+from app.ports.pdf_vector_index import PdfVectorQueueInspection
 
 CHECK_OK = "ok"
 CHECK_WARNING = "warning"
@@ -49,12 +50,16 @@ class ReadinessService:
         mineru_inspector: Callable[[], PdfParserRuntimeStatus],
         workers: dict[str, WorkerReadinessProbe],
         disk_probe: DiskRuntimeProbe | None = None,
+        vector_queue_inspector: Callable[[], PdfVectorQueueInspection] | None = None,
+        vector_store_inspector: Callable[[], None] | None = None,
     ) -> None:
         self._settings = settings
         self._sqlite_inspector = sqlite_inspector
         self._mineru_inspector = mineru_inspector
         self._workers = workers
         self._disk_probe = disk_probe or DiskRuntimeProbe(settings.storage_root)
+        self._vector_queue_inspector = vector_queue_inspector
+        self._vector_store_inspector = vector_store_inspector
 
     def inspect(self) -> ReadinessResult:
         checks: dict[str, ReadinessCheck] = {}
@@ -80,6 +85,25 @@ class ReadinessService:
                     "worker_probe_failed",
                     metadata={"enabled": probe.enabled},
                 )
+        if self._settings.pdf_vector_indexing_active:
+            try:
+                checks["pdf_vector_store"] = self._inspect_vector_store()
+            except Exception:
+                checks["pdf_vector_store"] = ReadinessCheck(
+                    status=(
+                        CHECK_UNAVAILABLE
+                        if self._settings.pdf_vector_ranking_active
+                        else CHECK_WARNING
+                    ),
+                    required=self._settings.pdf_vector_ranking_active,
+                    message="vector_store_probe_failed",
+                )
+            try:
+                checks["pdf_vector_queue"] = self._inspect_vector_queue()
+            except Exception:
+                checks["pdf_vector_queue"] = _failed_probe(
+                    "vector_queue_probe_failed"
+                )
 
         required_failure = any(
             check.required and check.status == CHECK_UNAVAILABLE
@@ -88,6 +112,48 @@ class ReadinessService:
         has_warning = any(check.status == CHECK_WARNING for check in checks.values())
         status = "not_ready" if required_failure else "degraded" if has_warning else "ready"
         return ReadinessResult(status=status, checks=checks)
+
+    def _inspect_vector_store(self) -> ReadinessCheck:
+        if self._vector_store_inspector is None:
+            raise RuntimeError("PDF vector store inspector is not configured")
+        self._vector_store_inspector()
+        return ReadinessCheck(
+            status=CHECK_OK,
+            required=self._settings.pdf_vector_ranking_active,
+        )
+
+    def _inspect_vector_queue(self) -> ReadinessCheck:
+        if self._vector_queue_inspector is None:
+            raise RuntimeError("PDF vector queue inspector is not configured")
+        inspection = self._vector_queue_inspector()
+        metadata: dict[str, str | int | float | bool | None] = {
+            "pending_count": inspection.pending_count,
+            "running_count": inspection.running_count,
+            "retry_wait_count": inspection.retry_wait_count,
+            "dead_letter_count": inspection.dead_letter_count,
+            "expired_running_count": inspection.expired_running_count,
+            "due_retry_count": inspection.due_retry_count,
+            "oldest_active_at": inspection.oldest_active_at,
+        }
+        if inspection.expired_running_count or inspection.due_retry_count:
+            return ReadinessCheck(
+                status=CHECK_WARNING,
+                required=True,
+                message="vector_queue_recovery_pending",
+                metadata=metadata,
+            )
+        if inspection.dead_letter_count:
+            return ReadinessCheck(
+                status=CHECK_WARNING,
+                required=True,
+                message="vector_queue_contains_dead_letters",
+                metadata=metadata,
+            )
+        return ReadinessCheck(
+            status=CHECK_OK,
+            required=True,
+            metadata=metadata,
+        )
 
     def _inspect_disk(self, checks: dict[str, ReadinessCheck]) -> None:
         inspection = self._disk_probe.inspect()

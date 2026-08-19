@@ -29,6 +29,7 @@ from app.application.pdf_knowledge.chat_scope import (
     PdfChatScopeResolver,
     is_visible_ready_pdf,
 )
+from app.application.pdf_knowledge.document_ranking import PdfDocumentRankingService
 from app.application.pdf_knowledge.model_settings import (
     PdfModelSelection,
     pdf_model_selection,
@@ -39,6 +40,7 @@ from app.application.pdf_knowledge.models import (
 from app.core.errors import (
     AssetNotFoundError,
     ChatSessionRevisionConflict,
+    PdfRankingIncomplete,
     UploadValidationError,
 )
 from app.core.ids import new_id
@@ -75,10 +77,12 @@ class PdfChatService:
         llm_client: PdfChatLlmClient,
         sessions: PdfChatRepository,
         policy: PdfChatPolicy = DEFAULT_PDF_CHAT_POLICY,
+        document_ranking: PdfDocumentRankingService | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._sessions = sessions
         self._policy = policy
+        self._document_ranking = document_ranking
         self._scope_resolver = PdfChatScopeResolver(sessions)
         self._routing_catalog = PdfRoutingCatalogBuilder(
             repository=sessions,
@@ -547,7 +551,7 @@ class PdfChatService:
             selected_documents = self._llm_client.route_pdf_documents(
                 question=question,
                 summaries=summaries,
-                max_documents=self._policy.max_routed_documents,
+                max_documents=len(summaries),
                 user_questions=[turn.question for turn in existing_turns] + [question],
                 attached_documents=[
                     attached_pdf_to_routing_document(document)
@@ -563,7 +567,20 @@ class PdfChatService:
             selected_documents,
             user_role=user_role,
             allowed_file_ids=candidate_file_ids,
+            enforce_final_limit=False,
         )
+        if len(selected_documents) > self._policy.max_routed_documents:
+            if self._document_ranking is None:
+                raise PdfRankingIncomplete(
+                    "more than four routed PDFs require vector ranking, but it is unavailable"
+                )
+            selected_documents = list(
+                self._document_ranking.select(
+                    question=question,
+                    router_documents=selected_documents,
+                    cancellation_checker=self._cancellation_checker(cancellation_token),
+                ).documents
+            )
         self._raise_if_cancelled(cancellation_token)
         newly_attached, planned_attachments = self._plan_new_documents(
             session_id=session.session_id,
@@ -951,7 +968,11 @@ class PdfChatService:
             [
                 chunk_payload(
                     item,
-                    max_characters=self._policy.max_single_chunk_characters,
+                    max_characters=(
+                        None
+                        if self._policy.full_document_context
+                        else self._policy.max_single_chunk_characters
+                    ),
                 )
                 for item in allocation.chunks
             ],
@@ -1011,6 +1032,7 @@ class PdfChatService:
         *,
         user_role: UserRole,
         allowed_file_ids: list[str] | None = None,
+        enforce_final_limit: bool = True,
     ) -> list[SelectedDocument]:
         filtered: list[SelectedDocument] = []
         seen: set[str] = set()
@@ -1042,6 +1064,8 @@ class PdfChatService:
                     confidence=document.confidence,
                 )
             )
+        if not enforce_final_limit:
+            return filtered
         return filtered[: self._policy.max_routed_documents]
 
     def _filter_attached_documents_by_scope(

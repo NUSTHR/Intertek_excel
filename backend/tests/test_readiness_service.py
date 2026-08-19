@@ -10,6 +10,7 @@ from app.application.operational.readiness import (
 from app.application.operational.worker_status import WorkerRuntimeStatus
 from app.core.config import Settings
 from app.ports.pdf_parser import PdfParserRuntimeStatus
+from app.ports.pdf_vector_index import PdfVectorQueueInspection
 
 
 class _DiskProbe:
@@ -125,6 +126,30 @@ def test_readiness_contains_core_probe_failures(tmp_path: Path) -> None:
     assert result.checks["mineru"].message == "mineru_probe_failed"
 
 
+def test_readiness_reports_vector_dead_letters_as_degraded(tmp_path: Path) -> None:
+    service = _service(
+        tmp_path,
+        vector_enabled=True,
+        vector_queue_inspector=lambda: PdfVectorQueueInspection(
+            pending_count=1,
+            running_count=0,
+            retry_wait_count=0,
+            dead_letter_count=2,
+            expired_running_count=0,
+            due_retry_count=0,
+            oldest_active_at="2026-08-14T00:00:00+00:00",
+        ),
+    )
+
+    result = service.inspect()
+
+    assert result.status == "degraded"
+    assert result.checks["pdf_vector_queue"].message == (
+        "vector_queue_contains_dead_letters"
+    )
+    assert result.checks["pdf_vector_queue"].metadata["dead_letter_count"] == 2
+
+
 def _service(
     tmp_path: Path,
     *,
@@ -134,6 +159,8 @@ def _service(
     disk_inspection: DiskRuntimeInspection | None = None,
     sqlite_inspector=None,
     mineru_inspector=None,
+    vector_enabled: bool = False,
+    vector_queue_inspector=None,
 ) -> ReadinessService:
     settings = Settings(
         _env_file=None,
@@ -143,6 +170,7 @@ def _service(
         readiness_disk_critical_free_bytes=10,
         readiness_disk_warning_free_percent=10,
         readiness_disk_critical_free_percent=3,
+        pdf_vector_search_enabled=vector_enabled,
     )
     resolved_schema = schema or _schema()
     resolved_workers = workers or {
@@ -180,6 +208,8 @@ def _service(
                 free_percent=50.0,
             )
         ),
+        vector_queue_inspector=vector_queue_inspector,
+        vector_store_inspector=(lambda: None) if vector_enabled else None,
     )
 
 

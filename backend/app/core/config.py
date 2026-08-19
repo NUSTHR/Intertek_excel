@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     volcengine_ark_summary_model: str = DEFAULT_VOLCENGINE_ARK_SUMMARY_MODEL
     volcengine_ark_router_model: str = DEFAULT_VOLCENGINE_ARK_ROUTER_MODEL
     volcengine_ark_answer_model: str = DEFAULT_VOLCENGINE_ARK_ANSWER_MODEL
-    llm_request_timeout_seconds: float = 60.0
+    llm_request_timeout_seconds: float = 120.0
     llm_summary_max_profile_rows: int = 10
     llm_answer_max_rows: int = 20_000
     maintenance_interval_seconds: float = 300.0
@@ -70,6 +71,43 @@ class Settings(BaseSettings):
     pdf_summary_task_worker_enabled: bool = True
     pdf_summary_task_worker_poll_interval_seconds: float = 0.5
     pdf_summary_task_stale_running_minutes: int = 60
+    # Deprecated compatibility switch. New deployments must use the independent
+    # indexing/ranking switches so projections can be backfilled before serving.
+    pdf_vector_search_enabled: bool | None = None
+    pdf_vector_indexing_enabled: bool | None = None
+    pdf_vector_ranking_enabled: bool | None = None
+    pdf_vector_worker_poll_interval_seconds: float = 1.0
+    pdf_vector_worker_lease_seconds: float = 900.0
+    pdf_vector_worker_max_attempts: int = 20
+    pdf_vector_worker_retry_max_seconds: int = 900
+    pdf_vector_reconciliation_interval_seconds: float = 60.0
+    pdf_vector_reconciliation_batch_size: int = 100
+    pdf_answer_max_context_chunks: int = 160
+    pdf_answer_max_context_characters: int = 120_000
+    pdf_answer_max_context_tokens: int = 30_000
+    pdf_embedding_api_base_url: str = ""
+    pdf_embedding_api_key: str = ""
+    pdf_embedding_model: str = "Qwen/Qwen3-Embedding-8B"
+    pdf_embedding_revision: str = (
+        "siliconflow-qwen3-embedding-8b-d4096-query-v1-doc-v1"
+    )
+    pdf_embedding_dimension: int = 4096
+    pdf_embedding_batch_size: int = 16
+    pdf_document_chunk_max_characters: int = 12_000
+    pdf_embedding_timeout_seconds: float = 120.0
+    pdf_reranker_api_base_url: str = ""
+    pdf_reranker_api_key: str = ""
+    pdf_reranker_model: str = "Qwen/Qwen3-Reranker-8B"
+    pdf_reranker_revision: str = "siliconflow-qwen3-reranker-8b-v1"
+    pdf_reranker_timeout_seconds: float = 120.0
+    pdf_reranker_batch_size: int = 16
+    pdf_reranker_max_document_characters: int = 24_000
+    pdf_reranker_max_batch_characters: int = 120_000
+    pdf_qdrant_api_base_url: str = "http://127.0.0.1:6333"
+    pdf_qdrant_api_key: str = ""
+    pdf_qdrant_collection: str = "pdf_chunks_qwen3_4096_v1"
+    pdf_qdrant_timeout_seconds: float = 30.0
+    pdf_qdrant_auto_bootstrap: bool | None = None
     pdf_parser_backend: str = "fake"
     mineru_command: str = "mineru"
     mineru_timeout_seconds: float = 300.0
@@ -155,7 +193,65 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.app_env.strip().lower() in {"prod", "production"}
 
+    @property
+    def pdf_vector_indexing_active(self) -> bool:
+        if self.pdf_vector_indexing_enabled is not None:
+            return self.pdf_vector_indexing_enabled
+        return bool(self.pdf_vector_search_enabled)
+
+    @property
+    def pdf_vector_ranking_active(self) -> bool:
+        if self.pdf_vector_ranking_enabled is not None:
+            return self.pdf_vector_ranking_enabled
+        return bool(self.pdf_vector_search_enabled)
+
+    @property
+    def pdf_embedding_resolved_api_base_url(self) -> str:
+        return self.pdf_embedding_api_base_url.strip() or self.llm_api_base_url.strip()
+
+    @property
+    def pdf_embedding_resolved_api_key(self) -> str:
+        return self.pdf_embedding_api_key.strip() or self.llm_api_key.strip()
+
+    @property
+    def pdf_reranker_resolved_api_base_url(self) -> str:
+        return self.pdf_reranker_api_base_url.strip() or self.llm_api_base_url.strip()
+
+    @property
+    def pdf_reranker_resolved_api_key(self) -> str:
+        return self.pdf_reranker_api_key.strip() or self.llm_api_key.strip()
+
+    @property
+    def pdf_qdrant_auto_bootstrap_active(self) -> bool:
+        if self.pdf_qdrant_auto_bootstrap is not None:
+            return self.pdf_qdrant_auto_bootstrap
+        return not self.is_production
+
     def validate_runtime_safety(self) -> None:
+        context_limits = {
+            "PDF_ANSWER_MAX_CONTEXT_CHUNKS": self.pdf_answer_max_context_chunks,
+            "PDF_ANSWER_MAX_CONTEXT_CHARACTERS": (
+                self.pdf_answer_max_context_characters
+            ),
+            "PDF_ANSWER_MAX_CONTEXT_TOKENS": self.pdf_answer_max_context_tokens,
+        }
+        invalid_context_limits = [
+            name for name, value in context_limits.items() if value < 1
+        ]
+        if invalid_context_limits:
+            raise RuntimeError(
+                "invalid PDF answer context configuration: "
+                + "; ".join(
+                    f"{name} must be positive" for name in invalid_context_limits
+                )
+            )
+        if self.pdf_vector_indexing_active or self.pdf_vector_ranking_active:
+            vector_errors = self._vector_configuration_errors()
+            if vector_errors:
+                raise RuntimeError(
+                    "invalid PDF vector configuration: "
+                    + "; ".join(vector_errors)
+                )
         if not self.is_production:
             return
 
@@ -228,6 +324,96 @@ class Settings(BaseSettings):
         if errors:
             details = "; ".join(errors)
             raise RuntimeError(f"unsafe production configuration: {details}")
+
+    def _vector_configuration_errors(self) -> list[str]:
+        errors: list[str] = []
+        if self.pdf_vector_ranking_active and not self.pdf_vector_indexing_active:
+            errors.append(
+                "PDF_VECTOR_RANKING_ENABLED requires PDF_VECTOR_INDEXING_ENABLED"
+            )
+        required_values = {
+            "PDF_EMBEDDING_API_BASE_URL": self.pdf_embedding_resolved_api_base_url,
+            "PDF_EMBEDDING_MODEL": self.pdf_embedding_model,
+            "PDF_EMBEDDING_REVISION": self.pdf_embedding_revision,
+            "PDF_QDRANT_API_BASE_URL": self.pdf_qdrant_api_base_url,
+            "PDF_QDRANT_COLLECTION": self.pdf_qdrant_collection,
+        }
+        if self.pdf_vector_ranking_active:
+            required_values.update(
+                {
+                    "PDF_RERANKER_API_BASE_URL": (
+                        self.pdf_reranker_resolved_api_base_url
+                    ),
+                    "PDF_RERANKER_MODEL": self.pdf_reranker_model,
+                    "PDF_RERANKER_REVISION": self.pdf_reranker_revision,
+                }
+            )
+        errors.extend(
+            f"{name} is required"
+            for name, value in required_values.items()
+            if not value.strip()
+        )
+        if self.pdf_embedding_dimension < 1:
+            errors.append("PDF_EMBEDDING_DIMENSION must be positive")
+        if self.pdf_embedding_batch_size < 1:
+            errors.append("PDF_EMBEDDING_BATCH_SIZE must be positive")
+        if self.pdf_document_chunk_max_characters < 1:
+            errors.append("PDF_DOCUMENT_CHUNK_MAX_CHARACTERS must be positive")
+        if self.pdf_reranker_batch_size < 1:
+            errors.append("PDF_RERANKER_BATCH_SIZE must be positive")
+        if self.pdf_reranker_max_document_characters < 1:
+            errors.append("PDF_RERANKER_MAX_DOCUMENT_CHARACTERS must be positive")
+        if self.pdf_reranker_max_batch_characters < 1:
+            errors.append("PDF_RERANKER_MAX_BATCH_CHARACTERS must be positive")
+        if (
+            self.pdf_reranker_max_batch_characters
+            < self.pdf_reranker_max_document_characters
+        ):
+            errors.append(
+                "PDF_RERANKER_MAX_BATCH_CHARACTERS must be at least "
+                "PDF_RERANKER_MAX_DOCUMENT_CHARACTERS"
+            )
+        for name, timeout_seconds in {
+            "PDF_EMBEDDING_TIMEOUT_SECONDS": self.pdf_embedding_timeout_seconds,
+            "PDF_RERANKER_TIMEOUT_SECONDS": self.pdf_reranker_timeout_seconds,
+            "PDF_QDRANT_TIMEOUT_SECONDS": self.pdf_qdrant_timeout_seconds,
+        }.items():
+            if timeout_seconds <= 0:
+                errors.append(f"{name} must be positive")
+        if self.pdf_vector_worker_lease_seconds < 5:
+            errors.append("PDF_VECTOR_WORKER_LEASE_SECONDS must be at least 5")
+        if self.pdf_vector_worker_max_attempts < 1:
+            errors.append("PDF_VECTOR_WORKER_MAX_ATTEMPTS must be positive")
+        if self.pdf_vector_worker_retry_max_seconds < 1:
+            errors.append("PDF_VECTOR_WORKER_RETRY_MAX_SECONDS must be positive")
+        if self.pdf_vector_reconciliation_interval_seconds < 5:
+            errors.append(
+                "PDF_VECTOR_RECONCILIATION_INTERVAL_SECONDS must be at least 5"
+            )
+        if self.pdf_vector_reconciliation_batch_size < 1:
+            errors.append("PDF_VECTOR_RECONCILIATION_BATCH_SIZE must be positive")
+        if self.is_production:
+            if not self.pdf_embedding_resolved_api_key:
+                errors.append("PDF embedding requires an API key in production")
+            if (
+                self.pdf_vector_ranking_active
+                and not self.pdf_reranker_resolved_api_key
+            ):
+                errors.append("PDF reranker requires an API key in production")
+            if self.pdf_qdrant_auto_bootstrap_active:
+                errors.append("PDF_QDRANT_AUTO_BOOTSTRAP must be false in production")
+            qdrant_url = urlparse(self.pdf_qdrant_api_base_url.strip())
+            qdrant_is_loopback = qdrant_url.hostname in {
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            }
+            if not qdrant_is_loopback:
+                if qdrant_url.scheme != "https":
+                    errors.append("remote Qdrant must use HTTPS in production")
+                if not self.pdf_qdrant_api_key.strip():
+                    errors.append("remote Qdrant requires an API key in production")
+        return errors
 
     @staticmethod
     def _split_csv(value: str) -> list[str]:

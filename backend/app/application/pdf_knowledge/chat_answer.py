@@ -216,7 +216,7 @@ def pdf_answer_from_chat_turn(turn: ChatTurn) -> PdfChatAnswer:
 def chunk_payload(
     item: PdfGroundingChunk,
     *,
-    max_characters: int,
+    max_characters: int | None,
 ) -> dict[str, object]:
     chunk = item.chunk
     return {
@@ -228,7 +228,7 @@ def chunk_payload(
         "token_count": chunk.token_count,
         "page_label": chunk.page_label,
         "title": chunk.title,
-        "text": chunk.text[:max_characters],
+        "text": chunk.text if max_characters is None else chunk.text[:max_characters],
         "excerpt": item.excerpt,
     }
 

@@ -80,7 +80,21 @@ DEEP_THINKING_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
     DEEPSEEK_PROVIDER: DEEPSEEK_OFFICIAL_LLM_MODELS,
 }
 
+# Some SiliconFlow models expose the thinking switch but are intentionally not
+# offered as user-selectable deep-thinking models. We still send an explicit
+# false value for deterministic JSON stages because the provider default may be
+# thinking-enabled and exhaust the bounded routing output budget.
+THINKING_TOGGLE_MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
+    SILICONFLOW_PROVIDER: (
+        "Pro/deepseek-ai/DeepSeek-V3.2",
+        "Qwen/Qwen3.6-27B",
+        "Qwen/Qwen3.6-35B-A3B",
+    ),
+    DEEPSEEK_PROVIDER: DEEPSEEK_OFFICIAL_LLM_MODELS,
+}
+
 JSON_RESPONSE_FORMAT_PROVIDERS: tuple[str, ...] = (
+    SILICONFLOW_PROVIDER,
     DEEPSEEK_PROVIDER,
 )
 
@@ -127,7 +141,7 @@ def supports_json_response_format(provider: str) -> bool:
 
 def thinking_request_style(provider: str, model: str) -> ThinkingRequestStyle | None:
     provider_id = normalize_llm_provider(provider)
-    if not supports_deep_thinking(provider_id, model):
+    if model not in THINKING_TOGGLE_MODELS_BY_PROVIDER.get(provider_id, ()):
         return None
     return THINKING_REQUEST_STYLE_BY_PROVIDER.get(provider_id)
 

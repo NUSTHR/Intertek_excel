@@ -1167,4 +1167,453 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=31,
+        name="enforce_one_active_pdf_upload_task_per_file",
+        statements=(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pdf_upload_tasks_one_active_file
+              ON pdf_upload_tasks(file_id)
+              WHERE file_id IS NOT NULL AND status IN ('queued', 'processing')
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=32,
+        name="enforce_unique_active_pdf_sibling_names",
+        statements=(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pdf_files_unique_active_sibling_name
+              ON pdf_files(user_id, COALESCE(parent_id, ''), display_name)
+              WHERE status = 'active'
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=33,
+        name="add_upload_task_claim_fencing",
+        statements=(
+            """
+            ALTER TABLE excel_upload_tasks ADD COLUMN claim_token TEXT
+            """,
+            """
+            ALTER TABLE excel_upload_tasks ADD COLUMN lease_expires_at TEXT
+            """,
+            """
+            ALTER TABLE excel_upload_tasks ADD COLUMN heartbeat_at TEXT
+            """,
+            """
+            ALTER TABLE excel_upload_tasks
+              ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_excel_upload_tasks_active_lease
+              ON excel_upload_tasks(status, lease_expires_at)
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks ADD COLUMN claim_token TEXT
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks ADD COLUMN lease_expires_at TEXT
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks ADD COLUMN heartbeat_at TEXT
+            """,
+            """
+            ALTER TABLE pdf_upload_tasks
+              ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_upload_tasks_active_lease
+              ON pdf_upload_tasks(status, lease_expires_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=34,
+        name="add_pdf_cleanup_job_claim_fencing",
+        statements=(
+            """
+            ALTER TABLE pdf_file_cleanup_jobs ADD COLUMN worker_id TEXT
+            """,
+            """
+            ALTER TABLE pdf_file_cleanup_jobs ADD COLUMN claim_token TEXT
+            """,
+            """
+            ALTER TABLE pdf_file_cleanup_jobs ADD COLUMN lease_expires_at TEXT
+            """,
+            """
+            ALTER TABLE pdf_file_cleanup_jobs ADD COLUMN heartbeat_at TEXT
+            """,
+            """
+            ALTER TABLE pdf_file_cleanup_jobs
+              ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            DROP INDEX IF EXISTS idx_pdf_cleanup_job_path_active
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pdf_cleanup_job_path_active
+              ON pdf_file_cleanup_jobs(relative_path)
+              WHERE status IN ('pending', 'processing', 'failed')
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_cleanup_jobs_active_lease
+              ON pdf_file_cleanup_jobs(status, lease_expires_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=35,
+        name="reconcile_historical_deleted_pdf_content",
+        statements=(
+            """
+            INSERT OR IGNORE INTO pdf_file_cleanup_jobs
+              (
+                job_id, file_id, relative_path, status, attempt_count,
+                error_message, created_at, updated_at, completed_at
+              )
+            SELECT
+              'pdfcleanup_backfill_' || file_id,
+              file_id,
+              'pdf-knowledge/files/' || file_id,
+              'pending',
+              0,
+              NULL,
+              COALESCE(deleted_at, updated_at, created_at),
+              COALESCE(deleted_at, updated_at, created_at),
+              NULL
+            FROM pdf_files
+            WHERE status = 'deleted' AND storage_path IS NOT NULL
+            """,
+            """
+            DELETE FROM pdf_chat_session_documents
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_document_chunks
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_preview_blocks
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_schema_items
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_document_tags
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_parse_pages
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_parse_artifacts
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_parse_reports
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+            """
+            DELETE FROM pdf_document_summaries
+            WHERE file_id IN (SELECT file_id FROM pdf_files WHERE status = 'deleted')
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=36,
+        name="add_pdf_vector_index_state_and_tasks",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_vector_indexes (
+              file_id TEXT PRIMARY KEY,
+              source_fingerprint TEXT NOT NULL,
+              embedding_revision TEXT NOT NULL,
+              embedding_dimension INTEGER NOT NULL CHECK(embedding_dimension > 0),
+              status TEXT NOT NULL
+                CHECK(status IN ('pending', 'running', 'ready', 'failed')),
+              expected_chunk_count INTEGER NOT NULL
+                CHECK(expected_chunk_count >= 0),
+              indexed_chunk_count INTEGER NOT NULL DEFAULT 0
+                CHECK(indexed_chunk_count >= 0),
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              ready_at TEXT,
+              state_revision INTEGER NOT NULL DEFAULT 0,
+              FOREIGN KEY(file_id) REFERENCES pdf_files(file_id),
+              CHECK(status != 'ready' OR indexed_chunk_count = expected_chunk_count)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_vector_indexes_status_updated
+              ON pdf_vector_indexes(status, updated_at)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pdf_vector_index_tasks (
+              task_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              action TEXT NOT NULL CHECK(action IN ('index', 'delete')),
+              source_fingerprint TEXT NOT NULL,
+              embedding_revision TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(
+                status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')
+              ),
+              attempt_count INTEGER NOT NULL DEFAULT 0
+                CHECK(attempt_count >= 0),
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT,
+              worker_id TEXT,
+              claim_token TEXT,
+              lease_expires_at TEXT,
+              heartbeat_at TEXT,
+              state_revision INTEGER NOT NULL DEFAULT 0
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pdf_vector_tasks_one_active_file
+              ON pdf_vector_index_tasks(file_id)
+              WHERE status IN ('pending', 'running', 'failed')
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_vector_tasks_claim_order
+              ON pdf_vector_index_tasks(status, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_vector_tasks_active_lease
+              ON pdf_vector_index_tasks(status, lease_expires_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=37,
+        name="add_pdf_vector_task_retry_schedule",
+        statements=(
+            """
+            ALTER TABLE pdf_vector_index_tasks ADD COLUMN next_attempt_at TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_pdf_vector_tasks_retry_schedule
+              ON pdf_vector_index_tasks(status, next_attempt_at, created_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=38,
+        name="harden_pdf_vector_task_lifecycle",
+        statements=(
+            """
+            DROP INDEX IF EXISTS idx_pdf_vector_tasks_one_active_file
+            """,
+            """
+            DROP INDEX IF EXISTS idx_pdf_vector_tasks_claim_order
+            """,
+            """
+            DROP INDEX IF EXISTS idx_pdf_vector_tasks_active_lease
+            """,
+            """
+            DROP INDEX IF EXISTS idx_pdf_vector_tasks_retry_schedule
+            """,
+            """
+            ALTER TABLE pdf_vector_index_tasks
+              RENAME TO pdf_vector_index_tasks_legacy
+            """,
+            """
+            CREATE TABLE pdf_vector_index_tasks (
+              task_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              action TEXT NOT NULL CHECK(action IN ('index', 'delete')),
+              source_fingerprint TEXT NOT NULL,
+              embedding_revision TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(
+                status IN (
+                  'pending', 'running', 'retry_wait', 'succeeded',
+                  'dead_letter', 'cancelled'
+                )
+              ),
+              attempt_count INTEGER NOT NULL DEFAULT 0
+                CHECK(attempt_count >= 0),
+              error_message TEXT,
+              error_code TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT,
+              worker_id TEXT,
+              claim_token TEXT,
+              lease_expires_at TEXT,
+              heartbeat_at TEXT,
+              next_attempt_at TEXT,
+              parent_task_id TEXT,
+              state_revision INTEGER NOT NULL DEFAULT 0,
+              CHECK(
+                (status = 'pending'
+                  AND started_at IS NULL
+                  AND finished_at IS NULL
+                  AND worker_id IS NULL
+                  AND claim_token IS NULL
+                  AND lease_expires_at IS NULL
+                  AND heartbeat_at IS NULL
+                  AND next_attempt_at IS NULL)
+                OR
+                (status = 'running'
+                  AND started_at IS NOT NULL
+                  AND finished_at IS NULL
+                  AND worker_id IS NOT NULL
+                  AND claim_token IS NOT NULL
+                  AND lease_expires_at IS NOT NULL
+                  AND heartbeat_at IS NOT NULL
+                  AND next_attempt_at IS NULL)
+                OR
+                (status = 'retry_wait'
+                  AND started_at IS NOT NULL
+                  AND finished_at IS NULL
+                  AND worker_id IS NULL
+                  AND claim_token IS NULL
+                  AND lease_expires_at IS NULL
+                  AND heartbeat_at IS NULL
+                  AND next_attempt_at IS NOT NULL)
+                OR
+                (status IN ('succeeded', 'dead_letter', 'cancelled')
+                  AND finished_at IS NOT NULL
+                  AND worker_id IS NULL
+                  AND claim_token IS NULL
+                  AND lease_expires_at IS NULL
+                  AND heartbeat_at IS NULL
+                  AND next_attempt_at IS NULL)
+              )
+            )
+            """,
+            """
+            INSERT INTO pdf_vector_index_tasks (
+              task_id, file_id, action, source_fingerprint, embedding_revision,
+              status, attempt_count, error_message, error_code, created_at,
+              updated_at, started_at, finished_at, worker_id, claim_token,
+              lease_expires_at, heartbeat_at, next_attempt_at, parent_task_id,
+              state_revision
+            )
+            SELECT
+              task_id,
+              file_id,
+              action,
+              source_fingerprint,
+              embedding_revision,
+              CASE
+                WHEN status = 'failed' AND attempt_count < 10 THEN 'retry_wait'
+                WHEN status = 'failed' THEN 'dead_letter'
+                ELSE status
+              END,
+              attempt_count,
+              error_message,
+              CASE
+                WHEN status = 'failed' AND attempt_count < 10
+                  THEN 'LEGACY_RETRYABLE_FAILURE'
+                WHEN status = 'failed' THEN 'LEGACY_RETRY_EXHAUSTED'
+                ELSE NULL
+              END,
+              created_at,
+              updated_at,
+              CASE WHEN status = 'pending' THEN NULL ELSE started_at END,
+              CASE
+                WHEN status IN ('succeeded', 'cancelled')
+                  OR (status = 'failed' AND attempt_count >= 10)
+                  THEN COALESCE(finished_at, updated_at)
+                ELSE NULL
+              END,
+              CASE WHEN status = 'running' THEN worker_id ELSE NULL END,
+              CASE WHEN status = 'running' THEN claim_token ELSE NULL END,
+              CASE WHEN status = 'running' THEN lease_expires_at ELSE NULL END,
+              CASE WHEN status = 'running' THEN heartbeat_at ELSE NULL END,
+              CASE
+                WHEN status = 'failed' AND attempt_count < 10
+                  THEN COALESCE(next_attempt_at, updated_at)
+                ELSE NULL
+              END,
+              NULL,
+              state_revision
+            FROM pdf_vector_index_tasks_legacy
+            """,
+            """
+            DROP TABLE pdf_vector_index_tasks_legacy
+            """,
+            """
+            CREATE UNIQUE INDEX idx_pdf_vector_tasks_one_active_file
+              ON pdf_vector_index_tasks(file_id)
+              WHERE status IN ('pending', 'running', 'retry_wait')
+            """,
+            """
+            CREATE INDEX idx_pdf_vector_tasks_claim_order
+              ON pdf_vector_index_tasks(status, created_at)
+            """,
+            """
+            CREATE INDEX idx_pdf_vector_tasks_active_lease
+              ON pdf_vector_index_tasks(status, lease_expires_at)
+            """,
+            """
+            CREATE INDEX idx_pdf_vector_tasks_retry_schedule
+              ON pdf_vector_index_tasks(status, next_attempt_at, created_at)
+            """,
+            """
+            CREATE INDEX idx_pdf_vector_tasks_parent
+              ON pdf_vector_index_tasks(parent_task_id)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=39,
+        name="add_pdf_vector_projection_generations",
+        statements=(
+            """
+            ALTER TABLE pdf_vector_indexes
+              ADD COLUMN generation INTEGER NOT NULL DEFAULT 1
+              CHECK(generation > 0)
+            """,
+            """
+            ALTER TABLE pdf_vector_index_tasks
+              ADD COLUMN generation INTEGER NOT NULL DEFAULT 1
+              CHECK(generation > 0)
+            """,
+            """
+            CREATE TABLE pdf_vector_projection_epochs (
+              file_id TEXT PRIMARY KEY,
+              current_generation INTEGER NOT NULL CHECK(current_generation > 0),
+              tombstoned INTEGER NOT NULL DEFAULT 0 CHECK(tombstoned IN (0, 1)),
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            INSERT INTO pdf_vector_projection_epochs (
+              file_id, current_generation, tombstoned, updated_at
+            )
+            SELECT
+              source.file_id,
+              1,
+              CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM pdf_files AS file
+                  WHERE file.file_id = source.file_id AND file.status = 'deleted'
+                ) THEN 1
+                ELSE 0
+              END,
+              MAX(source.updated_at)
+            FROM (
+              SELECT file_id, updated_at FROM pdf_vector_indexes
+              UNION ALL
+              SELECT file_id, updated_at FROM pdf_vector_index_tasks
+            ) AS source
+            GROUP BY source.file_id
+            """,
+            """
+            CREATE INDEX idx_pdf_vector_epochs_tombstone
+              ON pdf_vector_projection_epochs(tombstoned, updated_at)
+            """,
+        ),
+    ),
 )
