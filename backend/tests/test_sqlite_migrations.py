@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 from app.adapters.repositories import sqlite_repository
-from app.adapters.repositories.sqlite.migrations import SQLiteMigrationRunner
+from app.adapters.repositories.sqlite.migrations import (
+    SQLiteMigrationPreflightError,
+    SQLiteMigrationRunner,
+)
 from app.adapters.repositories.sqlite.schema import SchemaMigration
 from app.adapters.repositories.sqlite_repository import SQLiteExcelAssetRepository
 from app.core.config import Settings
@@ -93,6 +96,116 @@ def test_schema_migration_failure_rolls_back_all_ddl(tmp_path: Path) -> None:
 
     assert "partial_table" not in tables
     assert "schema_migrations" not in tables
+
+
+def test_migration_preflight_reports_duplicate_active_pdf_upload_tasks(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "duplicate-upload-tasks.sqlite3"
+    legacy_runner = SQLiteMigrationRunner(
+        [
+            migration
+            for migration in sqlite_repository.SCHEMA_MIGRATIONS
+            if migration.version <= 30
+        ]
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        legacy_runner.initialize_schema(connection)
+    repository = SQLiteExcelAssetRepository(database_path)
+    now = "2026-08-19T00:00:00+00:00"
+    file = _existing_pdf_file("file_duplicate_tasks", now)
+    repository.create_pdf_file(file)
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO pdf_upload_tasks (
+              task_id, user_id, file_id, original_filename, staging_path,
+              status, progress, detail, error_message, result_json,
+              created_at, updated_at, stage, parser_backend, retry_count
+            )
+            VALUES (?, 'user_admin', ?, 'duplicate.pdf', 'staging/duplicate.pdf',
+                    'queued', 5, 'Queued for test.', NULL, '{}', ?, ?,
+                    'queued', 'fake', 0)
+            """,
+            (
+                ("task_duplicate_a", file.file_id, now, now),
+                ("task_duplicate_b", file.file_id, now, now),
+            ),
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        runner = SQLiteMigrationRunner(sqlite_repository.SCHEMA_MIGRATIONS)
+        conflicts = runner.inspect_pending_data_conflicts(connection)
+        assert len(conflicts) == 1
+        assert conflicts[0].migration_version == 31
+        assert conflicts[0].code == "duplicate_active_pdf_upload_tasks"
+        assert conflicts[0].key == {"file_id": file.file_id}
+        assert conflicts[0].record_ids == ("task_duplicate_a", "task_duplicate_b")
+        with pytest.raises(SQLiteMigrationPreflightError) as error:
+            runner.initialize_schema(connection)
+
+    assert error.value.conflicts == conflicts
+    with sqlite3.connect(database_path) as connection:
+        applied_version = connection.execute(
+            "SELECT MAX(version) FROM schema_migrations"
+        ).fetchone()[0]
+    assert applied_version == 30
+
+
+def test_migration_preflight_reports_duplicate_active_pdf_sibling_names(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "duplicate-sibling-names.sqlite3"
+    legacy_runner = SQLiteMigrationRunner(
+        [
+            migration
+            for migration in sqlite_repository.SCHEMA_MIGRATIONS
+            if migration.version <= 31
+        ]
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        legacy_runner.initialize_schema(connection)
+    repository = SQLiteExcelAssetRepository(database_path)
+    now = "2026-08-19T00:00:00+00:00"
+    repository.create_pdf_file(_existing_pdf_file("file_duplicate_name_a", now))
+    repository.create_pdf_file(_existing_pdf_file("file_duplicate_name_b", now))
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE pdf_files
+            SET display_name = 'duplicate.pdf'
+            WHERE file_id IN ('file_duplicate_name_a', 'file_duplicate_name_b')
+            """
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        runner = SQLiteMigrationRunner(sqlite_repository.SCHEMA_MIGRATIONS)
+        conflicts = runner.inspect_pending_data_conflicts(connection)
+        assert len(conflicts) == 1
+        assert conflicts[0].migration_version == 32
+        assert conflicts[0].code == "duplicate_active_pdf_sibling_names"
+        assert conflicts[0].key == {
+            "user_id": "user_admin",
+            "parent_id": "",
+            "display_name": "duplicate.pdf",
+        }
+        assert conflicts[0].record_ids == (
+            "file_duplicate_name_a",
+            "file_duplicate_name_b",
+        )
+        with pytest.raises(SQLiteMigrationPreflightError) as error:
+            runner.initialize_schema(connection)
+
+    assert error.value.conflicts == conflicts
+    with sqlite3.connect(database_path) as connection:
+        applied_version = connection.execute(
+            "SELECT MAX(version) FROM schema_migrations"
+        ).fetchone()[0]
+    assert applied_version == 31
 
 
 def test_deleted_pdf_reconciliation_migration_purges_content_and_queues_cleanup(
@@ -1306,6 +1419,42 @@ def test_all_repository_schema_migrations_have_unique_versions() -> None:
     assert len(versions) == len(set(versions))
 
 
+def test_archive_retention_migration_backfills_legacy_null_deadline(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy-archive.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    repository.initialize()
+    repository.create_file(
+        ExcelFile(
+            file_id="file_legacy_archive",
+            display_name="archived:file_legacy_archive:legacy.xlsx",
+            active_version_id=None,
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-02T00:00:00+00:00",
+        )
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE excel_files
+            SET status = 'archived', deleted_at = updated_at,
+                archived_display_name = 'legacy.xlsx', purge_after = NULL
+            WHERE file_id = 'file_legacy_archive'
+            """
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 42")
+
+    repository.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        purge_after = connection.execute(
+            "SELECT purge_after FROM excel_files WHERE file_id = 'file_legacy_archive'"
+        ).fetchone()[0]
+    assert isinstance(purge_after, str)
+    assert purge_after.endswith("+00:00")
+
+
 def test_removed_legacy_chat_rows_setting_is_ignored() -> None:
     settings = Settings(_env_file=None, llm_chat_rows_per_sheet=999)
 
@@ -1347,7 +1496,6 @@ def test_production_settings_accept_explicit_safe_runtime_values() -> None:
         _env_file=None,
         app_env="production",
         app_cors_origins="https://excel.example.com",
-        auth_admin_password="safe-admin-password",
         auth_expose_reset_token=False,
         auth_cookie_secure=True,
         llm_api_key="siliconflow-key",

@@ -4,7 +4,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from app.core.errors import FileNameConflictError, UploadValidationError
+from app.core.errors import UploadValidationError
 from app.core.ids import new_id
 from app.domain.models import (
     PdfFile,
@@ -12,11 +12,11 @@ from app.domain.models import (
     PdfFileStatus,
     PdfFileVisibility,
     PdfProcessingStatus,
+    PdfUploadRecord,
     PdfUploadTask,
     PdfUploadTaskStage,
     PdfUploadTaskStatus,
 )
-from app.ports.repository import PdfKnowledgeRepository
 
 SUPPORTED_EXTENSIONS = {".pdf"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -39,10 +39,8 @@ class PdfUploadRecordBuilder:
     def __init__(
         self,
         *,
-        repository: PdfKnowledgeRepository,
         storage_root: Path,
     ) -> None:
-        self._repository = repository
         self._storage_root = storage_root.expanduser().resolve()
         self._files_root = (self._storage_root / "pdf-knowledge" / "files").resolve()
         self._staging_root = (self._storage_root / "pdf-knowledge" / "upload-tasks").resolve()
@@ -62,27 +60,11 @@ class PdfUploadRecordBuilder:
         created_at: str,
         batch_id: str | None,
         parser_backend: str,
-    ) -> tuple[PdfFile, PdfUploadTask]:
+    ) -> PdfUploadRecord:
         self.validate_upload(original_filename, content)
         file_id = new_id("pdf")
         task_id = new_id("pdfupload")
         sanitized_path = self._sanitize_relative_path(relative_path or original_filename)
-        resolved_parent_id = self._ensure_folder_hierarchy(
-            user_id=user_id,
-            path_parts=sanitized_path.parts[:-1],
-            parent_id=parent_id,
-            created_at=created_at,
-        )
-        existing_file = self._repository.find_pdf_file_by_parent_and_name(
-            user_id=user_id,
-            parent_id=resolved_parent_id,
-            display_name=sanitized_path.name,
-        )
-        if existing_file is not None:
-            raise FileNameConflictError(
-                display_name=sanitized_path.name,
-                file_id=existing_file.file_id,
-            )
         try:
             staging_path = self.write_staging_file(task_id, original_filename, content)
             storage_path = self._store_original_file(file_id, original_filename, content)
@@ -93,7 +75,7 @@ class PdfUploadRecordBuilder:
         file = PdfFile(
             file_id=file_id,
             user_id=user_id,
-            parent_id=resolved_parent_id,
+            parent_id=parent_id,
             display_name=sanitized_path.name,
             original_filename=Path(original_filename).name,
             kind=PdfFileKind.PDF,
@@ -127,7 +109,11 @@ class PdfUploadRecordBuilder:
             parser_backend=parser_backend,
             batch_id=batch_id,
         )
-        return file, task
+        return PdfUploadRecord(
+            file=file,
+            task=task,
+            folder_names=tuple(sanitized_path.parts[:-1]),
+        )
 
     def validate_upload(self, filename: str, content: bytes) -> None:
         if not filename.strip():
@@ -169,9 +155,9 @@ class PdfUploadRecordBuilder:
     def delete_staging_task(self, task_id: str) -> None:
         self._delete_managed_tree(self._staging_root, task_id)
 
-    def delete_upload_records(self, file: PdfFile, task: PdfUploadTask) -> None:
-        self._delete_managed_tree(self._staging_root, task.task_id)
-        self._delete_managed_tree(self._files_root, file.file_id)
+    def delete_upload_record(self, record: PdfUploadRecord) -> None:
+        self._delete_managed_tree(self._staging_root, record.task.task_id)
+        self._delete_managed_tree(self._files_root, record.file.file_id)
 
     def stored_file_path(self, storage_path: str) -> Path:
         path = Path(storage_path).expanduser()
@@ -190,25 +176,6 @@ class PdfUploadRecordBuilder:
         if not resolved_path.is_relative_to(self._storage_root):
             raise UploadValidationError("PDF storage path is invalid")
         return resolved_path.relative_to(self._storage_root).as_posix()
-
-    def _ensure_folder_hierarchy(
-        self,
-        *,
-        user_id: str,
-        path_parts: tuple[str, ...],
-        parent_id: str | None,
-        created_at: str,
-    ) -> str | None:
-        resolved_parent_id = parent_id
-        for part in path_parts:
-            folder = self._repository.get_or_create_pdf_folder(
-                user_id=user_id,
-                parent_id=resolved_parent_id,
-                display_name=part,
-                created_at=created_at,
-            )
-            resolved_parent_id = folder.file_id
-        return resolved_parent_id
 
     def _sanitize_relative_path(self, value: str) -> Path:
         normalized = value.replace("\\", "/")

@@ -89,6 +89,14 @@ class FileDeleteConfirmationRequiredError(ExcelWorkspaceError):
         self.file_id = file_id
 
 
+class ExcelFileLifecycleConflict(ExcelWorkspaceError):
+    code = "EXCEL_FILE_LIFECYCLE_CONFLICT"
+
+    def __init__(self, detail: str, *, file_id: str) -> None:
+        self.file_id = file_id
+        super().__init__(detail)
+
+
 class InvalidLlmModelError(ExcelWorkspaceError):
     def __init__(self, stage: str, model: str) -> None:
         super().__init__(f"unsupported {stage} model '{model}'")

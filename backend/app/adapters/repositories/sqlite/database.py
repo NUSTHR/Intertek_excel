@@ -59,6 +59,7 @@ class SQLiteDatabase:
             f"PRAGMA busy_timeout = {self.connection_policy.busy_timeout_ms}"
         )
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA secure_delete = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.execute(

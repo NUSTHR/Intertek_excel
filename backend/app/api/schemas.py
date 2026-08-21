@@ -146,6 +146,15 @@ class SetExcelFileVisibilityRequest(BaseModel):
     visible_to_members: bool
 
 
+class RestoreExcelFileRequest(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class PurgeExcelFileRequest(BaseModel):
+    confirmation_display_name: str = Field(min_length=1, max_length=255)
+    force: bool = False
+
+
 class ExcelFileResponse(BaseModel):
     file_id: str
     display_name: str
@@ -288,6 +297,17 @@ class ListExcelFilesResponse(BaseModel):
     files: list[ExcelFileResponse] = Field(default_factory=list)
 
 
+class ArchivedExcelFileResponse(BaseModel):
+    file_id: str
+    display_name: str
+    archived_at: str
+    purge_eligible_at: str
+
+
+class ListArchivedExcelFilesResponse(BaseModel):
+    files: list[ArchivedExcelFileResponse] = Field(default_factory=list)
+
+
 class ListExcelVersionsResponse(BaseModel):
     versions: list[ExcelFileVersionResponse] = Field(default_factory=list)
 
@@ -305,15 +325,24 @@ class ActiveExcelFileResponse(BaseModel):
     version: ExcelFileVersionResponse
 
 
-class DeleteExcelFileResponse(BaseModel):
+class ArchiveExcelFileResponse(BaseModel):
     file_id: str
     display_name: str
-    deleted_versions: int
-    deleted_sheets: int
-    deleted_artifacts: int
-    deleted_row_mappings: int
-    deleted_summaries: int
-    deleted_chat_session_documents: int
+    disposition: str
+    data_retained: bool
+    archived_at: str
+    purge_eligible_at: str
+
+
+class PurgeExcelFileResponse(BaseModel):
+    file_id: str
+    job_id: str
+    status: str
+    attempt_count: int
+    deleted_counts: dict[str, int] = Field(default_factory=dict)
+    error_message: str | None = None
+    requested_at: str
+    completed_at: str | None = None
 
 
 class SheetPreviewResponse(BaseModel):

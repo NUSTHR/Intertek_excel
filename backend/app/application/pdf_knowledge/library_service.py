@@ -1,6 +1,5 @@
 import shutil
 import uuid
-from dataclasses import replace
 from pathlib import Path
 
 from app.application.operational.task_lease import task_lease_window
@@ -8,7 +7,6 @@ from app.application.pdf_knowledge.models import DeletePdfFileResult
 from app.core.errors import (
     AssetNotFoundError,
     FileDeleteConfirmationRequiredError,
-    FileNameConflictError,
     UploadValidationError,
 )
 from app.core.ids import new_id
@@ -65,32 +63,13 @@ class PdfLibraryService:
     ) -> PdfFile:
         file = self.get_file(file_id, user_role=user_role)
         normalized_name = self._normalize_display_name(display_name)
-        existing_file = self._repository.find_pdf_file_by_parent_and_name(
-            user_id=file.user_id,
-            parent_id=file.parent_id,
-            display_name=normalized_name,
-        )
-        if existing_file is not None and existing_file.file_id != file.file_id:
-            raise FileNameConflictError(
-                display_name=normalized_name,
-                file_id=existing_file.file_id,
-            )
-        updated_file = self._repository.update_pdf_file_display_name(
+        updated_file = self._repository.rename_pdf_file_and_summary(
             file_id=file.file_id,
             display_name=normalized_name,
             updated_at=utc_now_iso(),
         )
         if updated_file is None:
             raise AssetNotFoundError("PDF file was not found")
-        detail = self._repository.get_pdf_document_detail(updated_file.file_id)
-        if detail is not None and detail.summary.status != "empty":
-            self._repository.save_pdf_document_summary(
-                replace(
-                    detail.summary,
-                    document_title=updated_file.display_name,
-                    updated_at=updated_file.updated_at,
-                )
-            )
         return updated_file
 
     def set_file_visibility(

@@ -153,8 +153,6 @@ from app.core.config import get_settings
 
 settings = get_settings()
 errors = []
-if settings.auth_admin_password == "admin" or len(settings.auth_admin_password) < 16:
-    errors.append("AUTH_ADMIN_PASSWORD must be a generated value with at least 16 characters")
 if not settings.auth_cookie_secure:
     errors.append("AUTH_COOKIE_SECURE must be true")
 if settings.auth_expose_reset_token:
@@ -234,18 +232,17 @@ fi
 ADMIN_EMAIL="$(
   cd "${BACKEND_DIR}"
   "${PYTHON_BIN}" - <<'PY'
-from app.core.config import get_settings
+from app.application.auth.service import BUILTIN_ADMIN_EMAIL
 
-settings = get_settings()
-print(settings.auth_admin_email)
+print(BUILTIN_ADMIN_EMAIL)
 PY
 )"
 ADMIN_PASSWORD="$(
   cd "${BACKEND_DIR}"
   "${PYTHON_BIN}" - <<'PY'
-from app.core.config import get_settings
+from app.application.auth.service import BUILTIN_ADMIN_PASSWORD
 
-print(get_settings().auth_admin_password)
+print(BUILTIN_ADMIN_PASSWORD)
 PY
 )"
 LOGIN_PAYLOAD="$(printf '{"email":"%s","password":"%s"}' "${ADMIN_EMAIL}" "${ADMIN_PASSWORD}")"

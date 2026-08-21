@@ -12,7 +12,11 @@ class ExcelVersionStatus(StrEnum):
 
 class ExcelFileStatus(StrEnum):
     ACTIVE = "active"
-    DELETED = "deleted"
+    ARCHIVED = "archived"
+    PURGE_PENDING = "purge_pending"
+    PURGED = "purged"
+    # Source compatibility for callers using the former soft-delete name.
+    DELETED = "archived"
 
 
 class ExcelFileVisibility(StrEnum):
@@ -150,6 +154,9 @@ class ExcelFile:
     status: ExcelFileStatus = ExcelFileStatus.ACTIVE
     deleted_at: str | None = None
     visibility: ExcelFileVisibility = ExcelFileVisibility.VISIBLE
+    archived_display_name: str | None = None
+    archived_active_version_id: str | None = None
+    purge_after: str | None = None
 
 
 @dataclass(frozen=True)
@@ -321,6 +328,13 @@ class PdfUploadTask:
 
 
 @dataclass(frozen=True)
+class PdfUploadRecord:
+    file: PdfFile
+    task: PdfUploadTask
+    folder_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PdfSummaryTask:
     task_id: str
     user_id: str
@@ -380,6 +394,26 @@ class PdfFileCleanupJob:
     relative_path: str
     status: str
     attempt_count: int
+    error_message: str | None
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
+    worker_id: str | None = None
+    claim_token: str | None = None
+    lease_expires_at: str | None = None
+    heartbeat_at: str | None = None
+    state_revision: int = 0
+
+
+@dataclass(frozen=True)
+class ExcelFilePurgeJob:
+    job_id: str
+    file_id: str
+    relative_path: str
+    status: str
+    attempt_count: int
+    requested_by: str
+    counts: dict[str, int]
     error_message: str | None
     created_at: str
     updated_at: str
@@ -648,6 +682,9 @@ class PdfChatRouteResult:
     request_id: str | None = None
     context_file_ids: list[str] = field(default_factory=list)
     session_revision: int = 0
+    routing_candidates: list[SelectedDocument] = field(default_factory=list)
+    selection_mode: str = "router_only"
+    ranking_revision: str | None = None
 
 
 @dataclass(frozen=True)

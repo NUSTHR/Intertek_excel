@@ -1343,7 +1343,7 @@ async function confirmDeleteFile(): Promise<void> {
     }
     showOperationFeedback(
       'success',
-      `${result.display_name} removed from file management.`,
+      `${result.display_name} archived. Its data and historical chat evidence are retained.`,
       3600,
     )
   } catch (error: unknown) {

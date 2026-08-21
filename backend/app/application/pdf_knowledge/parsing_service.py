@@ -176,6 +176,8 @@ class PdfParsingService:
         if completed_task is None:
             self._delete_task_artifact_tree(task)
             completed_task = self._repository.get_pdf_upload_task(task.task_id) or task
+        else:
+            self._cleanup_unreferenced_terminal_task_artifacts_safely(task.file_id)
         self._refresh_batch_safely(completed_task.batch_id)
         return completed_task
 
@@ -335,6 +337,7 @@ class PdfParsingService:
             self._repository.save_pdf_parse_report(report)
             self._repository.replace_pdf_parse_pages(task.file_id, report.pages)
             self._repository.replace_pdf_parse_artifacts(task.file_id, report.artifacts)
+            self._delete_task_artifact_tree(persisted)
             self._refresh_batch_safely(task.batch_id)
         return failed_count
 
@@ -506,3 +509,74 @@ class PdfParsingService:
         ).resolve()
         if target.parent == expected_parent and target.name == task.claim_token:
             shutil.rmtree(target, ignore_errors=True)
+
+    def _cleanup_unreferenced_terminal_task_artifacts(self, file_id: str) -> int:
+        task_artifacts_root = (
+            self._files_root / file_id / "task-artifacts"
+        ).resolve()
+        expected_file_root = (self._files_root / file_id).resolve()
+        if (
+            task_artifacts_root.parent != expected_file_root
+            or not task_artifacts_root.is_dir()
+            or task_artifacts_root.is_symlink()
+        ):
+            return 0
+        referenced_paths: list[Path] = []
+        for artifact in self._repository.list_pdf_parse_artifacts(file_id):
+            if not artifact.path:
+                continue
+            try:
+                referenced_paths.append(
+                    self._upload_records.stored_file_path(artifact.path)
+                )
+            except UploadValidationError:
+                logger.warning(
+                    "Ignoring unsafe PDF parse artifact reference during cleanup",
+                    extra={"file_id": file_id, "artifact_id": artifact.artifact_id},
+                )
+        deleted = 0
+        for task_root in task_artifacts_root.iterdir():
+            if not task_root.is_dir() or task_root.is_symlink():
+                continue
+            task = self._repository.get_pdf_upload_task(task_root.name)
+            if (
+                task is None
+                or task.file_id != file_id
+                or task.status
+                in {PdfUploadTaskStatus.QUEUED, PdfUploadTaskStatus.PROCESSING}
+            ):
+                continue
+            for claim_root in task_root.iterdir():
+                resolved_claim_root = claim_root.resolve()
+                if (
+                    not claim_root.is_dir()
+                    or claim_root.is_symlink()
+                    or resolved_claim_root.parent != task_root.resolve()
+                ):
+                    continue
+                if any(
+                    path == resolved_claim_root or path.is_relative_to(resolved_claim_root)
+                    for path in referenced_paths
+                ):
+                    continue
+                shutil.rmtree(resolved_claim_root)
+                deleted += 1
+            try:
+                task_root.rmdir()
+            except OSError:
+                pass
+        try:
+            task_artifacts_root.rmdir()
+        except OSError:
+            pass
+        return deleted
+
+    def _cleanup_unreferenced_terminal_task_artifacts_safely(self, file_id: str) -> None:
+        try:
+            self._cleanup_unreferenced_terminal_task_artifacts(file_id)
+        except Exception:
+            logger.warning(
+                "Failed to clean unreferenced PDF task artifacts",
+                extra={"file_id": file_id},
+                exc_info=True,
+            )

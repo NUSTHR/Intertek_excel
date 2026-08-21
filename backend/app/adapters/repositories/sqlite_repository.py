@@ -1,4 +1,5 @@
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from app.adapters.repositories.sqlite.auth import SQLiteAuthRepository
@@ -64,6 +65,7 @@ from app.domain.models import (
     ExcelArtifactType,
     ExcelCitation,
     ExcelFile,
+    ExcelFilePurgeJob,
     ExcelFileStatus,
     ExcelFileVersion,
     ExcelFileVisibility,
@@ -98,6 +100,7 @@ from app.domain.models import (
     PdfSummaryTaskStatus,
     PdfUploadBatch,
     PdfUploadBatchStatus,
+    PdfUploadRecord,
     PdfUploadTask,
     PdfUploadTaskStage,
     PdfUploadTaskStatus,
@@ -108,6 +111,10 @@ from app.domain.models import (
     SelectedDocument,
     SheetSummary,
     UserAccount,
+)
+from app.domain.pdf_upload_batch import (
+    is_terminal_batch_status,
+    upload_batch_rollup,
 )
 
 
@@ -331,6 +338,18 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
             ).fetchall()
         return [file for row in rows if (file := self._to_file(row)) is not None]
 
+    def list_archived_files(self) -> list[ExcelFile]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM excel_files
+                WHERE status = ?
+                ORDER BY deleted_at DESC, file_id ASC
+                """,
+                (ExcelFileStatus.ARCHIVED.value,),
+            ).fetchall()
+        return [file for row in rows if (file := self._to_file(row)) is not None]
+
     def update_file_display_name(
         self,
         file_id: str,
@@ -388,31 +407,29 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
             ).fetchone()
         return self._to_file(row)
 
-    def delete_file(self, file_id: str) -> dict[str, int]:
+    def archive_file(
+        self,
+        *,
+        file_id: str,
+        archived_at: str,
+        purge_after: str,
+    ) -> bool:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT display_name FROM excel_files
+                SELECT display_name, active_version_id FROM excel_files
                 WHERE file_id = ? AND status = ?
                 """,
                 (file_id, ExcelFileStatus.ACTIVE.value),
             ).fetchone()
             if row is None:
-                return {
-                    "deleted_versions": 0,
-                    "deleted_sheets": 0,
-                    "deleted_artifacts": 0,
-                    "deleted_row_mappings": 0,
-                    "deleted_summaries": 0,
-                    "deleted_chat_session_documents": 0,
-                }
+                return False
 
-            deleted_at = utc_now_iso()
-            archived_display_name = self._deleted_file_display_name(
+            archived_display_name = self._archived_file_display_name(
                 file_id=file_id,
                 display_name=str(row["display_name"]),
             )
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE excel_files
                 SET
@@ -420,27 +437,489 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
                   active_version_id = NULL,
                   status = ?,
                   deleted_at = ?,
-                  updated_at = ?
+                  updated_at = ?,
+                  archived_display_name = ?,
+                  archived_active_version_id = ?,
+                  purge_after = ?
                 WHERE file_id = ? AND status = ?
                 """,
                 (
                     archived_display_name,
-                    ExcelFileStatus.DELETED.value,
-                    deleted_at,
-                    deleted_at,
+                    ExcelFileStatus.ARCHIVED.value,
+                    archived_at,
+                    archived_at,
+                    str(row["display_name"]),
+                    row["active_version_id"],
+                    purge_after,
                     file_id,
                     ExcelFileStatus.ACTIVE.value,
                 ),
             )
+        return cursor.rowcount == 1
 
-        return {
-            "deleted_versions": 0,
-            "deleted_sheets": 0,
-            "deleted_artifacts": 0,
-            "deleted_row_mappings": 0,
-            "deleted_summaries": 0,
-            "deleted_chat_session_documents": 0,
-        }
+    def restore_archived_file(
+        self,
+        *,
+        file_id: str,
+        display_name: str,
+        restored_at: str,
+    ) -> ExcelFile | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_files
+                SET
+                  display_name = ?,
+                  active_version_id = archived_active_version_id,
+                  status = ?,
+                  deleted_at = NULL,
+                  updated_at = ?,
+                  archived_display_name = NULL,
+                  archived_active_version_id = NULL,
+                  purge_after = NULL
+                WHERE file_id = ?
+                  AND status = ?
+                  AND archived_active_version_id IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1
+                    FROM excel_file_versions AS archived_version
+                    WHERE archived_version.version_id = excel_files.archived_active_version_id
+                      AND archived_version.file_id = excel_files.file_id
+                      AND archived_version.status = ?
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM excel_files AS conflict
+                    WHERE conflict.display_name = ?
+                      AND conflict.file_id <> excel_files.file_id
+                      AND conflict.status = ?
+                  )
+                RETURNING *
+                """,
+                (
+                    display_name,
+                    ExcelFileStatus.ACTIVE.value,
+                    restored_at,
+                    file_id,
+                    ExcelFileStatus.ARCHIVED.value,
+                    ExcelVersionStatus.READY.value,
+                    display_name,
+                    ExcelFileStatus.ACTIVE.value,
+                ),
+            )
+            row = cursor.fetchone()
+        return self._to_file(row)
+
+    def request_excel_file_purge(
+        self,
+        *,
+        file_id: str,
+        requested_by: str,
+        requested_at: str,
+        allow_before_retention: bool,
+    ) -> ExcelFilePurgeJob | None:
+        with self._connect() as connection:
+            file_row = connection.execute(
+                "SELECT * FROM excel_files WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+            if file_row is None:
+                return None
+            status = str(file_row["status"])
+            if status in {
+                ExcelFileStatus.PURGE_PENDING.value,
+                ExcelFileStatus.PURGED.value,
+            }:
+                row = connection.execute(
+                    """
+                    SELECT * FROM excel_file_purge_jobs
+                    WHERE file_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (file_id,),
+                ).fetchone()
+                return self._to_excel_file_purge_job(row)
+            if status != ExcelFileStatus.ARCHIVED.value:
+                return None
+            purge_after = row_value(file_row, "purge_after")
+            if (
+                not allow_before_retention
+                and (not isinstance(purge_after, str) or purge_after > requested_at)
+            ):
+                return None
+
+            version_rows = connection.execute(
+                "SELECT version_id FROM excel_file_versions WHERE file_id = ?",
+                (file_id,),
+            ).fetchall()
+            version_ids = [str(row["version_id"]) for row in version_rows]
+            session_rows = connection.execute(
+                """
+                SELECT DISTINCT session_id
+                FROM (
+                  SELECT session_id
+                  FROM chat_session_documents
+                  WHERE file_id = ?
+                  UNION
+                  SELECT turn.session_id
+                  FROM chat_turns AS turn
+                  JOIN chat_sessions AS session
+                    ON session.session_id = turn.session_id
+                  WHERE session.workspace = ?
+                    AND (
+                      EXISTS (
+                        SELECT 1 FROM json_each(
+                          CASE WHEN json_valid(turn.selected_documents_json)
+                            THEN turn.selected_documents_json ELSE '[]' END
+                        ) AS selected
+                        WHERE json_extract(selected.value, '$.file_id') = ?
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM json_each(
+                          CASE WHEN json_valid(turn.newly_attached_documents_json)
+                            THEN turn.newly_attached_documents_json ELSE '[]' END
+                        ) AS newly_attached
+                        WHERE json_extract(newly_attached.value, '$.file_id') = ?
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM json_each(
+                          CASE WHEN json_valid(turn.attached_documents_json)
+                            THEN turn.attached_documents_json ELSE '[]' END
+                        ) AS attached
+                        WHERE json_extract(attached.value, '$.file_id') = ?
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM json_each(
+                          CASE WHEN json_valid(turn.citations_json)
+                            THEN turn.citations_json ELSE '[]' END
+                        ) AS citation
+                        WHERE json_extract(citation.value, '$.file_id') = ?
+                      )
+                    )
+                )
+                """,
+                (
+                    file_id,
+                    ChatWorkspace.EXCEL.value,
+                    file_id,
+                    file_id,
+                    file_id,
+                    file_id,
+                ),
+            ).fetchall()
+            session_ids = [str(row["session_id"]) for row in session_rows]
+            counts = {
+                "versions": len(version_ids),
+                "sheets": 0,
+                "artifacts": 0,
+                "row_mappings": 0,
+                "row_search_entries": 0,
+                "summaries": 0,
+                "chat_sessions": len(session_ids),
+            }
+            if version_ids:
+                placeholders = ",".join("?" for _version_id in version_ids)
+                for count_key, table_name in (
+                    ("sheets", "excel_sheets"),
+                    ("artifacts", "excel_artifacts"),
+                    ("row_mappings", "excel_row_mappings"),
+                    ("summaries", "document_summaries"),
+                ):
+                    counts[count_key] = int(
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {table_name} "
+                            f"WHERE version_id IN ({placeholders})",
+                            version_ids,
+                        ).fetchone()[0]
+                    )
+                counts["row_search_entries"] = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM excel_row_search_index "
+                        f"WHERE version_id IN ({placeholders})",
+                        version_ids,
+                    ).fetchone()[0]
+                )
+
+            job_id = new_id("excelpurge")
+            connection.execute(
+                """
+                INSERT INTO excel_file_purge_jobs
+                  (
+                    job_id, file_id, relative_path, status, attempt_count,
+                    requested_by, counts_json, error_message, created_at,
+                    updated_at, completed_at, worker_id, claim_token,
+                    lease_expires_at, heartbeat_at, state_revision
+                  )
+                VALUES (?, ?, ?, 'pending', 0, ?, ?, NULL, ?, ?, NULL,
+                        NULL, NULL, NULL, NULL, 0)
+                """,
+                (
+                    job_id,
+                    file_id,
+                    f"files/{file_id}",
+                    requested_by,
+                    dump_json(counts),
+                    requested_at,
+                    requested_at,
+                ),
+            )
+
+            if session_ids:
+                session_placeholders = ",".join("?" for _session_id in session_ids)
+                for table_name in (
+                    "chat_request_executions",
+                    "chat_turns",
+                    "chat_session_documents",
+                    "pdf_chat_session_documents",
+                ):
+                    connection.execute(
+                        f"DELETE FROM {table_name} "
+                        f"WHERE session_id IN ({session_placeholders})",
+                        session_ids,
+                    )
+                connection.execute(
+                    f"DELETE FROM chat_sessions "
+                    f"WHERE session_id IN ({session_placeholders}) "
+                    "AND workspace = ?",
+                    (*session_ids, ChatWorkspace.EXCEL.value),
+                )
+
+            if version_ids:
+                placeholders = ",".join("?" for _version_id in version_ids)
+                connection.execute(
+                    f"DELETE FROM excel_row_search_index "
+                    f"WHERE version_id IN ({placeholders})",
+                    version_ids,
+                )
+                summary_rows = connection.execute(
+                    f"SELECT summary_id FROM document_summaries "
+                    f"WHERE version_id IN ({placeholders})",
+                    version_ids,
+                ).fetchall()
+                summary_ids = [str(row["summary_id"]) for row in summary_rows]
+                if summary_ids:
+                    summary_placeholders = ",".join("?" for _summary_id in summary_ids)
+                    connection.execute(
+                        f"DELETE FROM document_sheet_summaries "
+                        f"WHERE summary_id IN ({summary_placeholders})",
+                        summary_ids,
+                    )
+                for table_name in (
+                    "excel_row_mappings",
+                    "excel_artifacts",
+                    "excel_sheets",
+                    "document_summaries",
+                ):
+                    connection.execute(
+                        f"DELETE FROM {table_name} "
+                        f"WHERE version_id IN ({placeholders})",
+                        version_ids,
+                    )
+                connection.execute(
+                    f"DELETE FROM excel_file_versions "
+                    f"WHERE version_id IN ({placeholders})",
+                    version_ids,
+                )
+            connection.execute(
+                """
+                UPDATE excel_upload_tasks
+                SET original_filename = 'purged', staging_path = '', result_json = '{}'
+                WHERE json_valid(result_json)
+                  AND json_extract(result_json, '$.file_id') = ?
+                """,
+                (file_id,),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE excel_files
+                SET
+                  display_name = ?,
+                  active_version_id = NULL,
+                  status = ?,
+                  updated_at = ?,
+                  archived_display_name = NULL,
+                  archived_active_version_id = NULL,
+                  purge_after = NULL
+                WHERE file_id = ? AND status = ?
+                """,
+                (
+                    f"purge-pending:{file_id}",
+                    ExcelFileStatus.PURGE_PENDING.value,
+                    requested_at,
+                    file_id,
+                    ExcelFileStatus.ARCHIVED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("failed to fence Excel file purge")
+            row = connection.execute(
+                "SELECT * FROM excel_file_purge_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._to_excel_file_purge_job(row)
+
+    def list_pending_excel_file_purge_jobs(
+        self,
+        *,
+        available_at: str,
+    ) -> list[ExcelFilePurgeJob]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM excel_file_purge_jobs
+                WHERE (
+                    status IN ('pending', 'failed')
+                    OR (
+                      status = 'processing'
+                      AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at < ?
+                    )
+                  )
+                ORDER BY created_at ASC
+                LIMIT 100
+                """,
+                (available_at,),
+            ).fetchall()
+        return [self._to_excel_file_purge_job(row) for row in rows]
+
+    def get_excel_file_purge_job(self, job_id: str) -> ExcelFilePurgeJob | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM excel_file_purge_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._to_excel_file_purge_job(row)
+
+    def claim_excel_file_purge_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> ExcelFilePurgeJob | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_file_purge_jobs
+                SET status = 'processing', worker_id = ?, claim_token = ?,
+                    lease_expires_at = ?, heartbeat_at = ?, updated_at = ?,
+                    state_revision = state_revision + 1
+                WHERE job_id = ?
+                  AND (
+                    status IN ('pending', 'failed')
+                    OR (status = 'processing' AND lease_expires_at < ?)
+                  )
+                """,
+                (
+                    worker_id,
+                    claim_token,
+                    lease_expires_at,
+                    claimed_at,
+                    claimed_at,
+                    job_id,
+                    claimed_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM excel_file_purge_jobs WHERE job_id = ? AND claim_token = ?",
+                (job_id, claim_token),
+            ).fetchone()
+        return self._to_excel_file_purge_job(row)
+
+    def complete_excel_file_purge_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        completed_at: str,
+    ) -> ExcelFilePurgeJob | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_file_purge_jobs
+                SET status = 'completed', attempt_count = attempt_count + 1,
+                    error_message = NULL, updated_at = ?, completed_at = ?,
+                    worker_id = NULL, claim_token = NULL, lease_expires_at = NULL,
+                    heartbeat_at = NULL, state_revision = state_revision + 1
+                WHERE job_id = ? AND status = 'processing'
+                  AND worker_id = ? AND claim_token = ?
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    completed_at,
+                    completed_at,
+                    job_id,
+                    worker_id,
+                    claim_token,
+                    completed_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            connection.execute(
+                """
+                UPDATE excel_files
+                SET display_name = 'purged:' || file_id,
+                    status = ?, updated_at = ?
+                WHERE file_id = (
+                  SELECT file_id FROM excel_file_purge_jobs WHERE job_id = ?
+                ) AND status = ?
+                """,
+                (
+                    ExcelFileStatus.PURGED.value,
+                    completed_at,
+                    job_id,
+                    ExcelFileStatus.PURGE_PENDING.value,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM excel_file_purge_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._to_excel_file_purge_job(row)
+
+    def fail_excel_file_purge_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        error_message: str,
+        failed_at: str,
+    ) -> ExcelFilePurgeJob | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE excel_file_purge_jobs
+                SET status = 'failed', attempt_count = attempt_count + 1,
+                    error_message = ?, updated_at = ?, worker_id = NULL,
+                    claim_token = NULL, lease_expires_at = NULL,
+                    heartbeat_at = NULL, state_revision = state_revision + 1
+                WHERE job_id = ? AND status = 'processing'
+                  AND worker_id = ? AND claim_token = ?
+                  AND lease_expires_at >= ?
+                """,
+                (
+                    error_message[:500],
+                    failed_at,
+                    job_id,
+                    worker_id,
+                    claim_token,
+                    failed_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM excel_file_purge_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._to_excel_file_purge_job(row)
 
     def create_version(self, version: ExcelFileVersion) -> None:
         with self._connect() as connection:
@@ -977,13 +1456,17 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
         with self._connect() as connection:
             self._insert_pdf_file(connection, file)
 
-    def create_pdf_upload(self, file: PdfFile, task: PdfUploadTask) -> None:
+    def create_pdf_upload(self, record: PdfUploadRecord) -> None:
+        resolved_files: list[PdfFile] = []
         try:
             with self._connect() as connection:
-                self._insert_pdf_file(connection, file)
-                self._insert_pdf_upload_task(connection, task)
+                self._begin_immediate(connection)
+                resolved_file = self._resolve_pdf_upload_parent(connection, record)
+                resolved_files.append(resolved_file)
+                self._insert_pdf_file(connection, resolved_file)
+                self._insert_pdf_upload_task(connection, record.task)
         except sqlite3.IntegrityError as exc:
-            self._raise_pdf_name_conflict([file], exc)
+            self._raise_pdf_name_conflict(resolved_files or [record.file], exc)
 
     def get_pdf_file(self, file_id: str) -> PdfFile | None:
         with self._connect() as connection:
@@ -1064,48 +1547,13 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
     ) -> PdfFile:
         with self._connect() as connection:
             self._begin_immediate(connection)
-            folder = self._get_pdf_folder_by_parent_and_name(
-                connection,
+            return self._get_or_create_pdf_folder_on_connection(
+                connection=connection,
                 user_id=user_id,
                 parent_id=parent_id,
                 display_name=display_name,
-            )
-            if folder is not None:
-                return folder
-            folder = PdfFile(
-                file_id=new_id("pdffolder"),
-                user_id=user_id,
-                parent_id=parent_id,
-                display_name=display_name,
-                original_filename=display_name,
-                kind=PdfFileKind.FOLDER,
-                size_bytes=0,
-                storage_path=None,
-                status=PdfFileStatus.ACTIVE,
-                visibility=PdfFileVisibility.VISIBLE,
-                processing_status=PdfProcessingStatus.READY,
-                progress=100,
-                status_detail="Folder indexed",
-                error_message=None,
-                page_count=None,
-                chunk_count=None,
                 created_at=created_at,
-                updated_at=created_at,
             )
-            connection.execute(
-                """
-                INSERT INTO pdf_files
-                  (
-                    file_id, user_id, parent_id, display_name, original_filename,
-                    kind, size_bytes, storage_path, status, visibility,
-                    processing_status, progress, status_detail, error_message,
-                    page_count, chunk_count, created_at, updated_at, deleted_at
-                  )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._pdf_file_values(folder),
-            )
-            return folder
 
     def list_pdf_files(self) -> list[PdfFile]:
         with self._connect() as connection:
@@ -1135,30 +1583,82 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
             ).fetchall()
         return [file for row in rows if (file := self._to_pdf_file(row)) is not None]
 
-    def update_pdf_file_display_name(
+    def rename_pdf_file_and_summary(
         self,
         file_id: str,
         display_name: str,
         updated_at: str,
     ) -> PdfFile | None:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE pdf_files
-                SET display_name = ?, updated_at = ?
-                WHERE file_id = ? AND status = ?
-                """,
-                (display_name, updated_at, file_id, PdfFileStatus.ACTIVE.value),
-            )
-            if cursor.rowcount == 0:
-                return None
-            row = connection.execute(
-                f"""
-                {PDF_FILE_WITH_PARSE_REPORT_SELECT}
-                WHERE f.file_id = ? AND f.status = ?
-                """,
-                (file_id, PdfFileStatus.ACTIVE.value),
-            ).fetchone()
+        current_file: PdfFile | None = None
+        try:
+            with self._connect() as connection:
+                self._begin_immediate(connection)
+                current_row = connection.execute(
+                    f"""
+                    {PDF_FILE_WITH_PARSE_REPORT_SELECT}
+                    WHERE f.file_id = ? AND f.status = ?
+                    """,
+                    (file_id, PdfFileStatus.ACTIVE.value),
+                ).fetchone()
+                current_file = self._to_pdf_file(current_row)
+                if current_file is None:
+                    return None
+                if current_file.display_name == display_name:
+                    return current_file
+                connection.execute(
+                    """
+                    UPDATE pdf_files
+                    SET display_name = ?, updated_at = ?
+                    WHERE file_id = ? AND status = ?
+                    """,
+                    (display_name, updated_at, file_id, PdfFileStatus.ACTIVE.value),
+                )
+                summary_row = connection.execute(
+                    "SELECT * FROM pdf_document_summaries WHERE file_id = ?",
+                    (file_id,),
+                ).fetchone()
+                summary = self._to_pdf_summary(summary_row)
+                if summary is not None:
+                    self._save_pdf_summary(
+                        connection,
+                        replace(
+                            summary,
+                            document_title=display_name,
+                            key_topics=_replace_pdf_filename_terms(
+                                summary.key_topics,
+                                old_name=current_file.display_name,
+                                new_name=display_name,
+                            ),
+                            positive_routing_terms=_replace_pdf_filename_terms(
+                                summary.positive_routing_terms,
+                                old_name=current_file.display_name,
+                                new_name=display_name,
+                                ensure_new_name=True,
+                            ),
+                            exact_identifiers=_replace_pdf_filename_terms(
+                                summary.exact_identifiers,
+                                old_name=current_file.display_name,
+                                new_name=display_name,
+                                ensure_new_name=True,
+                            ),
+                            updated_at=updated_at,
+                            source_updated_at=updated_at,
+                        ),
+                    )
+                row = connection.execute(
+                    f"""
+                    {PDF_FILE_WITH_PARSE_REPORT_SELECT}
+                    WHERE f.file_id = ? AND f.status = ?
+                    """,
+                    (file_id, PdfFileStatus.ACTIVE.value),
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            if current_file is not None:
+                self._raise_pdf_name_conflict(
+                    [replace(current_file, display_name=display_name)],
+                    exc,
+                )
+            raise
         return self._to_pdf_file(row)
 
     def update_pdf_file_processing(
@@ -1681,16 +2181,23 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
     def create_pdf_upload_batch_records(
         self,
         batch: PdfUploadBatch,
-        records: list[tuple[PdfFile, PdfUploadTask]],
+        records: list[PdfUploadRecord],
     ) -> None:
+        resolved_files: list[PdfFile] = []
         try:
             with self._connect() as connection:
+                self._begin_immediate(connection)
                 self._insert_pdf_upload_batch(connection, batch)
-                for file, task in records:
-                    self._insert_pdf_file(connection, file)
-                    self._insert_pdf_upload_task(connection, task)
+                for record in records:
+                    resolved_file = self._resolve_pdf_upload_parent(connection, record)
+                    resolved_files.append(resolved_file)
+                    self._insert_pdf_file(connection, resolved_file)
+                    self._insert_pdf_upload_task(connection, record.task)
         except sqlite3.IntegrityError as exc:
-            self._raise_pdf_name_conflict([file for file, _task in records], exc)
+            self._raise_pdf_name_conflict(
+                resolved_files or [record.file for record in records],
+                exc,
+            )
 
     def get_pdf_upload_batch(self, batch_id: str) -> PdfUploadBatch | None:
         with self._connect() as connection:
@@ -1713,29 +2220,62 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
             ).fetchall()
         return [batch for row in rows if (batch := self._to_pdf_upload_batch(row)) is not None]
 
-    def update_pdf_upload_batch_status(
+    def recompute_pdf_upload_batch(
         self,
         *,
         batch_id: str,
-        status: PdfUploadBatchStatus,
-        progress: int,
-        detail: str,
         updated_at: str,
-        completed_at: str | None = None,
-        error_message: str | None = None,
-        result: dict[str, object] | None = None,
     ) -> PdfUploadBatch | None:
         with self._connect() as connection:
-            cursor = connection.execute(
+            self._begin_immediate(connection)
+            batch_row = connection.execute(
+                "SELECT * FROM pdf_upload_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            batch = self._to_pdf_upload_batch(batch_row)
+            if batch is None:
+                return None
+            task_rows = connection.execute(
+                """
+                SELECT * FROM pdf_upload_tasks
+                WHERE batch_id = ?
+                ORDER BY created_at ASC, task_id ASC
+                """,
+                (batch_id,),
+            ).fetchall()
+            tasks = [
+                task
+                for row in task_rows
+                if (task := self._to_pdf_upload_task(row)) is not None
+            ]
+            status, progress, detail, error_message, result = upload_batch_rollup(
+                batch,
+                tasks,
+            )
+            effective_updated_at = max(batch.updated_at, updated_at)
+            completed_at: str | None = None
+            if is_terminal_batch_status(status):
+                latest_task_update = max(
+                    (task.updated_at for task in tasks),
+                    default=batch.updated_at,
+                )
+                if (
+                    batch.completed_at is not None
+                    and latest_task_update <= batch.completed_at
+                ):
+                    completed_at = batch.completed_at
+                else:
+                    completed_at = effective_updated_at
+            connection.execute(
                 """
                 UPDATE pdf_upload_batches
                 SET status = ?,
                     progress = ?,
                     detail = ?,
                     error_message = ?,
-                    result_json = COALESCE(?, result_json),
+                    result_json = ?,
                     updated_at = ?,
-                    completed_at = COALESCE(?, completed_at)
+                    completed_at = ?
                 WHERE batch_id = ?
                 """,
                 (
@@ -1743,14 +2283,12 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
                     progress,
                     detail,
                     error_message,
-                    dump_json(result) if result is not None else None,
-                    updated_at,
+                    dump_json(result),
+                    effective_updated_at,
                     completed_at,
                     batch_id,
                 ),
             )
-            if cursor.rowcount == 0:
-                return None
             row = connection.execute(
                 "SELECT * FROM pdf_upload_batches WHERE batch_id = ?",
                 (batch_id,),
@@ -4625,11 +5163,34 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
     def create_user(self, user: UserAccount) -> None:
         self._auth.create_user(user)
 
+    def create_user_with_session_if_email_available(
+        self,
+        user: UserAccount,
+        session: AuthSession,
+    ) -> bool:
+        return self._auth.create_user_with_session_if_email_available(user, session)
+
     def get_user(self, user_id: str) -> UserAccount | None:
         return self._auth.get_user(user_id)
 
     def get_user_by_email(self, email: str) -> UserAccount | None:
         return self._auth.get_user_by_email(email)
+
+    def ensure_builtin_admin(self, user: UserAccount) -> UserAccount:
+        return self._auth.ensure_builtin_admin(user)
+
+    def synchronize_builtin_admin(
+        self,
+        *,
+        user_id: str,
+        password_hash: str,
+        updated_at: str,
+    ) -> UserAccount | None:
+        return self._auth.synchronize_builtin_admin(
+            user_id=user_id,
+            password_hash=password_hash,
+            updated_at=updated_at,
+        )
 
     def update_user_password(
         self,
@@ -4657,18 +5218,20 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
     def create_password_reset_token(self, token: PasswordResetToken) -> None:
         self._auth.create_password_reset_token(token)
 
-    def get_password_reset_token_by_hash(
+    def consume_password_reset_token(
         self,
+        *,
         token_hash: str,
-    ) -> tuple[PasswordResetToken, UserAccount] | None:
-        return self._auth.get_password_reset_token_by_hash(token_hash)
-
-    def mark_password_reset_token_used(
-        self,
-        reset_token_id: str,
+        password_hash: str,
         used_at: str,
-    ) -> None:
-        self._auth.mark_password_reset_token_used(reset_token_id, used_at)
+        protected_email: str,
+    ) -> UserAccount | None:
+        return self._auth.consume_password_reset_token(
+            token_hash=token_hash,
+            password_hash=password_hash,
+            used_at=used_at,
+            protected_email=protected_email,
+        )
 
     def get_login_rate_limit_retry_after(
         self,
@@ -4779,6 +5342,86 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
             self._pdf_upload_task_values(task),
         )
 
+    def _resolve_pdf_upload_parent(
+        self,
+        connection: sqlite3.Connection,
+        record: PdfUploadRecord,
+    ) -> PdfFile:
+        parent_id = record.file.parent_id
+        for folder_name in record.folder_names:
+            folder = self._get_or_create_pdf_folder_on_connection(
+                connection=connection,
+                user_id=record.file.user_id,
+                parent_id=parent_id,
+                display_name=folder_name,
+                created_at=record.file.created_at,
+            )
+            parent_id = folder.file_id
+        return replace(record.file, parent_id=parent_id)
+
+    def _get_or_create_pdf_folder_on_connection(
+        self,
+        *,
+        connection: sqlite3.Connection,
+        user_id: str,
+        parent_id: str | None,
+        display_name: str,
+        created_at: str,
+    ) -> PdfFile:
+        folder = self._get_pdf_folder_by_parent_and_name(
+            connection,
+            user_id=user_id,
+            parent_id=parent_id,
+            display_name=display_name,
+        )
+        if folder is not None:
+            return folder
+        sibling_row = connection.execute(
+            f"""
+            {PDF_FILE_WITH_PARSE_REPORT_SELECT}
+            WHERE f.user_id = ?
+              AND f.display_name = ?
+              AND f.status = ?
+              AND ((? IS NULL AND f.parent_id IS NULL) OR f.parent_id = ?)
+            LIMIT 1
+            """,
+            (
+                user_id,
+                display_name,
+                PdfFileStatus.ACTIVE.value,
+                parent_id,
+                parent_id,
+            ),
+        ).fetchone()
+        sibling = self._to_pdf_file(sibling_row)
+        if sibling is not None:
+            raise FileNameConflictError(
+                display_name=display_name,
+                file_id=sibling.file_id,
+            )
+        folder = PdfFile(
+            file_id=new_id("pdffolder"),
+            user_id=user_id,
+            parent_id=parent_id,
+            display_name=display_name,
+            original_filename=display_name,
+            kind=PdfFileKind.FOLDER,
+            size_bytes=0,
+            storage_path=None,
+            status=PdfFileStatus.ACTIVE,
+            visibility=PdfFileVisibility.VISIBLE,
+            processing_status=PdfProcessingStatus.READY,
+            progress=100,
+            status_detail="Folder indexed",
+            error_message=None,
+            page_count=None,
+            chunk_count=None,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        self._insert_pdf_file(connection, folder)
+        return folder
+
     def _raise_pdf_name_conflict(
         self,
         files: list[PdfFile],
@@ -4822,6 +5465,41 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
             visibility=ExcelFileVisibility(
                 row_str(row, "visibility", ExcelFileVisibility.VISIBLE.value)
             ),
+            archived_display_name=row_value(row, "archived_display_name"),
+            archived_active_version_id=row_value(
+                row,
+                "archived_active_version_id",
+            ),
+            purge_after=row_value(row, "purge_after"),
+        )
+
+    def _to_excel_file_purge_job(
+        self,
+        row: sqlite3.Row | None,
+    ) -> ExcelFilePurgeJob | None:
+        if row is None:
+            return None
+        raw_counts = load_json_object(str(row["counts_json"]))
+        return ExcelFilePurgeJob(
+            job_id=str(row["job_id"]),
+            file_id=str(row["file_id"]),
+            relative_path=str(row["relative_path"]),
+            status=str(row["status"]),
+            attempt_count=int(row["attempt_count"]),
+            requested_by=str(row["requested_by"]),
+            counts={
+                str(key): safe_int(value, 0)
+                for key, value in raw_counts.items()
+            },
+            error_message=row["error_message"],
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            completed_at=row["completed_at"],
+            worker_id=row["worker_id"],
+            claim_token=row["claim_token"],
+            lease_expires_at=row["lease_expires_at"],
+            heartbeat_at=row["heartbeat_at"],
+            state_revision=int(row["state_revision"]),
         )
 
     def _to_version(self, row: sqlite3.Row | None) -> ExcelFileVersion | None:
@@ -5902,8 +6580,37 @@ class SQLiteExcelAssetRepository(SQLitePdfVectorIndexRepositoryMixin):
             )
         return citations
 
+    def _archived_file_display_name(self, *, file_id: str, display_name: str) -> str:
+        return f"archived:{file_id}:{display_name}"
+
     def _deleted_file_display_name(self, *, file_id: str, display_name: str) -> str:
+        """Return the tombstone name used by the PDF hard-delete lifecycle."""
         return f"deleted:{file_id}:{display_name}"
+
+
+def _replace_pdf_filename_terms(
+    values: list[str],
+    *,
+    old_name: str,
+    new_name: str,
+    ensure_new_name: bool = False,
+) -> list[str]:
+    replaced: list[str] = []
+    seen: set[str] = set()
+    old_key = old_name.strip().casefold()
+    for value in values:
+        normalized = " ".join(value.split())
+        if not normalized:
+            continue
+        candidate = new_name if normalized.casefold() == old_key else normalized
+        key = candidate.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        replaced.append(candidate)
+    if ensure_new_name and new_name.casefold() not in seen:
+        replaced.append(new_name)
+    return replaced
 
 
 def _optional_int(value: object) -> int | None:

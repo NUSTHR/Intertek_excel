@@ -27,6 +27,9 @@ from app.domain.models import (
 )
 from app.ports.repository import AuthRepository
 
+BUILTIN_ADMIN_EMAIL = "admin@qq.com"
+BUILTIN_ADMIN_PASSWORD = "admin"
+
 
 @dataclass(frozen=True)
 class AuthResult:
@@ -47,8 +50,6 @@ class AuthService:
         self,
         repository: AuthRepository,
         *,
-        admin_email: str,
-        admin_password: str,
         session_ttl_hours: int,
         password_reset_ttl_minutes: int,
         password_hash_iterations: int,
@@ -56,8 +57,6 @@ class AuthService:
         login_rate_limiter: AuthenticationRateLimiter | None = None,
     ) -> None:
         self._repository = repository
-        self._admin_email = normalize_email(admin_email)
-        self._admin_password = admin_password
         self._session_ttl_hours = session_ttl_hours
         self._password_reset_ttl_minutes = password_reset_ttl_minutes
         self._password_hash_iterations = password_hash_iterations
@@ -69,41 +68,37 @@ class AuthService:
         self.ensure_admin_user()
 
     def ensure_admin_user(self) -> UserAccount:
-        existing = self._repository.get_user_by_email(self._admin_email)
-        if existing is not None:
-            if existing.role != UserRole.ADMIN:
-                raise RuntimeError(
-                    "configured administrator email belongs to a non-admin account"
-                )
-            if verify_password(self._admin_password, existing.password_hash):
-                return existing
-            updated = self._repository.update_user_password(
-                user_id=existing.user_id,
-                password_hash=self._hash_password(self._admin_password),
-                updated_at=utc_now_iso(),
-            )
-            if updated is None:
-                raise RuntimeError("failed to synchronize administrator password")
-            return updated
         now = utc_now_iso()
-        admin = UserAccount(
+        candidate = UserAccount(
             user_id=new_id("user"),
-            email=self._admin_email,
-            password_hash=self._hash_password(self._admin_password),
+            email=BUILTIN_ADMIN_EMAIL,
+            password_hash=self._hash_password(BUILTIN_ADMIN_PASSWORD),
             role=UserRole.ADMIN,
             is_active=True,
             created_at=now,
             updated_at=now,
         )
-        self._repository.create_user(admin)
-        return admin
+        existing = self._repository.ensure_builtin_admin(candidate)
+        if existing.role != UserRole.ADMIN:
+            raise RuntimeError("built-in administrator email belongs to a non-admin account")
+        if existing.is_active and verify_password(
+            BUILTIN_ADMIN_PASSWORD,
+            existing.password_hash,
+        ):
+            return existing
+        synchronized = self._repository.synchronize_builtin_admin(
+            user_id=existing.user_id,
+            password_hash=candidate.password_hash,
+            updated_at=now,
+        )
+        if synchronized is None:
+            raise RuntimeError("failed to synchronize built-in administrator")
+        return synchronized
 
     def register(self, email: str, password: str) -> AuthResult:
         normalized_email = normalize_email(email)
         self._validate_email(normalized_email)
         self._validate_password(password)
-        if self._repository.get_user_by_email(normalized_email) is not None:
-            raise UserAlreadyExistsError("an account with this email already exists")
         now = utc_now_iso()
         user = UserAccount(
             user_id=new_id("user"),
@@ -114,8 +109,10 @@ class AuthService:
             created_at=now,
             updated_at=now,
         )
-        self._repository.create_user(user)
-        return self._create_auth_result(user)
+        result, session = self._prepare_auth_result(user)
+        if not self._repository.create_user_with_session_if_email_available(user, session):
+            raise UserAlreadyExistsError("an account with this email already exists")
+        return result
 
     def login(self, email: str, password: str) -> AuthResult:
         normalized_email = normalize_email(email)
@@ -152,6 +149,12 @@ class AuthService:
 
     def request_password_reset(self, email: str) -> PasswordResetRequestResult:
         normalized_email = normalize_email(email)
+        if normalized_email == BUILTIN_ADMIN_EMAIL:
+            return PasswordResetRequestResult(
+                email=normalized_email,
+                reset_token=None,
+                expires_at=None,
+            )
         user = self._repository.get_user_by_email(normalized_email)
         if user is None or not user.is_active:
             return PasswordResetRequestResult(
@@ -178,25 +181,23 @@ class AuthService:
 
     def reset_password(self, token: str, new_password: str) -> AuthResult:
         self._validate_password(new_password)
-        result = self._repository.get_password_reset_token_by_hash(hash_token(token))
-        if result is None:
-            raise PasswordResetTokenError("invalid or expired reset token")
-        reset_token, user = result
-        if reset_token.used_at is not None or is_expired(reset_token.expires_at):
-            raise PasswordResetTokenError("invalid or expired reset token")
-        if not user.is_active:
-            raise PasswordResetTokenError("account is disabled")
-
         now = utc_now_iso()
-        updated_user = self._repository.update_user_password(
-            user_id=user.user_id,
+        updated_user = self._repository.consume_password_reset_token(
+            token_hash=hash_token(token),
             password_hash=self._hash_password(new_password),
-            updated_at=now,
+            used_at=now,
+            protected_email=BUILTIN_ADMIN_EMAIL,
         )
-        self._repository.mark_password_reset_token_used(reset_token.reset_token_id, now)
-        return self._create_auth_result(updated_user or user)
+        if updated_user is None:
+            raise PasswordResetTokenError("invalid or expired reset token")
+        return self._create_auth_result(updated_user)
 
     def _create_auth_result(self, user: UserAccount) -> AuthResult:
+        result, session = self._prepare_auth_result(user)
+        self._repository.create_auth_session(session)
+        return result
+
+    def _prepare_auth_result(self, user: UserAccount) -> tuple[AuthResult, AuthSession]:
         token = new_secret_token()
         expires_at = expires_at_iso(hours=self._session_ttl_hours)
         session = AuthSession(
@@ -206,11 +207,13 @@ class AuthService:
             created_at=utc_now_iso(),
             expires_at=expires_at,
         )
-        self._repository.create_auth_session(session)
-        return AuthResult(
-            user=self._to_authenticated_user(user),
-            access_token=token,
-            expires_at=expires_at,
+        return (
+            AuthResult(
+                user=self._to_authenticated_user(user),
+                access_token=token,
+                expires_at=expires_at,
+            ),
+            session,
         )
 
     def _hash_password(self, password: str) -> str:

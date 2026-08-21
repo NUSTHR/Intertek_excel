@@ -41,7 +41,7 @@ function deleteDescription(): string {
   const dialog = props.confirmDialog
   if (!dialog) return ''
   return dialog.kind === 'file'
-    ? `Delete "${dialog.file.display_name}" from file management? Active chats keep their existing context.`
+    ? `Archive "${dialog.file.display_name}" from file management? The workbook data and historical chat evidence will be retained until a separate permanent purge is requested.`
     : `Delete "${dialog.session.title}"?`
 }
 </script>

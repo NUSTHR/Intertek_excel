@@ -8,6 +8,11 @@ from datetime import UTC, datetime, timedelta
 from threading import Lock, RLock
 
 from app.application.chat.cancellation import ChatCancellationToken
+from app.application.pdf_knowledge.answer_grounding import (
+    PdfAnswerEvidenceManifest,
+    build_pdf_answer_evidence_manifest,
+    enforce_pdf_draft_grounding,
+)
 from app.application.pdf_knowledge.chat_answer import (
     attached_pdf_to_routing_document,
     build_pdf_answer,
@@ -56,7 +61,7 @@ from app.domain.models import (
     SelectedDocument,
     UserRole,
 )
-from app.ports.llm_client import PdfChatLlmClient
+from app.ports.llm_client import PdfAnswerGroundingVerifier, PdfChatLlmClient
 from app.ports.repository import PdfChatRepository
 
 PDF_CHAT_WORKSPACE = ChatWorkspace.PDF.value
@@ -78,11 +83,13 @@ class PdfChatService:
         sessions: PdfChatRepository,
         policy: PdfChatPolicy = DEFAULT_PDF_CHAT_POLICY,
         document_ranking: PdfDocumentRankingService | None = None,
+        answer_grounding_verifier: PdfAnswerGroundingVerifier | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._sessions = sessions
         self._policy = policy
         self._document_ranking = document_ranking
+        self._answer_grounding_verifier = answer_grounding_verifier
         self._scope_resolver = PdfChatScopeResolver(sessions)
         self._routing_catalog = PdfRoutingCatalogBuilder(
             repository=sessions,
@@ -569,18 +576,22 @@ class PdfChatService:
             allowed_file_ids=candidate_file_ids,
             enforce_final_limit=False,
         )
+        routing_candidates = list(selected_documents)
+        selection_mode = "router_only"
+        ranking_revision: str | None = None
         if len(selected_documents) > self._policy.max_routed_documents:
             if self._document_ranking is None:
                 raise PdfRankingIncomplete(
                     "more than four routed PDFs require vector ranking, but it is unavailable"
                 )
-            selected_documents = list(
-                self._document_ranking.select(
+            final_selection = self._document_ranking.select(
                     question=question,
                     router_documents=selected_documents,
                     cancellation_checker=self._cancellation_checker(cancellation_token),
-                ).documents
-            )
+                )
+            selected_documents = list(final_selection.documents)
+            selection_mode = final_selection.mode.value
+            ranking_revision = final_selection.ranking_revision
         self._raise_if_cancelled(cancellation_token)
         newly_attached, planned_attachments = self._plan_new_documents(
             session_id=session.session_id,
@@ -611,6 +622,9 @@ class PdfChatService:
             request_id=request_id,
             context_file_ids=resolved_scope.scope.selected_node_ids,
             session_revision=session.conversation_revision,
+            routing_candidates=routing_candidates,
+            selection_mode=selection_mode,
+            ranking_revision=ranking_revision,
         )
 
     def _answer_routed_question_locked(
@@ -658,6 +672,9 @@ class PdfChatService:
             previous_turns=existing_turns,
             user_role=user_role,
             model_selection=model_selection,
+            routing_candidates=(route_result.routing_candidates or documents),
+            selection_mode=route_result.selection_mode,
+            ranking_revision=route_result.ranking_revision,
             enable_deep_thinking=enable_deep_thinking,
             cancellation_token=cancellation_token,
         )
@@ -697,6 +714,13 @@ class PdfChatService:
             context_warnings.append(
                 "The available PDF evidence changed while this answer was being "
                 "prepared. Send the question again to use the current file visibility."
+            )
+        routed_candidate_count = len(route_result.routing_candidates or documents)
+        excluded_document_count = max(0, routed_candidate_count - len(documents))
+        if excluded_document_count:
+            context_warnings.append(
+                f"The router matched {routed_candidate_count} PDFs; this answer is "
+                f"grounded only in the top {len(documents)} PDFs after vector reranking."
             )
         if draft_answer is None or not grounding_chunks:
             answer = insufficient_evidence_answer(
@@ -866,6 +890,8 @@ class PdfChatService:
             request_id=request_id,
             context_file_ids=resolved_scope.scope.selected_node_ids,
             session_revision=expected_session_revision,
+            routing_candidates=list(selected_documents),
+            selection_mode="manual_selection",
         )
 
     def _release_request(
@@ -891,6 +917,9 @@ class PdfChatService:
         previous_turns: list[ChatTurn],
         user_role: UserRole,
         model_selection: PdfModelSelection,
+        routing_candidates: list[SelectedDocument],
+        selection_mode: str,
+        ranking_revision: str | None,
         enable_deep_thinking: bool,
         cancellation_token: ChatCancellationToken | None,
     ) -> tuple[
@@ -915,6 +944,10 @@ class PdfChatService:
             allocation=allocation,
             previous_turns=previous_turns,
             model_selection=model_selection,
+            routing_candidates=routing_candidates,
+            user_role=user_role,
+            selection_mode=selection_mode,
+            ranking_revision=ranking_revision,
             enable_deep_thinking=enable_deep_thinking,
             cancellation_token=cancellation_token,
         )
@@ -939,6 +972,10 @@ class PdfChatService:
             allocation=refreshed_allocation,
             previous_turns=previous_turns,
             model_selection=model_selection,
+            routing_candidates=routing_candidates,
+            user_role=user_role,
+            selection_mode=selection_mode,
+            ranking_revision=ranking_revision,
             enable_deep_thinking=enable_deep_thinking,
             cancellation_token=cancellation_token,
         )
@@ -959,23 +996,36 @@ class PdfChatService:
         allocation: PdfContextAllocation,
         previous_turns: list[ChatTurn],
         model_selection: PdfModelSelection,
+        routing_candidates: list[SelectedDocument],
+        user_role: UserRole,
+        selection_mode: str,
+        ranking_revision: str | None,
         enable_deep_thinking: bool,
         cancellation_token: ChatCancellationToken | None,
     ) -> DraftChatAnswer:
         self._raise_if_cancelled(cancellation_token)
+        manifest = self._build_answer_evidence_manifest(
+            allocation=allocation,
+            routing_candidates=routing_candidates,
+            user_role=user_role,
+            selection_mode=selection_mode,
+            ranking_revision=ranking_revision,
+        )
+        chunk_payloads = [
+            chunk_payload(
+                item,
+                max_characters=(
+                    None
+                    if self._policy.full_document_context
+                    else self._policy.max_single_chunk_characters
+                ),
+            )
+            for item in allocation.chunks
+        ]
         draft_answer = self._llm_client.answer_with_pdf_chunks(
             question,
-            [
-                chunk_payload(
-                    item,
-                    max_characters=(
-                        None
-                        if self._policy.full_document_context
-                        else self._policy.max_single_chunk_characters
-                    ),
-                )
-                for item in allocation.chunks
-            ],
+            chunk_payloads,
+            document_manifest=manifest.as_prompt_payload(),
             previous_turns=previous_turns,
             model=model_selection.model,
             provider=model_selection.provider,
@@ -983,7 +1033,61 @@ class PdfChatService:
             cancellation_checker=self._cancellation_checker(cancellation_token),
         )
         self._raise_if_cancelled(cancellation_token)
-        return draft_answer
+        if self._answer_grounding_verifier is not None:
+            verified_answer = self._answer_grounding_verifier.verify_and_repair_pdf_answer(
+                question=question,
+                chunks=chunk_payloads,
+                document_manifest=manifest.as_prompt_payload(),
+                draft_answer=draft_answer,
+                model=model_selection.model,
+                provider=model_selection.provider,
+                cancellation_checker=self._cancellation_checker(cancellation_token),
+            )
+            self._raise_if_cancelled(cancellation_token)
+            if verified_answer is None:
+                logger.warning(
+                    "PDF answer failed semantic grounding after one repair "
+                    "selection_mode=%s",
+                    selection_mode,
+                )
+                return DraftChatAnswer(
+                    answer_blocks=[],
+                    citations=[],
+                    insufficient_evidence=True,
+                    follow_up_suggestions=[],
+                )
+            draft_answer = verified_answer
+        grounding_result = enforce_pdf_draft_grounding(draft_answer, manifest)
+        if grounding_result.rejected_block_count:
+            logger.warning(
+                "rejected ungrounded PDF answer blocks count=%s selection_mode=%s",
+                grounding_result.rejected_block_count,
+                selection_mode,
+            )
+        return grounding_result.answer
+
+    def _build_answer_evidence_manifest(
+        self,
+        *,
+        allocation: PdfContextAllocation,
+        routing_candidates: list[SelectedDocument],
+        user_role: UserRole,
+        selection_mode: str,
+        ranking_revision: str | None,
+    ) -> PdfAnswerEvidenceManifest:
+        routed_file_ids = [document.file_id for document in routing_candidates]
+        routed_files = [
+            file
+            for file in self._sessions.list_pdf_files_by_ids(routed_file_ids)
+            if is_visible_ready_pdf(file, user_role)
+        ]
+        return build_pdf_answer_evidence_manifest(
+            grounding_chunks=allocation.chunks,
+            routed_candidate_count=len(routing_candidates),
+            routed_files=routed_files,
+            selection_mode=selection_mode,
+            ranking_revision=ranking_revision,
+        )
 
     @staticmethod
     def _document_keys(

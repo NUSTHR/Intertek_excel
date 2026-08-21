@@ -9,16 +9,42 @@ from app.adapters.llm.siliconflow_client import (
     MultiProviderLlmClient,
     SiliconFlowConfig,
 )
-from app.core.errors import LlmRequestError, LlmResponseFormatError
+from app.core.errors import (
+    LlmRequestError,
+    LlmResponseFormatError,
+    PdfRoutingError,
+)
 from app.domain.models import (
     AttachedDocument,
     ChatTurn,
     DocumentSummary,
+    DraftAnswerBlock,
+    DraftChatAnswer,
+    DraftCitation,
     SelectedDocument,
     SheetProfile,
     SheetSummary,
     WorkbookProfile,
 )
+
+
+def _pdf_summary(index: int, *, summary_text: str | None = None) -> DocumentSummary:
+    return DocumentSummary(
+        summary_id=f"summary_{index}",
+        file_id=f"file_{index}",
+        version_id=f"version_{index}",
+        document_title=f"document-{index}.pdf",
+        summary_text=summary_text or f"Routing summary for document {index}.",
+        business_domain="standards",
+        key_topics=[f"topic-{index}"],
+        positive_routing_terms=[f"term-{index}"],
+        negative_routing_terms=[],
+        exact_identifiers=[f"ID-{index}"],
+        suitable_questions=[f"Question for document {index}"],
+        unsuitable_questions=[],
+        sheet_summaries=[],
+        created_at="now",
+    )
 
 
 def test_siliconflow_client_generates_summary_routes_and_answers() -> None:
@@ -469,13 +495,270 @@ def test_siliconflow_pdf_router_uses_compact_prompt_and_repairs_invalid_json() -
     assert "enterprise PDF knowledge base" in requests[0]["messages"][0]["content"]
     assert "Excel" not in requests[0]["messages"][0]["content"]
     assert "sheet_summaries" not in requests[0]["messages"][1]["content"]
-    assert '"duplicate_content_group": "content-abc"' in requests[0]["messages"][1][
-        "content"
-    ]
+    catalog = json.loads(requests[0]["messages"][1]["content"].split("\n\n", 1)[1])
+    assert catalog[0]["duplicate_content_group"] == "content-abc"
     assert "range-wide intents" in requests[0]["messages"][0]["content"]
     assert "previous response was not a complete JSON object" in requests[1][
         "messages"
     ][-1]["content"]
+
+
+def test_siliconflow_pdf_router_routes_every_batch_and_unions_in_catalog_order() -> None:
+    requests: list[dict[str, Any]] = []
+    responses = [
+        {
+            "document_for_this_turn": [
+                {
+                    "file_id": "file_1",
+                    "version_id": "version_1",
+                    "reason": "first match",
+                }
+            ]
+        },
+        {"document_for_this_turn": []},
+        {
+            "document_for_this_turn": [
+                {
+                    "file_id": "file_3",
+                    "version_id": "version_3",
+                    "reason": "third match",
+                }
+            ]
+        },
+    ]
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps(responses.pop(0))}}
+                ]
+            },
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="Qwen/Qwen3.6-35B-A3B",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+            pdf_routing_max_request_characters=18_000,
+        ),
+        post=post,
+    )
+
+    selected = client.route_pdf_documents(
+        "Which documents apply?",
+        [
+            _pdf_summary(1, summary_text="x" * 4_000),
+            _pdf_summary(2, summary_text="x" * 4_000),
+            _pdf_summary(3, summary_text="x" * 4_000),
+        ],
+        max_documents=3,
+    )
+
+    assert [document.version_id for document in selected] == ["version_1", "version_3"]
+    catalogs = [
+        json.loads(request["messages"][1]["content"].split("\n\n", 1)[1])
+        for request in requests
+    ]
+    assert [catalog[0]["version_id"] for catalog in catalogs] == [
+        "version_1",
+        "version_2",
+        "version_3",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_message"),
+    [
+        ({}, "omitted the selection list"),
+        ({"document_for_this_turn": {}}, "invalid selection list"),
+        (
+            {
+                "document_for_this_turn": [
+                    {"file_id": "file_1", "version_id": "version_1"},
+                    {"file_id": "file_1", "version_id": "version_1"},
+                ]
+            },
+            "duplicate version ID",
+        ),
+        (
+            {
+                "document_for_this_turn": [
+                    {"file_id": "file_2", "version_id": "version_2"}
+                ]
+            },
+            "outside the current batch",
+        ),
+    ],
+)
+def test_siliconflow_pdf_router_rejects_invalid_selection_contract(
+    payload: dict[str, Any],
+    expected_message: str,
+) -> None:
+    def post(_url: str, **_kwargs: Any) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={"choices": [{"message": {"content": json.dumps(payload)}}]},
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="Qwen/Qwen3.6-35B-A3B",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+
+    with pytest.raises(PdfRoutingError, match=expected_message):
+        client.route_pdf_documents("Which document applies?", [_pdf_summary(1)], 1)
+
+
+def test_siliconflow_pdf_router_does_not_return_partial_results_on_batch_failure() -> None:
+    requests: list[dict[str, Any]] = []
+    responses = [
+        json.dumps(
+            {
+                "document_for_this_turn": [
+                    {
+                        "file_id": "file_1",
+                        "version_id": "version_1",
+                        "reason": "first match",
+                    }
+                ]
+            }
+        ),
+        '{"document_for_this_turn": [',
+        "still not json",
+    ]
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={"choices": [{"message": {"content": responses.pop(0)}}]},
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="Qwen/Qwen3.6-35B-A3B",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+            pdf_routing_max_batch_documents=1,
+        ),
+        post=post,
+    )
+
+    with pytest.raises(PdfRoutingError, match="invalid response"):
+        client.route_pdf_documents(
+            "Which documents apply?",
+            [_pdf_summary(1), _pdf_summary(2)],
+            max_documents=2,
+        )
+    assert len(requests) == 3
+
+
+def test_siliconflow_pdf_router_rejects_unsafe_budget_before_calling() -> None:
+    called = False
+
+    def post(_url: str, **_kwargs: Any) -> httpx2.Response:
+        nonlocal called
+        called = True
+        raise AssertionError("routing request must not be sent")
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="Qwen/Qwen3.6-35B-A3B",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+            pdf_routing_max_request_characters=9_000,
+        ),
+        post=post,
+    )
+
+    with pytest.raises(PdfRoutingError, match="budget is too small"):
+        client.route_pdf_documents("Which document applies?", [_pdf_summary(1)], 1)
+    assert called is False
+
+
+def test_siliconflow_pdf_router_bounds_cards_and_marks_canonical_copies() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps({"document_for_this_turn": []})
+                        }
+                    }
+                ]
+            },
+        )
+
+    summaries = [
+        DocumentSummary(
+            **{
+                **_pdf_summary(index, summary_text="x" * 20_000).__dict__,
+                "coverage_scope": {"duplicate_content_group": ["same-content"]},
+                "exact_identifiers": [
+                    f"identifier-{item_index}" for item_index in range(100)
+                ],
+            }
+        )
+        for index in (1, 2)
+    ]
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="Qwen/Qwen3.6-35B-A3B",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+            pdf_routing_max_batch_documents=1,
+        ),
+        post=post,
+    )
+
+    assert client.route_pdf_documents("Find ID", summaries, 2) == []
+    catalogs = [
+        json.loads(request["messages"][1]["content"].split("\n\n", 1)[1])
+        for request in requests
+    ]
+    assert [len(catalog[0]["summary_text"]) for catalog in catalogs] == [4_000, 4_000]
+    assert [len(catalog[0]["exact_identifiers"]) for catalog in catalogs] == [64, 64]
+    assert [catalog[0]["duplicate_content_canonical"] for catalog in catalogs] == [
+        True,
+        False,
+    ]
 
 
 def test_siliconflow_router_sends_catalog_and_routing_memory_messages() -> None:
@@ -897,6 +1180,84 @@ def test_siliconflow_pdf_answer_sends_history_as_role_messages() -> None:
     assert "Previous answer metadata" in messages[2]["content"]
     assert '"citation_ids": ["P1"]' in messages[2]["content"]
     assert "provided PDF chunks" in messages[-1]["content"]
+
+
+def test_siliconflow_pdf_grounding_verifier_repairs_once_and_rechecks() -> None:
+    requests: list[dict[str, Any]] = []
+    responses = [
+        {"supported": False, "violations": ["OUT_OF_SCOPE_DOCUMENT"]},
+        {
+            "answer_blocks": [
+                {
+                    "text": "The included document requires traceability.",
+                    "evidence_ids": ["pdf_1::chunk_1"],
+                }
+            ],
+            "citations": [{"evidence_id": "pdf_1::chunk_1", "quote": "ignored"}],
+            "insufficient_evidence": False,
+            "follow_up_suggestions": [],
+        },
+        {"supported": True, "violations": []},
+    ]
+
+    def post(_url: str, **kwargs: Any) -> httpx2.Response:
+        requests.append(kwargs["json"])
+        payload = responses[len(requests) - 1]
+        return httpx2.Response(
+            200,
+            request=httpx2.Request("POST", "https://api.example.test/v1/chat/completions"),
+            json={"choices": [{"message": {"content": json.dumps(payload)}}]},
+        )
+
+    client = MultiProviderLlmClient(
+        SiliconFlowConfig(
+            api_base_url="https://api.example.test/v1",
+            api_key="test-key",
+            summary_model="deepseek-ai/DeepSeek-V4-Pro",
+            router_model="inclusionAI/Ling-flash-2.0",
+            answer_model="Qwen/Qwen3.6-27B",
+            timeout_seconds=1,
+            summary_max_profile_rows=2,
+        ),
+        post=post,
+    )
+    repaired = client.verify_and_repair_pdf_answer(
+        question="Compare all five documents.",
+        chunks=[
+            {
+                "evidence_id": "pdf_1::chunk_1",
+                "file_id": "pdf_1",
+                "file_name": "included.pdf",
+                "text": "The included document requires traceability.",
+            }
+        ],
+        document_manifest={
+            "routed_candidate_count": 5,
+            "final_document_count": 4,
+            "excluded_document_count": 1,
+            "documents": [{"file_id": "pdf_1", "file_name": "included.pdf"}],
+        },
+        draft_answer=DraftChatAnswer(
+            answer_blocks=[
+                DraftAnswerBlock(
+                    text="All five documents agree.",
+                    evidence_ids=["pdf_1::chunk_1"],
+                )
+            ],
+            citations=[DraftCitation(evidence_id="pdf_1::chunk_1")],
+            insufficient_evidence=False,
+            follow_up_suggestions=[],
+        ),
+    )
+
+    assert repaired is not None
+    assert repaired.answer_blocks[0].text == (
+        "The included document requires traceability."
+    )
+    assert len(requests) == 3
+    assert "strict evidence-grounding verifier" in requests[0]["messages"][0]["content"]
+    assert "repair an enterprise PDF answer" in requests[1]["messages"][0]["content"]
+    assert "strict evidence-grounding verifier" in requests[2]["messages"][0]["content"]
 
 
 def test_siliconflow_timeout_error_includes_stage_model_and_duration() -> None:

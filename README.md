@@ -117,7 +117,7 @@ Authentication:
 - Cookie and bearer-token authentication support.
 - Logout.
 - Password reset endpoints.
-- Automatic admin user initialization from backend settings.
+- Atomic initialization of the fixed built-in administrator.
 - Admin/member role distinction.
 - Login rate limiting.
 - CSRF protection for cookie-authenticated unsafe methods.
@@ -133,7 +133,10 @@ Workspace and file management:
 - File list and file lookup.
 - File rename.
 - File visibility toggles for member access.
-- File deletion with explicit confirmation.
+- Reversible file archival with explicit confirmation and a configurable
+  retention deadline.
+- Admin-only permanent purge with exact-name confirmation, durable retry, and
+  deletion-count audit metadata.
 - Active-version lookup.
 - Version list.
 - Manual version activation.
@@ -547,14 +550,39 @@ tests. Use `PDF_PARSER_BACKEND=mineru` only when the MinerU command is
 installed and available to the backend process. The `/api/pdf/parser/status`
 endpoint reports whether the configured parser appears available.
 
+Successful reparses automatically remove older terminal task-artifact claims
+after the new artifact references commit. Audit historical or crash-created
+orphans in dry-run mode before any manual cleanup:
+
+```bash
+cd backend
+./.venv/bin/python scripts/audit_pdf_task_artifacts.py --retention-days 7
+```
+
+The audit never deletes by default. Review the JSON candidates, confirm that a
+verified SQLite and file-storage backup exists, and only then rerun with
+`--delete`. Referenced claims, queued/processing tasks, symlinks, paths outside
+the managed storage root, and candidates newer than the retention window are
+never selected.
+
 Chat cancellation and guardrails:
 
 ```text
 CHAT_CANCELLATION_RETENTION_SECONDS=300
 LLM_REQUEST_TIMEOUT_SECONDS=120
 LLM_SUMMARY_MAX_PROFILE_ROWS=10
+PDF_ROUTING_MAX_REQUEST_CHARACTERS=120000
+PDF_ROUTING_MAX_BATCH_DOCUMENTS=20
 LLM_ANSWER_MAX_ROWS=20000
 ```
+
+PDF routing always evaluates the complete visible READY-document catalog. Large
+catalogs are deterministically split into bounded model requests; the per-batch
+results are validated and unioned before the four-document rule is applied. A
+malformed batch, an ID outside that batch, or a request that cannot fit the
+configured character budget fails the whole routing operation instead of
+returning a partial selection. The request budget reserves space for one JSON
+repair attempt, and the batch-document limit bounds worst-case router output.
 
 Provider credentials:
 
@@ -592,8 +620,6 @@ VOLCENGINE_ARK_ANSWER_MODEL=deepseek-v4-pro-260425
 Auth settings:
 
 ```text
-AUTH_ADMIN_EMAIL=admin@qq.com
-AUTH_ADMIN_PASSWORD=admin
 AUTH_SESSION_TTL_HOURS=336
 AUTH_PASSWORD_RESET_TTL_MINUTES=30
 AUTH_PASSWORD_HASH_ITERATIONS=260000
@@ -618,7 +644,11 @@ LOG_BACKUP_COUNT=5
 Production safety:
 
 - Set `APP_ENV=production`.
-- Change `AUTH_ADMIN_PASSWORD`.
+- The built-in administrator is fixed as `admin@qq.com / admin`; environment
+  variables cannot override it and password reset does not apply to it. This is
+  intentionally incompatible with a normal production credential policy, so
+  restrict network access and replace the fixed-credential design before any
+  Internet-facing deployment.
 - Set `AUTH_EXPOSE_RESET_TOKEN=false`.
 - Set `AUTH_COOKIE_SECURE=true` when serving over HTTPS.
 - Use `AUTH_COOKIE_SAMESITE=lax`, `strict`, or `none`.
@@ -821,16 +851,19 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:5174/health | Select-Object 
 
 ## Login And Roles
 
-On first backend initialization, the backend ensures an admin user exists using:
+On backend initialization, the application atomically ensures this built-in
+administrator exists and is active:
 
 ```text
-AUTH_ADMIN_EMAIL
-AUTH_ADMIN_PASSWORD
+email: admin@qq.com
+password: admin
 ```
 
-If these are not set in `backend/.env`, the development defaults in
-`app/core/config.py` apply. For a real shared demo, set explicit values in
-`backend/.env` before starting the backend.
+The values are application constants and cannot be overridden through
+`backend/.env`. Startup restores a changed or disabled built-in administrator,
+revokes its older sessions when synchronization is required, and invalidates
+unused reset tokens. The forgot/reset-password flow is available only to member
+accounts.
 
 Users can also register from the login page. Self-registered users are members.
 
@@ -915,13 +948,9 @@ PDFs, and chat history are not exposed through the tunnel. Synthetic or
 deliberately selected test files must be uploaded again inside the public-test
 workspace.
 
-The administrator password is generated locally in the Git-ignored
-`backend/.env` and is not printed by the sharing script. View only the local
-test credentials when needed:
-
-```bash
-grep -E '^AUTH_ADMIN_(EMAIL|PASSWORD)=' backend/.env
-```
+The public-test tunnel uses the fixed `admin@qq.com / admin` administrator.
+Anyone who can reach the tunnel therefore knows the administrative credential;
+do not use the quick-tunnel workflow with confidential or production data.
 
 Press `Ctrl+C` in the sharing terminal to stop Cloudflare Tunnel, Vite, and
 FastAPI together. Restarting the script creates a new random public URL. The
@@ -1123,6 +1152,10 @@ GET    /api/excel/files/{file_id}
 PATCH  /api/excel/files/{file_id}                          admin
 PATCH  /api/excel/files/{file_id}/visibility               admin
 DELETE /api/excel/files/{file_id}?confirm_delete=true      admin
+GET    /api/excel/files/archived                           admin
+POST   /api/excel/files/{file_id}/restore                  admin
+POST   /api/excel/files/{file_id}/purge                    admin
+GET    /api/excel/files/purge-jobs/{job_id}                admin
 GET    /api/excel/files/{file_id}/active
 GET    /api/excel/files/{file_id}/versions
 POST   /api/excel/files/{file_id}/versions/{version_id}/activate  admin
@@ -1137,6 +1170,18 @@ GET    /api/excel/sheets/{sheet_id}/rows?offset=0&limit=500
 GET    /api/excel/sheets/{sheet_id}/search?query=...&limit=50
 GET    /api/excel/sheets/{sheet_id}/rows/{row_id}
 ```
+
+The legacy Excel `DELETE` route archives the workbook; it does not erase its
+versions, sheet data, summaries, artifacts, source files, or historical chat
+evidence. An archived workbook can be restored until permanent purge starts.
+Permanent purge is a separate admin operation: it normally becomes eligible
+after `EXCEL_ARCHIVE_RETENTION_DAYS`, requires the exact archived display name,
+removes dependent Excel chat sessions and database content transactionally,
+then deletes the managed file tree through a durable, lease-fenced purge job.
+The `force` request flag is reserved for an explicit administrative retention
+override. SQLite secure deletion cannot erase copies held by backups, snapshots,
+provider logs, or underlying storage hardware; those require an independent
+deployment-level retention and media-erasure policy.
 
 Document summaries:
 
@@ -1240,8 +1285,9 @@ Latest recorded local status in the repository previously documented:
 
 ```text
 backend ruff: passed
-backend pytest: 57 passed
-backend PDF pytest subset: 19 passed
+backend pytest: 340 passed
+backend PDF API pytest subset: 80 passed
+frontend node tests: 99 passed
 frontend vue-tsc: passed
 frontend vite build: passed
 ```
@@ -1302,8 +1348,6 @@ APP_ENV=production
 APP_HOST=127.0.0.1
 APP_PORT=8090
 APP_CORS_ORIGINS=https://your-domain.example
-AUTH_ADMIN_EMAIL=your-admin@example.com
-AUTH_ADMIN_PASSWORD=replace-with-a-strong-password
 AUTH_EXPOSE_RESET_TOKEN=false
 AUTH_COOKIE_SECURE=true
 AUTH_COOKIE_SAMESITE=lax
@@ -1315,6 +1359,21 @@ VOLCENGINE_ARK_API_KEY=your-ark-key-if-used
 If you are initially deploying only upload/preview/search without LLM features,
 you can leave unused provider keys empty, but any provider selected by summary,
 router, or answer stage must have a key for those features to work.
+
+For an existing deployment, run the read-only migration preflight before
+starting the upgraded backend:
+
+```bash
+cd /opt/excel-workspace/backend
+./.venv/bin/python scripts/preflight_database_migrations.py
+```
+
+The command prints JSON and exits with status `1` when pending migrations would
+conflict with existing active PDF upload tasks or sibling names. Resolve the
+reported business records explicitly and take a verified SQLite and file-storage
+backup before starting the upgraded application. Do not automatically delete or
+rename records to force a migration through. A fresh deployment without an
+existing database does not require this preflight.
 
 ### Test Backend Manually
 

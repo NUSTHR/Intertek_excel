@@ -8,6 +8,7 @@ from app.domain.models import (
     DocumentSummary,
     ExcelArtifact,
     ExcelFile,
+    ExcelFilePurgeJob,
     ExcelFileVersion,
     ExcelFileVisibility,
     ExcelRowMapping,
@@ -33,7 +34,7 @@ from app.domain.models import (
     PdfProcessingStatus,
     PdfSummaryTask,
     PdfUploadBatch,
-    PdfUploadBatchStatus,
+    PdfUploadRecord,
     PdfUploadTask,
     PdfUploadTaskStage,
     PdfVectorIndex,
@@ -61,6 +62,9 @@ class ExcelAssetRepository(Protocol):
     def list_files(self) -> list[ExcelFile]:
         ...
 
+    def list_archived_files(self) -> list[ExcelFile]:
+        ...
+
     def update_file_display_name(
         self,
         file_id: str,
@@ -77,7 +81,74 @@ class ExcelAssetRepository(Protocol):
     ) -> ExcelFile | None:
         ...
 
-    def delete_file(self, file_id: str) -> dict[str, int]:
+    def archive_file(
+        self,
+        *,
+        file_id: str,
+        archived_at: str,
+        purge_after: str,
+    ) -> bool:
+        ...
+
+    def restore_archived_file(
+        self,
+        *,
+        file_id: str,
+        display_name: str,
+        restored_at: str,
+    ) -> ExcelFile | None:
+        ...
+
+    def request_excel_file_purge(
+        self,
+        *,
+        file_id: str,
+        requested_by: str,
+        requested_at: str,
+        allow_before_retention: bool,
+    ) -> ExcelFilePurgeJob | None:
+        ...
+
+    def list_pending_excel_file_purge_jobs(
+        self,
+        *,
+        available_at: str,
+    ) -> list[ExcelFilePurgeJob]:
+        ...
+
+    def get_excel_file_purge_job(self, job_id: str) -> ExcelFilePurgeJob | None:
+        ...
+
+    def claim_excel_file_purge_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        claimed_at: str,
+        lease_expires_at: str,
+    ) -> ExcelFilePurgeJob | None:
+        ...
+
+    def complete_excel_file_purge_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        completed_at: str,
+    ) -> ExcelFilePurgeJob | None:
+        ...
+
+    def fail_excel_file_purge_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: str,
+        error_message: str,
+        failed_at: str,
+    ) -> ExcelFilePurgeJob | None:
         ...
 
     def create_version(self, version: ExcelFileVersion) -> None:
@@ -511,10 +582,35 @@ class AuthRepository(Protocol):
     def create_user(self, user: UserAccount) -> None:
         ...
 
+    def create_user_with_session_if_email_available(
+        self,
+        user: UserAccount,
+        session: AuthSession,
+    ) -> bool:
+        """Atomically create a user and its initial session.
+
+        Return ``False`` only when the normalized email already exists. Any
+        other integrity or persistence failure must propagate so callers do not
+        misreport infrastructure failures as an ordinary registration conflict.
+        """
+        ...
+
     def get_user(self, user_id: str) -> UserAccount | None:
         ...
 
     def get_user_by_email(self, email: str) -> UserAccount | None:
+        ...
+
+    def ensure_builtin_admin(self, user: UserAccount) -> UserAccount:
+        ...
+
+    def synchronize_builtin_admin(
+        self,
+        *,
+        user_id: str,
+        password_hash: str,
+        updated_at: str,
+    ) -> UserAccount | None:
         ...
 
     def update_user_password(
@@ -543,17 +639,14 @@ class AuthRepository(Protocol):
     def create_password_reset_token(self, token: PasswordResetToken) -> None:
         ...
 
-    def get_password_reset_token_by_hash(
+    def consume_password_reset_token(
         self,
+        *,
         token_hash: str,
-    ) -> tuple[PasswordResetToken, UserAccount] | None:
-        ...
-
-    def mark_password_reset_token_used(
-        self,
-        reset_token_id: str,
+        password_hash: str,
         used_at: str,
-    ) -> None:
+        protected_email: str,
+    ) -> UserAccount | None:
         ...
 
     def get_login_rate_limit_retry_after(
@@ -589,7 +682,7 @@ class PdfKnowledgeRepository(Protocol):
     def create_pdf_file(self, file: PdfFile) -> None:
         ...
 
-    def create_pdf_upload(self, file: PdfFile, task: PdfUploadTask) -> None:
+    def create_pdf_upload(self, record: PdfUploadRecord) -> None:
         ...
 
     def get_pdf_file(self, file_id: str) -> PdfFile | None:
@@ -655,7 +748,7 @@ class PdfKnowledgeRepository(Protocol):
     ) -> PdfFile | None:
         ...
 
-    def update_pdf_file_display_name(
+    def rename_pdf_file_and_summary(
         self,
         file_id: str,
         display_name: str,
@@ -719,7 +812,7 @@ class PdfKnowledgeRepository(Protocol):
     def create_pdf_upload_batch_records(
         self,
         batch: PdfUploadBatch,
-        records: list[tuple[PdfFile, PdfUploadTask]],
+        records: list[PdfUploadRecord],
     ) -> None:
         ...
 
@@ -729,17 +822,11 @@ class PdfKnowledgeRepository(Protocol):
     def list_pdf_upload_batches(self, user_id: str) -> list[PdfUploadBatch]:
         ...
 
-    def update_pdf_upload_batch_status(
+    def recompute_pdf_upload_batch(
         self,
         *,
         batch_id: str,
-        status: PdfUploadBatchStatus,
-        progress: int,
-        detail: str,
         updated_at: str,
-        completed_at: str | None = None,
-        error_message: str | None = None,
-        result: dict[str, object] | None = None,
     ) -> PdfUploadBatch | None:
         ...
 

@@ -9,6 +9,7 @@ from app.adapters.storage.filesystem_storage import FilesystemExcelArtifactStora
 from app.application.excel_assets.service import ExcelAssetService
 from app.core.errors import (
     AssetNotFoundError,
+    ExcelFileLifecycleConflict,
     FileDeleteConfirmationRequiredError,
     FileNameConflictError,
     InvalidExcelFileError,
@@ -16,10 +17,12 @@ from app.core.errors import (
 from app.domain.models import (
     AttachedDocument,
     ChatSession,
+    ChatTurn,
     DocumentSummary,
     ExcelArtifactType,
     ExcelFileStatus,
     ExcelVersionStatus,
+    SelectedDocument,
     SheetSummary,
 )
 from app.ports.workbook_reader import WorkbookData, WorkbookSheet
@@ -288,12 +291,14 @@ def test_failed_new_upload_is_hidden_and_materialization_is_cleaned(
         artifact_count = connection.execute("SELECT COUNT(*) FROM excel_artifacts").fetchone()[0]
 
     assert file_row is not None
-    assert file_row[1:] == (ExcelFileStatus.DELETED.value, None)
+    assert file_row[1:] == (ExcelFileStatus.ARCHIVED.value, None)
     assert version_row is not None
     assert version_row[1] == ExcelVersionStatus.FAILED.value
     assert sheet_count == 0
     assert artifact_count == 0
     assert not (tmp_path / "storage" / "files" / file_row[0]).exists()
+    with pytest.raises(ExcelFileLifecycleConflict, match="no ready version"):
+        service.restore_file(str(file_row[0]))
 
 
 def test_mid_processing_failure_removes_partial_excel_materialization(
@@ -323,9 +328,9 @@ def test_mid_processing_failure_removes_partial_excel_materialization(
     assert [path for path in (tmp_path / "storage").rglob("*") if path.is_file()] == []
 
 
-def test_deleted_file_cannot_be_reactivated(service: ExcelAssetService) -> None:
+def test_archived_file_cannot_be_reactivated_outside_restore(service: ExcelAssetService) -> None:
     result = service.upload_workbook("deleted-race.xlsx", b"first")
-    service.delete_file(result.file.file_id, confirm_delete=True)
+    service.archive_file(result.file.file_id, confirm_delete=True)
 
     activated = service._repository.activate_version(
         result.file.file_id,
@@ -336,7 +341,7 @@ def test_deleted_file_cannot_be_reactivated(service: ExcelAssetService) -> None:
     assert activated is False
     deleted = service._repository.get_file_including_deleted(result.file.file_id)
     assert deleted is not None
-    assert deleted.status == ExcelFileStatus.DELETED
+    assert deleted.status == ExcelFileStatus.ARCHIVED
     assert deleted.active_version_id is None
 
 
@@ -526,24 +531,22 @@ def test_summary_profile_loads_full_rows_without_internal_row_ids(
     ]
 
 
-def test_delete_file_requires_confirmation_and_soft_deletes_management_record(
+def test_archive_file_requires_confirmation_and_retains_management_data(
     service: ExcelAssetService,
 ) -> None:
     result = service.upload_workbook("risk.xlsx", b"first")
 
     with pytest.raises(FileDeleteConfirmationRequiredError):
-        service.delete_file(result.file.file_id)
+        service.archive_file(result.file.file_id)
 
-    deleted = service.delete_file(result.file.file_id, confirm_delete=True)
+    archived = service.archive_file(result.file.file_id, confirm_delete=True)
 
-    assert deleted.file_id == result.file.file_id
-    assert deleted.display_name == "risk.xlsx"
-    assert deleted.deleted_versions == 0
-    assert deleted.deleted_sheets == 0
-    assert deleted.deleted_artifacts == 0
-    assert deleted.deleted_row_mappings == 0
-    assert deleted.deleted_summaries == 0
-    assert deleted.deleted_chat_session_documents == 0
+    assert archived.file_id == result.file.file_id
+    assert archived.display_name == "risk.xlsx"
+    assert archived.disposition == "archived"
+    assert archived.data_retained is True
+    assert archived.archived_at
+    assert archived.purge_eligible_at > archived.archived_at
     assert (service._storage._storage_root / "files" / result.file.file_id).exists()
     assert service.check_display_name("risk.xlsx").exists is False
 
@@ -551,7 +554,7 @@ def test_delete_file_requires_confirmation_and_soft_deletes_management_record(
         service.get_file(result.file.file_id)
 
 
-def test_delete_file_hides_directory_record_and_preserves_historical_links(
+def test_archive_file_hides_directory_record_and_preserves_historical_links(
     service: ExcelAssetService,
 ) -> None:
     result = service.upload_workbook("risk.xlsx", b"first")
@@ -560,15 +563,17 @@ def test_delete_file_hides_directory_record_and_preserves_historical_links(
     old_version_id = result.version.version_id
     old_sheet_id = result.sheets[0].sheet_id
 
-    deleted = service.delete_file(old_file_id, confirm_delete=True)
+    archived = service.archive_file(old_file_id, confirm_delete=True)
     replacement = service.upload_workbook("risk.xlsx", b"second")
 
     deleted_file = service._repository.get_file_including_deleted(old_file_id)
-    assert deleted.file_id == old_file_id
+    assert archived.file_id == old_file_id
     assert deleted_file is not None
-    assert deleted_file.status == ExcelFileStatus.DELETED
+    assert deleted_file.status == ExcelFileStatus.ARCHIVED
     assert deleted_file.active_version_id is None
-    assert deleted_file.display_name == f"deleted:{old_file_id}:risk.xlsx"
+    assert deleted_file.display_name == f"archived:{old_file_id}:risk.xlsx"
+    assert deleted_file.archived_display_name == "risk.xlsx"
+    assert deleted_file.archived_active_version_id == old_version_id
     assert service.check_display_name("risk.xlsx").file_id == replacement.file.file_id
     assert replacement.file.file_id != old_file_id
     assert replacement.version.file_id == replacement.file.file_id
@@ -595,6 +600,130 @@ def test_delete_file_hides_directory_record_and_preserves_historical_links(
     assert [sheet.sheet_id for sheet in legacy_sheets] == [
         sheet.sheet_id for sheet in result.sheets
     ]
+
+
+def test_archived_file_can_be_restored_with_original_active_version(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("restore.xlsx", b"first")
+    service.archive_file(result.file.file_id, confirm_delete=True)
+
+    restored = service.restore_file(result.file.file_id)
+
+    assert restored.status == ExcelFileStatus.ACTIVE
+    assert restored.display_name == "restore.xlsx"
+    assert restored.active_version_id == result.version.version_id
+    assert restored.deleted_at is None
+    assert restored.archived_display_name is None
+    assert service.get_file(result.file.file_id).file_id == result.file.file_id
+
+
+def test_permanent_purge_removes_database_storage_and_affected_chat_session(
+    service: ExcelAssetService,
+) -> None:
+    result = service.upload_workbook("purge.xlsx", b"first")
+    _save_summary_and_attachment(service, result)
+    unrelated = service.upload_workbook("unrelated.xlsx", b"second")
+    service._repository.create_session(
+        ChatSession(
+            session_id="session-unrelated",
+            user_id="user-risk",
+            created_at="2026-07-01T00:00:00+00:00",
+            updated_at="2026-07-01T00:00:00+00:00",
+        )
+    )
+    service._repository.create_turn(
+        ChatTurn(
+            turn_id="turn-unrelated",
+            session_id="session-unrelated",
+            question="Which workbook is in scope?",
+            answer_text="Only the unrelated workbook is in scope.",
+            citation_ids=[],
+            selected_documents=[
+                SelectedDocument(
+                    file_id=unrelated.file.file_id,
+                    version_id=unrelated.version.version_id,
+                    reason=f"Do not use {result.file.file_id} for this answer.",
+                )
+            ],
+            created_at="2026-07-01T00:00:01+00:00",
+        )
+    )
+    service.archive_file(result.file.file_id, confirm_delete=True)
+
+    with pytest.raises(ExcelFileLifecycleConflict, match="retention period"):
+        service.purge_file(
+            result.file.file_id,
+            confirmation_display_name="purge.xlsx",
+            requested_by="admin",
+        )
+    with pytest.raises(ExcelFileLifecycleConflict, match="exact archived workbook"):
+        service.purge_file(
+            result.file.file_id,
+            confirmation_display_name="wrong.xlsx",
+            requested_by="admin",
+            force=True,
+        )
+
+    purged = service.purge_file(
+        result.file.file_id,
+        confirmation_display_name="purge.xlsx",
+        requested_by="admin",
+        force=True,
+    )
+
+    assert purged.job.status == "completed"
+    assert purged.job.counts["versions"] == 1
+    assert purged.job.counts["chat_sessions"] == 1
+    tombstone = service._repository.get_file_including_deleted(result.file.file_id)
+    assert tombstone is not None
+    assert tombstone.status == ExcelFileStatus.PURGED
+    assert tombstone.display_name == f"purged:{result.file.file_id}"
+    assert tombstone.archived_display_name is None
+    assert service._repository.get_version(result.version.version_id) is None
+    assert service._repository.get_sheet(result.sheets[0].sheet_id) is None
+    assert service._repository.get_summary(result.version.version_id) is None
+    assert service._repository.get_session("session-risk") is None
+    assert service._repository.get_session("session-unrelated") is not None
+    assert not (service._storage._storage_root / "files" / result.file.file_id).exists()
+
+
+def test_failed_purge_cleanup_is_retryable_and_fenced(
+    service: ExcelAssetService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = service.upload_workbook("retry-purge.xlsx", b"first")
+    service.archive_file(result.file.file_id, confirm_delete=True)
+    original_delete = service._storage.delete_file_tree
+
+    def fail_delete(_file_id: str) -> None:
+        raise OSError("injected storage failure")
+
+    monkeypatch.setattr(service._storage, "delete_file_tree", fail_delete)
+    requested = service.purge_file(
+        result.file.file_id,
+        confirmation_display_name="retry-purge.xlsx",
+        requested_by="admin",
+        force=True,
+    )
+    assert requested.job.status == "failed"
+    assert requested.job.attempt_count == 1
+    pending = service._repository.get_file_including_deleted(result.file.file_id)
+    assert pending is not None
+    assert pending.status == ExcelFileStatus.PURGE_PENDING
+
+    with sqlite3.connect(service._repository._database_path) as connection:
+        connection.execute(
+            "UPDATE excel_file_purge_jobs SET attempt_count = 10 WHERE job_id = ?",
+            (requested.job.job_id,),
+        )
+
+    monkeypatch.setattr(service._storage, "delete_file_tree", original_delete)
+    assert service.retry_pending_file_purges() == 1
+    completed = service._repository.get_excel_file_purge_job(requested.job.job_id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.attempt_count == 11
 
 
 def _save_summary_and_attachment(service: ExcelAssetService, result) -> None:

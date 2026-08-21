@@ -4,6 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import (
+    get_auth_service,
+    get_excel_asset_service,
     get_pdf_summary_task_worker,
     get_pdf_upload_task_worker,
     get_pdf_vector_index_task_worker,
@@ -27,6 +29,8 @@ from app.core.logging import configure_logging
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    get_auth_service()
+    get_excel_asset_service().initialize()
     if settings.upload_task_worker_enabled:
         upload_tasks = get_upload_task_service()
         upload_tasks.mark_stale_processing_tasks_failed(

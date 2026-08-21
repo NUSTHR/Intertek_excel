@@ -1616,4 +1616,98 @@ SCHEMA_MIGRATIONS: tuple[SchemaMigration, ...] = (
             """,
         ),
     ),
+    SchemaMigration(
+        version=40,
+        name="add_excel_archive_and_purge_lifecycle",
+        statements=(
+            """
+            ALTER TABLE excel_files
+              ADD COLUMN archived_display_name TEXT
+            """,
+            """
+            ALTER TABLE excel_files
+              ADD COLUMN archived_active_version_id TEXT
+            """,
+            """
+            ALTER TABLE excel_files
+              ADD COLUMN purge_after TEXT
+            """,
+            """
+            UPDATE excel_files
+            SET
+              archived_display_name = CASE
+                WHEN display_name LIKE 'deleted:' || file_id || ':%'
+                  THEN substr(display_name, length(file_id) + 10)
+                ELSE display_name
+              END,
+              archived_active_version_id = COALESCE(
+                active_version_id,
+                (
+                  SELECT version_id
+                  FROM excel_file_versions
+                  WHERE excel_file_versions.file_id = excel_files.file_id
+                    AND status = 'ready'
+                  ORDER BY activated_at DESC, created_at DESC
+                  LIMIT 1
+                )
+              ),
+              status = 'archived'
+            WHERE status = 'deleted'
+            """,
+            """
+            CREATE INDEX idx_excel_files_archive_purge
+              ON excel_files(status, purge_after, updated_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=41,
+        name="add_excel_file_purge_outbox",
+        statements=(
+            """
+            CREATE TABLE excel_file_purge_jobs (
+              job_id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              relative_path TEXT NOT NULL,
+              status TEXT NOT NULL,
+              attempt_count INTEGER NOT NULL DEFAULT 0,
+              requested_by TEXT NOT NULL,
+              counts_json TEXT NOT NULL DEFAULT '{}',
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              completed_at TEXT,
+              worker_id TEXT,
+              claim_token TEXT,
+              lease_expires_at TEXT,
+              heartbeat_at TEXT,
+              state_revision INTEGER NOT NULL DEFAULT 0
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX idx_excel_purge_job_file_active
+              ON excel_file_purge_jobs(file_id)
+              WHERE status IN ('pending', 'processing', 'failed')
+            """,
+            """
+            CREATE INDEX idx_excel_purge_jobs_status_lease
+              ON excel_file_purge_jobs(status, lease_expires_at, created_at)
+            """,
+        ),
+    ),
+    SchemaMigration(
+        version=42,
+        name="backfill_excel_archive_retention_deadline",
+        statements=(
+            """
+            UPDATE excel_files
+            SET purge_after = strftime(
+              '%Y-%m-%dT%H:%M:%S+00:00',
+              'now',
+              '+30 days'
+            )
+            WHERE status = 'archived' AND purge_after IS NULL
+            """,
+        ),
+    ),
 )

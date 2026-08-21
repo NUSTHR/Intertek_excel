@@ -450,7 +450,7 @@ def test_api_rename_file_updates_list_and_detail(
     assert list_response.json()["files"][0]["display_name"] == "standards-renamed.xlsx"
 
 
-def test_api_delete_file_requires_confirmation_and_soft_deletes_from_management(
+def test_api_delete_file_requires_confirmation_and_archives_from_management(
     client: TestClient,
     tmp_path: Path,
 ) -> None:
@@ -478,11 +478,11 @@ def test_api_delete_file_requires_confirmation_and_soft_deletes_from_management(
 
     delete_response = client.delete(f"/api/excel/files/{file_id}?confirm_delete=true")
     assert delete_response.status_code == 200
-    deleted = delete_response.json()
-    assert deleted["file_id"] == file_id
-    assert deleted["deleted_versions"] == 0
-    assert deleted["deleted_sheets"] == 0
-    assert deleted["deleted_artifacts"] == 0
+    archived = delete_response.json()
+    assert archived["file_id"] == file_id
+    assert archived["disposition"] == "archived"
+    assert archived["data_retained"] is True
+    assert archived["purge_eligible_at"] > archived["archived_at"]
 
     missing_response = client.get(f"/api/excel/files/{file_id}")
     assert missing_response.status_code == 404
@@ -547,6 +547,53 @@ def test_api_delete_file_releases_display_name_for_new_upload(
     assert [file["file_id"] for file in list_response.json()["files"]] == [
         replacement["file"]["file_id"]
     ]
+
+
+def test_api_can_restore_archive_and_force_permanent_purge(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    workbook_path = tmp_path / "lifecycle.xlsx"
+    _write_xlsx_fixture(workbook_path)
+    with workbook_path.open("rb") as workbook_file:
+        uploaded = client.post(
+            "/api/excel/files",
+            files={
+                "file": (
+                    "lifecycle.xlsx",
+                    workbook_file,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        ).json()
+    file_id = uploaded["file"]["file_id"]
+
+    assert client.delete(
+        f"/api/excel/files/{file_id}?confirm_delete=true"
+    ).status_code == 200
+    restored = client.post(
+        f"/api/excel/files/{file_id}/restore",
+        json={"display_name": None},
+    )
+    assert restored.status_code == 200
+    assert restored.json()["display_name"] == "lifecycle.xlsx"
+    assert restored.json()["active_version_id"] == uploaded["version"]["version_id"]
+
+    assert client.delete(
+        f"/api/excel/files/{file_id}?confirm_delete=true"
+    ).status_code == 200
+    retained = client.post(
+        f"/api/excel/files/{file_id}/purge",
+        json={"confirmation_display_name": "lifecycle.xlsx", "force": False},
+    )
+    assert retained.status_code == 409
+    purged = client.post(
+        f"/api/excel/files/{file_id}/purge",
+        json={"confirmation_display_name": "lifecycle.xlsx", "force": True},
+    )
+    assert purged.status_code == 200
+    assert purged.json()["status"] == "completed"
+    assert purged.json()["deleted_counts"]["versions"] == 1
 
 
 def _write_xlsx_fixture(path: Path) -> None:

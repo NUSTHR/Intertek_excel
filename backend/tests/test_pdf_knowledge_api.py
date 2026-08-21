@@ -1,4 +1,6 @@
+import sqlite3
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -55,6 +57,9 @@ from app.core.llm_catalog import (
 from app.core.time import utc_now_iso
 from app.domain.models import (
     AuthenticatedUser,
+    DraftAnswerBlock,
+    DraftChatAnswer,
+    DraftCitation,
     PdfFileVisibility,
     PdfModelSetting,
     PdfParsePageStatus,
@@ -254,7 +259,7 @@ def test_pdf_upload_batch_get_requests_do_not_write_rollup_state(
 
     monkeypatch.setattr(
         pdf_repository,
-        "update_pdf_upload_batch_status",
+        "recompute_pdf_upload_batch",
         reject_write,
     )
 
@@ -634,6 +639,68 @@ def test_pdf_upload_batch_reports_processing_after_partial_progress(
     assert batch["result"]["ready"] == 1
     assert batch["result"]["active"] == 1
     assert batch["detail"] == "1 of 2 documents parsed; 1 still active."
+
+
+def test_pdf_upload_batch_conflict_rolls_back_new_folder_hierarchy(
+    client: TestClient,
+    tmp_path: Path,
+) -> None:
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[
+            ("files", ("new/folder/same.pdf", _pdf_bytes(), "application/pdf")),
+            ("files", ("new/folder/same.pdf", _pdf_bytes(), "application/pdf")),
+        ],
+    )
+
+    assert response.status_code == 409
+    assert client.get("/api/pdf/files").json()["files"] == []
+    files_root = tmp_path / "storage" / "pdf-knowledge" / "files"
+    staging_root = tmp_path / "storage" / "pdf-knowledge" / "upload-tasks"
+    assert not files_root.exists() or list(files_root.iterdir()) == []
+    assert not staging_root.exists() or list(staging_root.iterdir()) == []
+
+
+def test_pdf_upload_batch_recompute_cannot_regress_terminal_state(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    response = client.post(
+        "/api/pdf/files/upload-tasks",
+        files=[("files", ("terminal-batch.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    assert response.status_code == 202
+    batch_id = response.json()["batch"]["batch_id"]
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert worker.run_once() is True
+
+    ready_before = pdf_repository.get_pdf_upload_batch(batch_id)
+    assert ready_before is not None
+    assert ready_before.status.value == "ready"
+    assert ready_before.completed_at is not None
+
+    def recompute(stale_timestamp: str):
+        return pdf_repository.recompute_pdf_upload_batch(
+            batch_id=batch_id,
+            updated_at=stale_timestamp,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                recompute,
+                ["2020-01-01T00:00:01+00:00", "2020-01-01T00:00:02+00:00"],
+            )
+        )
+
+    assert all(batch is not None for batch in results)
+    assert all(batch.status.value == "ready" for batch in results if batch is not None)
+    ready_after = pdf_repository.get_pdf_upload_batch(batch_id)
+    assert ready_after is not None
+    assert ready_after.status.value == "ready"
+    assert ready_after.progress == 100
+    assert ready_after.completed_at == ready_before.completed_at
+    assert ready_after.updated_at == ready_before.updated_at
 
 
 def test_pdf_upload_batch_records_skipped_file_reasons(client: TestClient) -> None:
@@ -1187,6 +1254,49 @@ def test_pdf_summary_generation_persists_ready_summary(client: TestClient) -> No
         renamed_detail_response.json()["summary"]["document_title"]
         == "renamed-standard.pdf"
     )
+    renamed_summary = renamed_detail_response.json()["summary"]
+    assert "renamed-standard.pdf" in renamed_summary["positive_routing_terms"]
+    assert "renamed-standard.pdf" in renamed_summary["exact_identifiers"]
+    assert "safety-standard.pdf" not in renamed_summary["exact_identifiers"]
+
+
+def test_pdf_rename_rolls_back_file_when_summary_projection_update_fails(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+    tmp_path: Path,
+) -> None:
+    file_id = _upload_pdf(client, filename="atomic-rename.pdf")
+    upload_worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    assert upload_worker.run_once() is True
+    summary_response = client.post(f"/api/pdf/files/{file_id}/summary/generate")
+    assert summary_response.status_code == 200
+
+    database_path = tmp_path / "pdf.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_pdf_summary_rename
+            BEFORE UPDATE OF document_title ON pdf_document_summaries
+            BEGIN
+              SELECT RAISE(ABORT, 'injected summary rename failure');
+            END
+            """
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="injected summary rename failure"):
+        pdf_repository.rename_pdf_file_and_summary(
+            file_id,
+            "must-not-persist.pdf",
+            utc_now_iso(),
+        )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TRIGGER fail_pdf_summary_rename")
+
+    file = pdf_repository.get_pdf_file(file_id)
+    detail = pdf_repository.get_pdf_document_detail(file_id)
+    assert file is not None
+    assert detail is not None
+    assert file.display_name == "atomic-rename.pdf"
+    assert detail.summary.document_title == "atomic-rename.pdf"
 
 
 def test_pdf_summary_tasks_queue_ready_documents_and_worker_generates_summaries(
@@ -1979,6 +2089,63 @@ def test_pdf_chat_ranks_nine_router_candidates_and_grounds_top_four(
     assert ranking.candidate_file_ids == file_ids
     assert len(answer_response.json()["selected_documents"]) == 4
     assert set(llm_client.answer_chunk_file_ids) == set(file_ids[:4])
+
+
+def test_pdf_chat_rejects_answer_claim_about_reranked_out_document(
+    client: TestClient,
+    pdf_repository: SQLiteExcelAssetRepository,
+) -> None:
+    file_ids = [
+        _upload_pdf(client, filename=f"scope-{index}.pdf")
+        for index in range(5)
+    ]
+    worker = app.dependency_overrides[get_pdf_upload_task_worker]()
+    for _file_id in file_ids:
+        assert worker.run_once() is True
+
+    question = "Compare all five documents."
+
+    class OverclaimingPdfLlmClient(RoutingProbePdfLlmClient):
+        def answer_with_pdf_chunks(self, _question, chunks, **_kwargs):
+            evidence_id = str(chunks[0]["evidence_id"])
+            return DraftChatAnswer(
+                answer_blocks=[
+                    DraftAnswerBlock(
+                        text="All five documents, including scope-4.pdf, agree.",
+                        evidence_ids=[evidence_id],
+                    )
+                ],
+                citations=[DraftCitation(evidence_id=evidence_id, quote="invented")],
+                insufficient_evidence=False,
+                follow_up_suggestions=[],
+            )
+
+    llm_client = OverclaimingPdfLlmClient({question: file_ids})
+    ranking = DeterministicPdfDocumentRanking()
+    chat_service = PdfChatService(
+        llm_client=llm_client,
+        sessions=pdf_repository,
+        document_ranking=ranking,  # type: ignore[arg-type]
+    )
+    original_override = app.dependency_overrides[get_pdf_chat_service]
+    app.dependency_overrides[get_pdf_chat_service] = lambda: chat_service
+    try:
+        session_id = client.post("/api/pdf/chat/sessions").json()["session_id"]
+        response = client.post(
+            f"/api/pdf/chat/sessions/{session_id}/messages",
+            json={"question": question, "file_ids": []},
+        )
+    finally:
+        app.dependency_overrides[get_pdf_chat_service] = original_override
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["insufficient_evidence"] is True
+    assert payload["citations"] == []
+    assert "scope-4.pdf" not in " ".join(
+        block["text"] for block in payload["answer_blocks"]
+    )
+    assert any("matched 5 PDFs" in warning for warning in payload["warnings"])
 
 
 def test_pdf_router_format_failure_returns_typed_retryable_error(
@@ -3092,6 +3259,26 @@ def test_pdf_worker_archives_parser_artifacts(
     )
     archived_path = tmp_path / "storage" / artifact.path
     assert archived_path.read_text(encoding="utf-8") == "Parsed markdown"
+
+    old_claim_root = archived_path.parent
+    artifact_root.mkdir()
+    (artifact_root / "document.md").write_text(
+        "Reparsed markdown",
+        encoding="utf-8",
+    )
+    reparse_task = service.create_reparse_task(
+        file_id=str(task.file_id),
+        user_id=admin_user().user_id,
+        user_role=UserRole.ADMIN,
+    )
+    assert worker.run_once() is True
+    reparsed_report = pdf_repository.get_pdf_parse_report(str(task.file_id))
+    assert reparsed_report is not None
+    assert reparsed_report.artifacts[0].path is not None
+    new_archived_path = tmp_path / "storage" / str(reparsed_report.artifacts[0].path)
+    assert reparse_task.task_id in new_archived_path.as_posix()
+    assert new_archived_path.read_text(encoding="utf-8") == "Reparsed markdown"
+    assert not old_claim_root.exists()
 
 
 def test_pdf_reparse_uses_stored_original_file(client: TestClient) -> None:

@@ -105,15 +105,35 @@ export interface ActiveExcelFileResponse {
   version: ExcelFileVersion
 }
 
-export interface DeleteExcelFileResponse {
+export interface ArchiveExcelFileResponse {
   file_id: string
   display_name: string
-  deleted_versions: number
-  deleted_sheets: number
-  deleted_artifacts: number
-  deleted_row_mappings: number
-  deleted_summaries: number
-  deleted_chat_session_documents: number
+  disposition: 'archived'
+  data_retained: true
+  archived_at: string
+  purge_eligible_at: string
+}
+
+export interface ArchivedExcelFile {
+  file_id: string
+  display_name: string
+  archived_at: string
+  purge_eligible_at: string
+}
+
+export interface ListArchivedExcelFilesResponse {
+  files: ArchivedExcelFile[]
+}
+
+export interface PurgeExcelFileResponse {
+  file_id: string
+  job_id: string
+  status: 'pending' | 'processing' | 'failed' | 'completed'
+  attempt_count: number
+  deleted_counts: Record<string, number>
+  error_message: string | null
+  requested_at: string
+  completed_at: string | null
 }
 
 export interface SheetPreviewResponse {

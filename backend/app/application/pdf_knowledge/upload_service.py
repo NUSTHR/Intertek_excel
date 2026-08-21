@@ -1,9 +1,5 @@
 from dataclasses import dataclass
 
-from app.application.pdf_knowledge.batch_status import (
-    is_terminal_batch_status,
-    upload_batch_rollup,
-)
 from app.application.pdf_knowledge.library_service import PdfLibraryService
 from app.application.pdf_knowledge.parser_profiles import PdfParserProfileRegistry
 from app.application.pdf_knowledge.summary_service import PdfSummaryService
@@ -22,7 +18,6 @@ from app.core.errors import (
 from app.core.ids import new_id
 from app.core.time import utc_now_iso
 from app.domain.models import (
-    PdfFile,
     PdfFileKind,
     PdfUploadBatch,
     PdfUploadBatchStatus,
@@ -72,7 +67,7 @@ class PdfUploadService:
             user_id=user_id,
             parent_id=parent_id,
         )
-        file, task = self._upload_records.build_upload_records(
+        record = self._upload_records.build_upload_records(
             user_id=user_id,
             original_filename=original_filename,
             content=content,
@@ -83,11 +78,11 @@ class PdfUploadService:
             parser_backend=self._parser_profiles.selected_profile_id,
         )
         try:
-            self._repository.create_pdf_upload(file, task)
+            self._repository.create_pdf_upload(record)
         except Exception:
-            self._upload_records.delete_upload_records(file, task)
+            self._upload_records.delete_upload_record(record)
             raise
-        return task
+        return record.task
 
     def create_batch(
         self,
@@ -133,7 +128,7 @@ class PdfUploadService:
                 "skipped_files_detail": inspection.skipped,
             },
         )
-        records: list[tuple[PdfFile, PdfUploadTask]] = []
+        records = []
         try:
             for candidate in accepted:
                 records.append(
@@ -150,12 +145,12 @@ class PdfUploadService:
                 )
             self._repository.create_pdf_upload_batch_records(batch, records)
         except Exception:
-            for file, task in records:
-                self._upload_records.delete_upload_records(file, task)
+            for record in records:
+                self._upload_records.delete_upload_record(record)
             raise
         return PdfUploadBatchCreationResult(
             batch=batch,
-            tasks=[task for _file, task in records],
+            tasks=[record.task for record in records],
         )
 
     def _validate_target_parent(
@@ -351,22 +346,13 @@ class PdfUploadService:
         )
 
     def refresh_batch(self, batch_id: str) -> PdfUploadBatch:
-        batch = self._repository.get_pdf_upload_batch(batch_id)
+        batch = self._repository.recompute_pdf_upload_batch(
+            batch_id=batch_id,
+            updated_at=utc_now_iso(),
+        )
         if batch is None:
             raise AssetNotFoundError("PDF upload batch was not found")
-        tasks = self._repository.list_pdf_upload_tasks_by_batch(batch.batch_id)
-        status, progress, detail, error_message, result = upload_batch_rollup(batch, tasks)
-        now = utc_now_iso()
-        return self._repository.update_pdf_upload_batch_status(
-            batch_id=batch.batch_id,
-            status=status,
-            progress=progress,
-            detail=detail,
-            updated_at=now,
-            completed_at=now if is_terminal_batch_status(status) else None,
-            error_message=error_message,
-            result=result,
-        ) or batch
+        return batch
 
     def is_supported_filename(self, filename: str) -> bool:
         return self._upload_records.is_supported_filename(filename)

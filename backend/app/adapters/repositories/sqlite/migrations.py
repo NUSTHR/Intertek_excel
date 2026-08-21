@@ -1,5 +1,6 @@
 import hashlib
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.adapters.repositories.sqlite.schema import SchemaMigration
@@ -26,21 +27,119 @@ class SQLiteSchemaInspection:
         )
 
 
+@dataclass(frozen=True)
+class SQLiteMigrationConflict:
+    migration_version: int
+    code: str
+    key: dict[str, str]
+    record_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "migration_version": self.migration_version,
+            "code": self.code,
+            "key": self.key,
+            "record_ids": list(self.record_ids),
+        }
+
+
+class SQLiteMigrationPreflightError(RuntimeError):
+    def __init__(self, conflicts: tuple[SQLiteMigrationConflict, ...]) -> None:
+        self.conflicts = conflicts
+        summary = ", ".join(
+            f"v{conflict.migration_version}:{conflict.code}"
+            for conflict in conflicts
+        )
+        super().__init__(
+            "database migration preflight found data conflicts; "
+            f"resolve them before upgrading ({summary})"
+        )
+
+
 class SQLiteMigrationRunner:
-    def __init__(self, migrations: list[SchemaMigration]) -> None:
-        self._migrations = migrations
+    def __init__(self, migrations: Sequence[SchemaMigration]) -> None:
+        self._migrations = tuple(migrations)
 
     def initialize_schema(self, connection: sqlite3.Connection) -> None:
         savepoint = "schema_migration"
         connection.execute(f"SAVEPOINT {savepoint}")
         try:
             self._ensure_migration_table(connection)
+            conflicts = self.inspect_pending_data_conflicts(connection)
+            if conflicts:
+                raise SQLiteMigrationPreflightError(conflicts)
             self._apply_migrations(connection)
         except Exception:
             connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
             connection.execute(f"RELEASE SAVEPOINT {savepoint}")
             raise
         connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+    def inspect_pending_data_conflicts(
+        self,
+        connection: sqlite3.Connection,
+    ) -> tuple[SQLiteMigrationConflict, ...]:
+        applied_versions = (
+            set(self._applied_migrations(connection))
+            if self._table_exists(connection, "schema_migrations")
+            else set()
+        )
+        pending_versions = {
+            migration.version
+            for migration in self._migrations
+            if migration.version not in applied_versions
+        }
+        conflicts: list[SQLiteMigrationConflict] = []
+        if 31 in pending_versions and self._table_exists(connection, "pdf_upload_tasks"):
+            rows = connection.execute(
+                """
+                SELECT file_id, GROUP_CONCAT(task_id) AS record_ids
+                FROM pdf_upload_tasks
+                WHERE file_id IS NOT NULL
+                  AND status IN ('queued', 'processing')
+                GROUP BY file_id
+                HAVING COUNT(*) > 1
+                ORDER BY file_id ASC
+                """
+            ).fetchall()
+            conflicts.extend(
+                SQLiteMigrationConflict(
+                    migration_version=31,
+                    code="duplicate_active_pdf_upload_tasks",
+                    key={"file_id": str(row["file_id"])},
+                    record_ids=_split_record_ids(row["record_ids"]),
+                )
+                for row in rows
+            )
+        if 32 in pending_versions and self._table_exists(connection, "pdf_files"):
+            rows = connection.execute(
+                """
+                SELECT
+                  user_id,
+                  COALESCE(parent_id, '') AS parent_id,
+                  display_name,
+                  GROUP_CONCAT(file_id) AS record_ids
+                FROM pdf_files
+                WHERE status = 'active'
+                GROUP BY user_id, COALESCE(parent_id, ''), display_name
+                HAVING COUNT(*) > 1
+                ORDER BY user_id ASC, parent_id ASC, display_name ASC
+                """
+            ).fetchall()
+            conflicts.extend(
+                SQLiteMigrationConflict(
+                    migration_version=32,
+                    code="duplicate_active_pdf_sibling_names",
+                    key={
+                        "user_id": str(row["user_id"]),
+                        "parent_id": str(row["parent_id"]),
+                        "display_name": str(row["display_name"]),
+                    },
+                    record_ids=_split_record_ids(row["record_ids"]),
+                )
+                for row in rows
+            )
+        return tuple(conflicts)
 
     def inspect_schema(self, connection: sqlite3.Connection) -> SQLiteSchemaInspection:
         expected_checksums = {
@@ -145,3 +244,18 @@ class SQLiteMigrationRunner:
             ]
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+        return connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            """,
+            (table_name,),
+        ).fetchone() is not None
+
+
+def _split_record_ids(value: object) -> tuple[str, ...]:
+    return tuple(sorted(item for item in str(value or "").split(",") if item))

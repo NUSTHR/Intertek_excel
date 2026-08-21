@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from app.domain.models import (
     ExcelArtifact,
     ExcelFile,
+    ExcelFilePurgeJob,
     ExcelFileVersion,
     ExcelRowMapping,
     ExcelSheet,
@@ -28,15 +29,19 @@ class UploadExcelResult:
 
 
 @dataclass(frozen=True)
-class DeleteExcelFileResult:
+class ArchiveExcelFileResult:
     file_id: str
     display_name: str
-    deleted_versions: int
-    deleted_sheets: int
-    deleted_artifacts: int
-    deleted_row_mappings: int
-    deleted_summaries: int
-    deleted_chat_session_documents: int
+    disposition: str
+    data_retained: bool
+    archived_at: str
+    purge_eligible_at: str
+
+
+@dataclass(frozen=True)
+class PurgeExcelFileResult:
+    file_id: str
+    job: ExcelFilePurgeJob
 
 
 @dataclass(frozen=True)

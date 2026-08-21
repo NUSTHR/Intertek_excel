@@ -1,14 +1,18 @@
 import hashlib
+import hmac
 import logging
 import sqlite3
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.application.excel_assets.access import FileAccessContext
 from app.application.excel_assets.access_guard import ExcelAssetAccessGuard
 from app.application.excel_assets.csv_rows import CsvRowReader
 from app.application.excel_assets.models import (
-    DeleteExcelFileResult,
+    ArchiveExcelFileResult,
     FileNameCheckResult,
+    PurgeExcelFileResult,
     RowLookupResult,
     SheetPreviewResult,
     SheetRowsResult,
@@ -21,8 +25,10 @@ from app.application.excel_assets.profile import WorkbookProfileBuilder
 from app.application.excel_assets.profile_loader import WorkbookProfileLoader
 from app.application.excel_assets.search import SheetRowSearchEngine, SheetRowSearchPolicy
 from app.application.excel_assets.version_processor import WorkbookVersionProcessor
+from app.application.operational.task_lease import task_lease_window
 from app.core.errors import (
     AssetNotFoundError,
+    ExcelFileLifecycleConflict,
     FileDeleteConfirmationRequiredError,
     FileNameConflictError,
     VersionActivationError,
@@ -33,6 +39,8 @@ from app.domain.models import (
     ExcelArtifact,
     ExcelArtifactType,
     ExcelFile,
+    ExcelFilePurgeJob,
+    ExcelFileStatus,
     ExcelFileVersion,
     ExcelFileVisibility,
     ExcelSheet,
@@ -55,6 +63,7 @@ class ExcelAssetService:
         workbook_reader: WorkbookReader,
         profile_builder: WorkbookProfileBuilder | None = None,
         search_policy: SheetRowSearchPolicy | None = None,
+        archive_retention_days: int = 30,
     ) -> None:
         self._repository = repository
         self._storage = storage
@@ -69,6 +78,11 @@ class ExcelAssetService:
             profile_builder=profile_builder,
         )
         self._search_policy = search_policy or SheetRowSearchPolicy()
+        if archive_retention_days < 0:
+            raise ValueError("archive retention days must not be negative")
+        self._archive_retention_days = archive_retention_days
+        self._purge_worker_id = f"excel-purge-worker-{uuid.uuid4()}"
+        self._purge_lease_seconds = 900.0
         self._search_engine = SheetRowSearchEngine(
             repository=repository,
             resolve_artifact_path=self._artifact_path,
@@ -77,6 +91,7 @@ class ExcelAssetService:
 
     def initialize(self) -> None:
         self._repository.initialize()
+        self.retry_pending_file_purges()
 
     def check_display_name(self, display_name: str) -> FileNameCheckResult:
         normalized_name = self._normalize_display_name(display_name)
@@ -89,6 +104,15 @@ class ExcelAssetService:
             file_id=existing_file.file_id,
             active_version_id=existing_file.active_version_id,
         )
+
+    def list_archived_files(self) -> list[ExcelFile]:
+        return self._repository.list_archived_files()
+
+    def get_purge_job(self, job_id: str) -> ExcelFilePurgeJob:
+        job = self._repository.get_excel_file_purge_job(job_id)
+        if job is None:
+            raise AssetNotFoundError("Excel purge job was not found")
+        return job
 
     def upload_workbook(
         self,
@@ -257,29 +281,204 @@ class ExcelAssetService:
             raise AssetNotFoundError("Excel file was not found")
         return updated_file
 
-    def delete_file(
+    def archive_file(
         self,
         file_id: str,
         *,
         confirm_delete: bool = False,
-    ) -> DeleteExcelFileResult:
-        file = self._require_file(file_id)
+    ) -> ArchiveExcelFileResult:
+        file = self._repository.get_file_including_deleted(file_id)
+        if file is None or file.status not in {
+            ExcelFileStatus.ACTIVE,
+            ExcelFileStatus.ARCHIVED,
+        }:
+            raise AssetNotFoundError("Excel file was not found")
         if not confirm_delete:
             raise FileDeleteConfirmationRequiredError(
-                display_name=file.display_name,
+                display_name=file.archived_display_name or file.display_name,
                 file_id=file.file_id,
             )
-        counts = self._repository.delete_file(file_id)
-        return DeleteExcelFileResult(
+        if file.status == ExcelFileStatus.ARCHIVED:
+            if file.deleted_at is None or file.purge_after is None:
+                raise RuntimeError("archived Excel file lifecycle metadata is incomplete")
+            return ArchiveExcelFileResult(
+                file_id=file.file_id,
+                display_name=file.archived_display_name or file.display_name,
+                disposition="archived",
+                data_retained=True,
+                archived_at=file.deleted_at,
+                purge_eligible_at=file.purge_after,
+            )
+        archived_at = utc_now_iso()
+        purge_after = (
+            datetime.fromisoformat(archived_at).astimezone(UTC)
+            + timedelta(days=self._archive_retention_days)
+        ).isoformat(timespec="seconds")
+        if not self._repository.archive_file(
+            file_id=file_id,
+            archived_at=archived_at,
+            purge_after=purge_after,
+        ):
+            refreshed = self._repository.get_file_including_deleted(file_id)
+            if refreshed is None or refreshed.status != ExcelFileStatus.ARCHIVED:
+                raise AssetNotFoundError("Excel file was not found")
+            return self.archive_file(file_id, confirm_delete=True)
+        return ArchiveExcelFileResult(
             file_id=file.file_id,
             display_name=file.display_name,
-            deleted_versions=counts["deleted_versions"],
-            deleted_sheets=counts["deleted_sheets"],
-            deleted_artifacts=counts["deleted_artifacts"],
-            deleted_row_mappings=counts["deleted_row_mappings"],
-            deleted_summaries=counts["deleted_summaries"],
-            deleted_chat_session_documents=counts["deleted_chat_session_documents"],
+            disposition="archived",
+            data_retained=True,
+            archived_at=archived_at,
+            purge_eligible_at=purge_after,
         )
+
+    def restore_file(
+        self,
+        file_id: str,
+        *,
+        display_name: str | None = None,
+    ) -> ExcelFile:
+        file = self._repository.get_file_including_deleted(file_id)
+        if file is None:
+            raise AssetNotFoundError("Excel file was not found")
+        if file.status == ExcelFileStatus.ACTIVE:
+            return file
+        if file.status != ExcelFileStatus.ARCHIVED:
+            raise AssetNotFoundError("Excel file cannot be restored")
+        archived_version = (
+            self._repository.get_version(file.archived_active_version_id)
+            if file.archived_active_version_id
+            else None
+        )
+        if (
+            archived_version is None
+            or archived_version.file_id != file.file_id
+            or archived_version.status != ExcelVersionStatus.READY
+        ):
+            raise ExcelFileLifecycleConflict(
+                "The archived Excel file has no ready version that can be restored.",
+                file_id=file_id,
+            )
+        restored_name = self._normalize_display_name(
+            display_name or file.archived_display_name or ""
+        )
+        restored = self._repository.restore_archived_file(
+            file_id=file_id,
+            display_name=restored_name,
+            restored_at=utc_now_iso(),
+        )
+        if restored is not None:
+            return restored
+        conflict = self._repository.find_file_by_display_name(restored_name)
+        if conflict is not None and conflict.file_id != file_id:
+            raise FileNameConflictError(restored_name, conflict.file_id)
+        raise AssetNotFoundError("Excel file cannot be restored")
+
+    def purge_file(
+        self,
+        file_id: str,
+        *,
+        confirmation_display_name: str,
+        requested_by: str,
+        force: bool = False,
+    ) -> PurgeExcelFileResult:
+        file = self._repository.get_file_including_deleted(file_id)
+        if file is None:
+            raise AssetNotFoundError("Excel file was not found")
+        if file.status in {
+            ExcelFileStatus.PURGE_PENDING,
+            ExcelFileStatus.PURGED,
+        }:
+            job = self._repository.request_excel_file_purge(
+                file_id=file_id,
+                requested_by=requested_by,
+                requested_at=utc_now_iso(),
+                allow_before_retention=True,
+            )
+            if job is None:
+                raise AssetNotFoundError("Excel purge job was not found")
+            self.retry_pending_file_purges()
+            return PurgeExcelFileResult(
+                file_id=file_id,
+                job=self._repository.get_excel_file_purge_job(job.job_id) or job,
+            )
+        if file.status != ExcelFileStatus.ARCHIVED:
+            raise ExcelFileLifecycleConflict(
+                "Archive the Excel file before requesting permanent purge.",
+                file_id=file_id,
+            )
+        expected_name = file.archived_display_name or ""
+        if not hmac.compare_digest(confirmation_display_name.strip(), expected_name):
+            raise ExcelFileLifecycleConflict(
+                "Permanent purge requires the exact archived workbook name.",
+                file_id=file_id,
+            )
+        requested_at = utc_now_iso()
+        if not force and (file.purge_after is None or file.purge_after > requested_at):
+            raise ExcelFileLifecycleConflict(
+                f"The archive retention period has not ended; purge is available after "
+                f"{file.purge_after or 'the configured retention deadline'}.",
+                file_id=file_id,
+            )
+        job = self._repository.request_excel_file_purge(
+            file_id=file_id,
+            requested_by=requested_by,
+            requested_at=requested_at,
+            allow_before_retention=force,
+        )
+        if job is None:
+            raise ExcelFileLifecycleConflict(
+                "Excel file state changed before purge could be requested.",
+                file_id=file_id,
+            )
+        self.retry_pending_file_purges()
+        return PurgeExcelFileResult(
+            file_id=file_id,
+            job=self._repository.get_excel_file_purge_job(job.job_id) or job,
+        )
+
+    def retry_pending_file_purges(self) -> int:
+        completed = 0
+        available_at = utc_now_iso()
+        for candidate in self._repository.list_pending_excel_file_purge_jobs(
+            available_at=available_at
+        ):
+            claimed_at, lease_expires_at = task_lease_window(
+                self._purge_lease_seconds
+            )
+            claim_token = new_id("excelpurgeclaim")
+            job = self._repository.claim_excel_file_purge_job(
+                job_id=candidate.job_id,
+                worker_id=self._purge_worker_id,
+                claim_token=claim_token,
+                claimed_at=claimed_at,
+                lease_expires_at=lease_expires_at,
+            )
+            if job is None:
+                continue
+            now = utc_now_iso()
+            try:
+                expected_path = f"files/{job.file_id}"
+                if job.relative_path != expected_path:
+                    raise ValueError("Excel purge target is outside managed storage")
+                self._storage.delete_file_tree(job.file_id)
+                completed_job = self._repository.complete_excel_file_purge_job(
+                    job_id=job.job_id,
+                    worker_id=self._purge_worker_id,
+                    claim_token=claim_token,
+                    completed_at=now,
+                )
+                if completed_job is not None:
+                    completed += 1
+            except (OSError, ValueError) as exc:
+                self._repository.fail_excel_file_purge_job(
+                    job_id=job.job_id,
+                    worker_id=self._purge_worker_id,
+                    claim_token=claim_token,
+                    error_message=str(exc),
+                    failed_at=now,
+                )
+        return completed
 
     def get_active_file_version(
         self,
@@ -336,7 +535,7 @@ class ExcelAssetService:
         self,
         version_id: str,
     ) -> list[ExcelSheet]:
-        version = self._require_version_from_deleted_file(version_id)
+        version = self._require_version_from_archived_file(version_id)
         return self._repository.list_sheets(version.version_id)
 
     def get_profile(
@@ -447,7 +646,7 @@ class ExcelAssetService:
         offset: int = 0,
         limit: int = 500,
     ) -> SheetRowsResult:
-        sheet = self._require_sheet_from_deleted_file(sheet_id)
+        sheet = self._require_sheet_from_archived_file(sheet_id)
         safe_offset = max(0, offset)
         safe_limit = max(1, min(5000, limit))
         return SheetRowsResult(
@@ -572,7 +771,16 @@ class ExcelAssetService:
             )
         if created_new_file:
             try:
-                self._repository.delete_file(file.file_id)
+                archived_at = utc_now_iso()
+                purge_after = (
+                    datetime.fromisoformat(archived_at).astimezone(UTC)
+                    + timedelta(days=self._archive_retention_days)
+                ).isoformat(timespec="seconds")
+                self._repository.archive_file(
+                    file_id=file.file_id,
+                    archived_at=archived_at,
+                    purge_after=purge_after,
+                )
             except Exception:
                 logger.warning(
                     "Failed to hide a newly-created workbook after upload failure",
@@ -636,8 +844,8 @@ class ExcelAssetService:
     ) -> ExcelFileVersion:
         return self._access_guard.require_version(version_id, access=access)
 
-    def _require_version_from_deleted_file(self, version_id: str) -> ExcelFileVersion:
-        return self._access_guard.require_version_from_deleted_file(version_id)
+    def _require_version_from_archived_file(self, version_id: str) -> ExcelFileVersion:
+        return self._access_guard.require_version_from_archived_file(version_id)
 
     def _require_sheet(
         self,
@@ -646,5 +854,5 @@ class ExcelAssetService:
     ) -> ExcelSheet:
         return self._access_guard.require_sheet(sheet_id, access=access)
 
-    def _require_sheet_from_deleted_file(self, sheet_id: str) -> ExcelSheet:
-        return self._access_guard.require_sheet_from_deleted_file(sheet_id)
+    def _require_sheet_from_archived_file(self, sheet_id: str) -> ExcelSheet:
+        return self._access_guard.require_sheet_from_archived_file(sheet_id)

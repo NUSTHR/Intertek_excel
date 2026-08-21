@@ -183,13 +183,14 @@ class FakeLlmClient:
         self,
         question: str,
         chunks: list[dict],
+        document_manifest: dict[str, object] | None = None,
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
         cancellation_checker: CancellationChecker | None = None,
     ) -> DraftChatAnswer:
-        _ = previous_turns, model, provider, enable_deep_thinking
+        _ = document_manifest, previous_turns, model, provider, enable_deep_thinking
         if cancellation_checker is not None:
             cancellation_checker()
         evidence_ids = [str(chunk["evidence_id"]) for chunk in chunks[:3]]

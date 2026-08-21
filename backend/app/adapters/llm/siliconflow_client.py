@@ -41,6 +41,20 @@ from app.ports.llm_client import CancellationChecker
 
 logger = logging.getLogger(__name__)
 
+_PDF_ROUTING_RETRY_RESERVE_CHARACTERS = 9_000
+_PDF_ROUTING_DOCUMENT_TITLE_CHARACTERS = 500
+_PDF_ROUTING_SUMMARY_CHARACTERS = 4_000
+_PDF_ROUTING_NOTES_CHARACTERS = 2_000
+_PDF_ROUTING_LIST_ITEM_CHARACTERS = 256
+_PDF_ROUTING_LIST_LIMITS = {
+    "key_topics": 32,
+    "positive_routing_terms": 48,
+    "negative_routing_terms": 32,
+    "exact_identifiers": 64,
+    "suitable_questions": 24,
+    "unsuitable_questions": 24,
+}
+
 DOCUMENT_SUMMARY_SYSTEM_PROMPT = "\n".join(
     [
         "You are an Excel document profiling assistant for a third-party testing, "
@@ -158,13 +172,17 @@ Rules:
    folder/scope, or a comparison of the selected scope are range-wide intents.
    For such intents, select the distinct candidate documents needed to cover the
    scope, up to the supplied maximum.
-7. Candidates with the same non-empty duplicate_content_group are copies. Select at
-   most one member of each such group unless the question explicitly asks about
-   copies or versions. Also avoid obvious duplicate copies whose title and routing
-   summary are materially identical.
+7. Candidates with the same non-empty duplicate_content_group are copies. Unless
+   the question explicitly asks about copies or versions, select only the member
+   whose duplicate_content_canonical value is true. If copies or versions are
+   explicitly requested, select every relevant copy. Also avoid obvious duplicate
+   copies whose title and routing summary are materially identical.
 8. For ordinary fact questions, select only strong semantic or identifier matches.
 9. If no candidate is likely to contain evidence, return an empty array.
-10. Return strict JSON only. Do not return Markdown, comments, rejected-document
+10. The catalog may be one transport batch from a larger scope. Classify every
+    candidate in this batch independently and return every relevant candidate in
+    this batch. Do not apply a top-k ranking inside the batch.
+11. Return strict JSON only. Do not return Markdown, comments, rejected-document
     lists, routing analysis, or explanatory text outside the JSON object.
 """.strip()
 
@@ -211,6 +229,34 @@ Rules:
 11. Each answer_block must include only the evidence_ids that support that block's text.
 12. Do not collect all citations at the end of the answer or in one final answer block.
 13. Return strict JSON only. Do not return markdown, comments, explanations, or code fences.
+14. The authoritative document manifest defines the complete evidence scope for
+    this turn. A document mentioned in the question or conversation history is
+    not evidence unless it appears in that manifest.
+15. Never claim that you inspected, compared, or verified more documents than
+    final_document_count. Never mention a document that is absent from the manifest.
+""".strip()
+
+PDF_ANSWER_GROUNDING_VERIFIER_SYSTEM_PROMPT = """
+You are a strict evidence-grounding verifier for an enterprise PDF assistant.
+
+Evaluate the draft against only the current chunks and authoritative document
+manifest. Reject the draft if any factual claim lacks supporting evidence, if it
+mentions a document outside the manifest, or if it claims broader document
+coverage than final_document_count. Conversation history and the user's wording
+are never evidence. Return strict JSON only with this shape:
+{"supported": true, "violations": []}
+
+Do not return reasoning, markdown, revised answer text, or any additional keys.
+""".strip()
+
+PDF_ANSWER_GROUNDING_REPAIR_SYSTEM_PROMPT = """
+You repair an enterprise PDF answer using only the supplied current PDF chunks.
+
+Remove every unsupported statement and every reference to a document outside the
+authoritative manifest. Never claim broader coverage than final_document_count.
+Every answer block must contain supporting evidence_id values from the supplied
+chunks. If a grounded answer cannot be produced, return no answer blocks and set
+insufficient_evidence to true. Return strict JSON only.
 """.strip()
 
 
@@ -223,6 +269,8 @@ class SiliconFlowConfig:
     answer_model: str
     timeout_seconds: float
     summary_max_profile_rows: int
+    pdf_routing_max_request_characters: int = 120_000
+    pdf_routing_max_batch_documents: int = 20
 
 
 @dataclass(frozen=True)
@@ -502,7 +550,7 @@ class MultiProviderLlmClient:
         provider: str | None = None,
         cancellation_checker: CancellationChecker | None = None,
     ) -> list[SelectedDocument]:
-        if not summaries:
+        if not summaries or max_documents <= 0:
             return []
         provider_config, resolved_model = self._resolve_request(
             provider=provider,
@@ -510,91 +558,81 @@ class MultiProviderLlmClient:
             stage="router",
         )
         _ = user_questions
-        document_catalog_json = json.dumps(
-            self._pdf_routing_document_catalog(
+        routing_memory = self._routing_memory_messages(previous_turns or [])
+        document_batches = self._pdf_routing_document_batches(
+            catalog=self._pdf_routing_document_catalog(
                 summaries=summaries,
                 attached_documents=attached_documents or [],
                 previous_turns=previous_turns or [],
             ),
-            ensure_ascii=False,
+            question=question,
+            routing_memory=routing_memory,
         )
-        messages = [
-            {"role": "system", "content": PDF_DOCUMENT_ROUTER_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "PDF candidate catalog for the current scope:\n\n"
-                    f"{document_catalog_json}"
-                ),
-            },
-            *self._routing_memory_messages(previous_turns or []),
-            {
-                "role": "user",
-                "content": (
-                    "Route the current PDF question.\n\n"
-                    f"Maximum documents for this turn: {max_documents}\n\n"
-                    f"Current question:\n{question}\n\n"
-                    "Return JSON in exactly this compact shape:\n"
-                    "{\n"
-                    '  "document_for_this_turn": [\n'
-                    "    {\n"
-                    '      "file_id": "candidate file_id",\n'
-                    '      "version_id": "candidate version_id",\n'
-                    '      "reason": "short matched topic or range-wide reason",\n'
-                    '      "confidence": 0.0\n'
-                    "    }\n"
-                    "  ]\n"
-                    "}"
-                ),
-            },
-        ]
-        try:
-            payload = self._chat_json(
-                stage="pdf_route_model",
-                provider_config=provider_config,
-                model=resolved_model,
-                cancellation_checker=cancellation_checker,
-                messages=messages,
-                allow_embedded_json=True,
-                invalid_json_retry_prompt=(
-                    "Your previous response was not a complete JSON object. Return only "
-                    'the compact object {"document_for_this_turn": [...]} now. Do not '
-                    "include rejected documents, analysis, Markdown, or code fences."
-                ),
+        logger.info(
+            "routing PDF document catalog candidate_count=%s batch_count=%s",
+            len(summaries),
+            len(document_batches),
+        )
+        selected_by_version_id: dict[str, SelectedDocument] = {}
+        for batch_index, document_batch in enumerate(document_batches, start=1):
+            messages = self._pdf_routing_messages(
+                document_catalog_json=self._compact_json(document_batch),
+                question=question,
+                routing_memory=routing_memory,
+                batch_document_count=len(document_batch),
             )
-        except LlmResponseFormatError as exc:
-            raise PdfRoutingError(
-                "PDF document routing returned an invalid response. Please retry."
-            ) from exc
+            try:
+                payload = self._chat_json(
+                    stage="pdf_route_model",
+                    provider_config=provider_config,
+                    model=resolved_model,
+                    cancellation_checker=cancellation_checker,
+                    messages=messages,
+                    allow_embedded_json=True,
+                    invalid_json_retry_prompt=(
+                        "Your previous response was not a complete JSON object. Return "
+                        'only the compact object {"document_for_this_turn": [...]} now. '
+                        "Do not include rejected documents, analysis, Markdown, or code "
+                        "fences."
+                    ),
+                    max_request_characters=(
+                        self._config.pdf_routing_max_request_characters
+                    ),
+                )
+            except LlmResponseFormatError as exc:
+                raise PdfRoutingError(
+                    "PDF document routing returned an invalid response. Please retry."
+                ) from exc
 
-        raw_selected_items = self._object_list(
-            payload.get("document_for_this_turn", payload.get("selected_documents"))
-        )
-        selected = [
-            SelectedDocument(
-                file_id=str(item.get("file_id", "")),
-                version_id=str(item.get("version_id", "")),
-                reason=str(item.get("reason", "")),
-                confidence=self._optional_float(item.get("confidence")),
+            selected = self._validated_pdf_router_selection(
+                payload=payload,
+                document_batch=document_batch,
             )
-            for item in raw_selected_items
+            for document in selected:
+                selected_by_version_id[document.version_id] = document
+            logger.info(
+                "completed PDF routing batch batch_index=%s batch_count=%s "
+                "candidate_count=%s selected_count=%s",
+                batch_index,
+                len(document_batches),
+                len(document_batch),
+                len(selected),
+            )
+
+        ordered_selected = [
+            selected_by_version_id[summary.version_id]
+            for summary in summaries
+            if summary.version_id in selected_by_version_id
         ]
-        selected = self._filter_router_selection(
-            selected=selected,
-            raw_items=raw_selected_items,
-            max_documents=max_documents,
+        result = ordered_selected[:max_documents]
+        logger.info(
+            "completed PDF document routing candidate_count=%s selected_count=%s "
+            "returned_count=%s",
+            len(summaries),
+            len(ordered_selected),
+            len(result),
         )
-        allowed = {summary.version_id: summary.file_id for summary in summaries}
-        unique_selected: list[SelectedDocument] = []
-        seen_version_ids: set[str] = set()
-        for document in selected:
-            if allowed.get(document.version_id) != document.file_id:
-                continue
-            if document.version_id in seen_version_ids:
-                continue
-            seen_version_ids.add(document.version_id)
-            unique_selected.append(document)
-        return unique_selected
+        return result
 
     def answer_with_rows(
         self,
@@ -719,6 +757,7 @@ class MultiProviderLlmClient:
         self,
         question: str,
         chunks: list[dict],
+        document_manifest: dict[str, object] | None = None,
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
@@ -731,6 +770,7 @@ class MultiProviderLlmClient:
             stage="answer",
         )
         chunks_json = json.dumps(chunks, ensure_ascii=False)
+        manifest_json = json.dumps(document_manifest or {}, ensure_ascii=False)
         logger.debug(
             "preparing PDF answer model payload chunk_count=%s previous_turn_count=%s",
             len(chunks),
@@ -750,6 +790,7 @@ class MultiProviderLlmClient:
                     "content": (
                         "Answer the question using the provided PDF chunks.\n\n"
                         f"Question:\n{question}\n\n"
+                        f"Authoritative document manifest:\n{manifest_json}\n\n"
                         f"Chunks:\n{chunks_json}\n\n"
                         "Each chunk object has evidence_id, file_id, file_name, "
                         "chunk_id, chunk_index, token_count, page_label, title, "
@@ -773,6 +814,10 @@ class MultiProviderLlmClient:
                         "}\n\n"
                         "Important:\n"
                         "- evidence_ids must contain only evidence_id values from Chunks.\n"
+                        "- Treat the authoritative document manifest as a hard scope boundary.\n"
+                        "- If the question asks about more documents than final_document_count, "
+                        "state that the answer covers only the manifest documents; do not claim "
+                        "to have checked excluded documents.\n"
                         "- Prefer using evidence_id everywhere citations are needed.\n"
                         "- quote should be a short snippet copied or summarized from the "
                         "cited chunk.\n"
@@ -784,6 +829,153 @@ class MultiProviderLlmClient:
                 },
             ],
         )
+        return self._pdf_draft_answer_from_payload(payload, reasoning_content)
+
+    def verify_and_repair_pdf_answer(
+        self,
+        *,
+        question: str,
+        chunks: list[dict],
+        document_manifest: dict[str, object],
+        draft_answer: DraftChatAnswer,
+        model: str | None = None,
+        provider: str | None = None,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> DraftChatAnswer | None:
+        provider_config, resolved_model = self._resolve_request(
+            provider=provider,
+            model=model,
+            stage="answer",
+        )
+        chunks_json = json.dumps(chunks, ensure_ascii=False)
+        manifest_json = json.dumps(document_manifest, ensure_ascii=False)
+        draft_json = json.dumps(
+            {
+                "answer_blocks": [
+                    {
+                        "text": block.text,
+                        "evidence_ids": block.evidence_ids,
+                    }
+                    for block in draft_answer.answer_blocks
+                ],
+                "citations": [
+                    {"evidence_id": citation.evidence_id}
+                    for citation in draft_answer.citations
+                ],
+                "insufficient_evidence": draft_answer.insufficient_evidence,
+                "follow_up_suggestions": draft_answer.follow_up_suggestions,
+            },
+            ensure_ascii=False,
+        )
+        supported, violations = self._verify_pdf_answer_payload(
+            provider_config=provider_config,
+            model=resolved_model,
+            question=question,
+            chunks_json=chunks_json,
+            manifest_json=manifest_json,
+            draft_json=draft_json,
+            cancellation_checker=cancellation_checker,
+        )
+        if supported:
+            return draft_answer
+
+        repair_payload, repair_reasoning = self._chat_json_with_reasoning(
+            stage="pdf_answer_grounding_repair",
+            provider_config=provider_config,
+            model=resolved_model,
+            enable_deep_thinking=False,
+            cancellation_checker=cancellation_checker,
+            messages=[
+                {"role": "system", "content": PDF_ANSWER_GROUNDING_REPAIR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question:\n{question}\n\n"
+                        f"Authoritative document manifest:\n{manifest_json}\n\n"
+                        f"Chunks:\n{chunks_json}\n\n"
+                        f"Rejected draft:\n{draft_json}\n\n"
+                        f"Violation codes:\n{json.dumps(violations, ensure_ascii=False)}\n\n"
+                        "Return JSON with answer_blocks, citations, "
+                        "insufficient_evidence, and follow_up_suggestions using the "
+                        "same schema as the rejected draft."
+                    ),
+                },
+            ],
+        )
+        repaired = self._pdf_draft_answer_from_payload(
+            repair_payload,
+            repair_reasoning,
+        )
+        repaired_json = json.dumps(
+            {
+                "answer_blocks": [
+                    {"text": block.text, "evidence_ids": block.evidence_ids}
+                    for block in repaired.answer_blocks
+                ],
+                "citations": [
+                    {"evidence_id": citation.evidence_id}
+                    for citation in repaired.citations
+                ],
+                "insufficient_evidence": repaired.insufficient_evidence,
+                "follow_up_suggestions": repaired.follow_up_suggestions,
+            },
+            ensure_ascii=False,
+        )
+        repaired_supported, _ = self._verify_pdf_answer_payload(
+            provider_config=provider_config,
+            model=resolved_model,
+            question=question,
+            chunks_json=chunks_json,
+            manifest_json=manifest_json,
+            draft_json=repaired_json,
+            cancellation_checker=cancellation_checker,
+        )
+        return repaired if repaired_supported else None
+
+    def _verify_pdf_answer_payload(
+        self,
+        *,
+        provider_config: LlmProviderConfig,
+        model: str,
+        question: str,
+        chunks_json: str,
+        manifest_json: str,
+        draft_json: str,
+        cancellation_checker: CancellationChecker | None,
+    ) -> tuple[bool, list[str]]:
+        payload, _reasoning = self._chat_json_with_reasoning(
+            stage="pdf_answer_grounding_verifier",
+            provider_config=provider_config,
+            model=model,
+            enable_deep_thinking=False,
+            cancellation_checker=cancellation_checker,
+            messages=[
+                {
+                    "role": "system",
+                    "content": PDF_ANSWER_GROUNDING_VERIFIER_SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question:\n{question}\n\n"
+                        f"Authoritative document manifest:\n{manifest_json}\n\n"
+                        f"Chunks:\n{chunks_json}\n\n"
+                        f"Draft answer:\n{draft_json}"
+                    ),
+                },
+            ],
+        )
+        supported = payload.get("supported") is True
+        violations = self._string_list(payload.get("violations"))
+        if not supported and not violations:
+            violations = ["UNSUPPORTED_DRAFT"]
+        return supported, violations
+
+    def _pdf_draft_answer_from_payload(
+        self,
+        payload: dict[str, object],
+        reasoning_content: str,
+    ) -> DraftChatAnswer:
         answer_blocks = [
             DraftAnswerBlock(
                 text=str(block.get("text", "")).strip(),
@@ -846,7 +1038,12 @@ class MultiProviderLlmClient:
         cancellation_checker: CancellationChecker | None = None,
         allow_embedded_json: bool = False,
         invalid_json_retry_prompt: str | None = None,
+        max_request_characters: int | None = None,
     ) -> dict[str, Any]:
+        self._validate_message_character_budget(
+            messages=messages,
+            max_request_characters=max_request_characters,
+        )
         content, _reasoning_content = self._chat_message_parts(
             stage=stage,
             provider_config=provider_config,
@@ -870,6 +1067,10 @@ class MultiProviderLlmClient:
             {"role": "assistant", "content": content[:8000]},
             {"role": "user", "content": invalid_json_retry_prompt},
         ]
+        self._validate_message_character_budget(
+            messages=retry_messages,
+            max_request_characters=max_request_characters,
+        )
         retry_content, _retry_reasoning = self._chat_message_parts(
             stage=stage,
             provider_config=provider_config,
@@ -882,6 +1083,19 @@ class MultiProviderLlmClient:
             retry_content,
             allow_embedded=allow_embedded_json,
         )
+
+    def _validate_message_character_budget(
+        self,
+        *,
+        messages: list[dict[str, str]] | None,
+        max_request_characters: int | None,
+    ) -> None:
+        if messages is None or max_request_characters is None:
+            return
+        if len(self._compact_json(messages)) > max_request_characters:
+            raise LlmResponseFormatError(
+                "LLM request exceeds the configured character budget"
+            )
 
     def _chat_text(
         self,
@@ -1131,37 +1345,282 @@ class MultiProviderLlmClient:
     ) -> list[dict[str, Any]]:
         attached_version_ids = {document.version_id for document in attached_documents}
         selected_turn_stats = self._selected_turn_stats(previous_turns)
+        catalog: list[dict[str, Any]] = []
+        seen_duplicate_groups: set[str] = set()
+        for summary in summaries:
+            duplicate_groups = summary.coverage_scope.get(
+                "duplicate_content_group", []
+            )
+            duplicate_group = (
+                str(duplicate_groups[0] or "").strip()
+                if isinstance(duplicate_groups, list) and duplicate_groups
+                else ""
+            )
+            duplicate_content_canonical = (
+                not duplicate_group or duplicate_group not in seen_duplicate_groups
+            )
+            if duplicate_group:
+                seen_duplicate_groups.add(duplicate_group)
+            catalog.append(
+                self._compact_pdf_routing_card(
+                    {
+                        "file_id": summary.file_id,
+                        "version_id": summary.version_id,
+                        "document_title": summary.document_title,
+                        "duplicate_content_group": duplicate_group or None,
+                        "duplicate_content_canonical": duplicate_content_canonical,
+                        "attachment_state": (
+                            "attached"
+                            if summary.version_id in attached_version_ids
+                            else "candidate"
+                        ),
+                        "selected_turn_count": selected_turn_stats.get(
+                            summary.version_id, {}
+                        ).get("selected_turn_count", 0),
+                        "selected_in_last_turn": selected_turn_stats.get(
+                            summary.version_id, {}
+                        ).get("selected_in_last_turn", False),
+                        "summary_text": summary.summary_text,
+                        "key_topics": summary.key_topics,
+                        "positive_routing_terms": summary.positive_routing_terms,
+                        "negative_routing_terms": summary.negative_routing_terms,
+                        "exact_identifiers": summary.exact_identifiers,
+                        "suitable_questions": summary.suitable_questions,
+                        "unsuitable_questions": summary.unsuitable_questions,
+                        "routing_notes": summary.routing_notes,
+                    }
+                )
+            )
+        return catalog
+
+    def _compact_pdf_routing_card(self, card: dict[str, Any]) -> dict[str, Any]:
+        compact_card = {
+            "file_id": str(card.get("file_id", "")).strip(),
+            "version_id": str(card.get("version_id", "")).strip(),
+            "document_title": self._bounded_text(
+                card.get("document_title"),
+                _PDF_ROUTING_DOCUMENT_TITLE_CHARACTERS,
+            ),
+            "duplicate_content_group": self._bounded_text(
+                card.get("duplicate_content_group"),
+                _PDF_ROUTING_LIST_ITEM_CHARACTERS,
+            )
+            or None,
+            "duplicate_content_canonical": bool(
+                card.get("duplicate_content_canonical", True)
+            ),
+            "attachment_state": str(card.get("attachment_state", "candidate")),
+            "selected_turn_count": card.get("selected_turn_count", 0),
+            "selected_in_last_turn": bool(card.get("selected_in_last_turn", False)),
+            "summary_text": self._bounded_text(
+                card.get("summary_text"),
+                _PDF_ROUTING_SUMMARY_CHARACTERS,
+            ),
+            "routing_notes": self._bounded_text(
+                card.get("routing_notes"),
+                _PDF_ROUTING_NOTES_CHARACTERS,
+            ),
+        }
+        for field_name, item_limit in _PDF_ROUTING_LIST_LIMITS.items():
+            compact_card[field_name] = self._bounded_string_list(
+                card.get(field_name),
+                item_limit=item_limit,
+            )
+        return compact_card
+
+    def _pdf_routing_document_batches(
+        self,
+        *,
+        catalog: list[dict[str, Any]],
+        question: str,
+        routing_memory: list[dict[str, str]],
+    ) -> list[list[dict[str, Any]]]:
+        max_request_characters = self._config.pdf_routing_max_request_characters
+        max_batch_documents = self._config.pdf_routing_max_batch_documents
+        if max_request_characters <= _PDF_ROUTING_RETRY_RESERVE_CHARACTERS:
+            raise PdfRoutingError(
+                "PDF routing request budget is too small for a safe model request."
+            )
+        if max_batch_documents < 1:
+            raise PdfRoutingError("PDF routing batch size must be positive.")
+        if max_batch_documents > 20:
+            raise PdfRoutingError(
+                "PDF routing batch size exceeds the safe router output limit."
+            )
+
+        seen_version_ids: set[str] = set()
+        for card in catalog:
+            file_id = str(card.get("file_id", "")).strip()
+            version_id = str(card.get("version_id", "")).strip()
+            if not file_id or not version_id:
+                raise PdfRoutingError("PDF routing catalog contains an empty ID.")
+            if version_id in seen_version_ids:
+                raise PdfRoutingError(
+                    "PDF routing catalog contains a duplicate version ID."
+                )
+            seen_version_ids.add(version_id)
+
+        batches: list[list[dict[str, Any]]] = []
+        current_batch: list[dict[str, Any]] = []
+        for card in catalog:
+            candidate_batch = [*current_batch, card]
+            if (
+                len(candidate_batch) <= max_batch_documents
+                and self._pdf_routing_batch_fits(
+                    document_batch=candidate_batch,
+                    question=question,
+                    routing_memory=routing_memory,
+                )
+            ):
+                current_batch = candidate_batch
+                continue
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+            if not self._pdf_routing_batch_fits(
+                document_batch=[card],
+                question=question,
+                routing_memory=routing_memory,
+            ):
+                raise PdfRoutingError(
+                    "A PDF routing card cannot fit within the configured request budget."
+                )
+            current_batch = [card]
+        if current_batch:
+            batches.append(current_batch)
+        return batches
+
+    def _pdf_routing_batch_fits(
+        self,
+        *,
+        document_batch: list[dict[str, Any]],
+        question: str,
+        routing_memory: list[dict[str, str]],
+    ) -> bool:
+        messages = self._pdf_routing_messages(
+            document_catalog_json=self._compact_json(document_batch),
+            question=question,
+            routing_memory=routing_memory,
+            batch_document_count=len(document_batch),
+        )
+        request_characters = len(self._compact_json(messages))
+        return (
+            request_characters + _PDF_ROUTING_RETRY_RESERVE_CHARACTERS
+            <= self._config.pdf_routing_max_request_characters
+        )
+
+    def _pdf_routing_messages(
+        self,
+        *,
+        document_catalog_json: str,
+        question: str,
+        routing_memory: list[dict[str, str]],
+        batch_document_count: int,
+    ) -> list[dict[str, str]]:
         return [
+            {"role": "system", "content": PDF_DOCUMENT_ROUTER_SYSTEM_PROMPT},
             {
-                "file_id": summary.file_id,
-                "version_id": summary.version_id,
-                "document_title": summary.document_title,
-                "duplicate_content_group": next(
-                    iter(summary.coverage_scope.get("duplicate_content_group", [])),
-                    None,
+                "role": "user",
+                "content": (
+                    "PDF candidate catalog for the current transport batch:\n\n"
+                    f"{document_catalog_json}"
                 ),
-                "attachment_state": (
-                    "attached"
-                    if summary.version_id in attached_version_ids
-                    else "candidate"
+            },
+            *routing_memory,
+            {
+                "role": "user",
+                "content": (
+                    "Route the current PDF question. Classify every candidate in this "
+                    "batch; do not rank or truncate relevant candidates.\n\n"
+                    f"Candidates in this batch: {batch_document_count}\n"
+                    f"Maximum documents for this turn: {batch_document_count}\n\n"
+                    f"Current question:\n{question}\n\n"
+                    "Return JSON in exactly this compact shape:\n"
+                    "{\n"
+                    '  "document_for_this_turn": [\n'
+                    "    {\n"
+                    '      "file_id": "candidate file_id",\n'
+                    '      "version_id": "candidate version_id",\n'
+                    '      "reason": "short matched topic or range-wide reason",\n'
+                    '      "confidence": 0.0\n'
+                    "    }\n"
+                    "  ]\n"
+                    "}"
                 ),
-                "selected_turn_count": selected_turn_stats.get(
-                    summary.version_id, {}
-                ).get("selected_turn_count", 0),
-                "selected_in_last_turn": selected_turn_stats.get(
-                    summary.version_id, {}
-                ).get("selected_in_last_turn", False),
-                "summary_text": summary.summary_text,
-                "key_topics": summary.key_topics,
-                "positive_routing_terms": summary.positive_routing_terms,
-                "negative_routing_terms": summary.negative_routing_terms,
-                "exact_identifiers": summary.exact_identifiers,
-                "suitable_questions": summary.suitable_questions,
-                "unsuitable_questions": summary.unsuitable_questions,
-                "routing_notes": summary.routing_notes,
-            }
-            for summary in summaries
+            },
         ]
+
+    def _validated_pdf_router_selection(
+        self,
+        *,
+        payload: dict[str, Any],
+        document_batch: list[dict[str, Any]],
+    ) -> list[SelectedDocument]:
+        if "document_for_this_turn" in payload:
+            raw_value = payload["document_for_this_turn"]
+        elif "selected_documents" in payload:
+            raw_value = payload["selected_documents"]
+        else:
+            raise PdfRoutingError(
+                "PDF document routing response omitted the selection list."
+            )
+        if not isinstance(raw_value, list) or any(
+            not isinstance(item, dict) for item in raw_value
+        ):
+            raise PdfRoutingError(
+                "PDF document routing response has an invalid selection list."
+            )
+        raw_selected_items: list[dict[str, Any]] = raw_value
+        allowed_pairs = {
+            (str(card["file_id"]), str(card["version_id"]))
+            for card in document_batch
+        }
+        seen_version_ids: set[str] = set()
+        selected: list[SelectedDocument] = []
+        for item in raw_selected_items:
+            file_id = str(item.get("file_id", "")).strip()
+            version_id = str(item.get("version_id", "")).strip()
+            if (file_id, version_id) not in allowed_pairs:
+                raise PdfRoutingError(
+                    "PDF document routing returned an ID outside the current batch."
+                )
+            if version_id in seen_version_ids:
+                raise PdfRoutingError(
+                    "PDF document routing returned a duplicate version ID."
+                )
+            seen_version_ids.add(version_id)
+            selected.append(
+                SelectedDocument(
+                    file_id=file_id,
+                    version_id=version_id,
+                    reason=str(item.get("reason", "")),
+                    confidence=self._optional_float(item.get("confidence")),
+                )
+            )
+        return self._filter_router_selection(
+            selected=selected,
+            raw_items=raw_selected_items,
+            max_documents=len(document_batch),
+        )
+
+    def _bounded_text(self, value: Any, max_characters: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_characters:
+            return text
+        return text[: max_characters - 1].rstrip() + "…"
+
+    def _bounded_string_list(self, value: Any, *, item_limit: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value[:item_limit]:
+            text = self._bounded_text(item, _PDF_ROUTING_LIST_ITEM_CHARACTERS)
+            if text:
+                result.append(text)
+        return result
+
+    def _compact_json(self, value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     def _routing_catalog_document_payload(
         self,

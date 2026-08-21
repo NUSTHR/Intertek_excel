@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     excel_supported_extensions: str = ".xls,.xlsx,.xlsm,.xltx,.xltm"
     excel_preview_max_rows: int = 500
     excel_max_upload_bytes: int = 50 * 1024 * 1024
+    excel_archive_retention_days: int = 30
     llm_provider: str = "siliconflow"
     llm_api_base_url: str = "https://api.siliconflow.cn/v1"
     llm_api_key: str = ""
@@ -59,6 +60,8 @@ class Settings(BaseSettings):
     llm_request_timeout_seconds: float = 120.0
     llm_summary_max_profile_rows: int = 10
     llm_answer_max_rows: int = 20_000
+    pdf_routing_max_request_characters: int = 120_000
+    pdf_routing_max_batch_documents: int = 20
     maintenance_interval_seconds: float = 300.0
     maintenance_auth_session_retention_days: int = 30
     maintenance_password_reset_token_retention_days: int = 7
@@ -125,8 +128,6 @@ class Settings(BaseSettings):
     mineru_cloud_enable_table: bool = True
     mineru_cloud_is_ocr: bool = False
     chat_cancellation_retention_seconds: int = 300
-    auth_admin_email: str = "admin@qq.com"
-    auth_admin_password: str = "admin"
     auth_session_ttl_hours: int = 24 * 14
     auth_password_reset_ttl_minutes: int = 30
     auth_password_hash_iterations: int = 260_000
@@ -228,6 +229,32 @@ class Settings(BaseSettings):
         return not self.is_production
 
     def validate_runtime_safety(self) -> None:
+        routing_limits = {
+            "PDF_ROUTING_MAX_REQUEST_CHARACTERS": (
+                self.pdf_routing_max_request_characters
+            ),
+            "PDF_ROUTING_MAX_BATCH_DOCUMENTS": self.pdf_routing_max_batch_documents,
+        }
+        invalid_routing_limits = [
+            name for name, value in routing_limits.items() if value < 1
+        ]
+        if invalid_routing_limits:
+            raise RuntimeError(
+                "invalid PDF routing configuration: "
+                + "; ".join(
+                    f"{name} must be positive" for name in invalid_routing_limits
+                )
+            )
+        if self.pdf_routing_max_request_characters <= 9_000:
+            raise RuntimeError(
+                "invalid PDF routing configuration: "
+                "PDF_ROUTING_MAX_REQUEST_CHARACTERS must be greater than 9000"
+            )
+        if self.pdf_routing_max_batch_documents > 20:
+            raise RuntimeError(
+                "invalid PDF routing configuration: "
+                "PDF_ROUTING_MAX_BATCH_DOCUMENTS must not exceed 20"
+            )
         context_limits = {
             "PDF_ANSWER_MAX_CONTEXT_CHUNKS": self.pdf_answer_max_context_chunks,
             "PDF_ANSWER_MAX_CONTEXT_CHARACTERS": (
@@ -256,8 +283,6 @@ class Settings(BaseSettings):
             return
 
         errors: list[str] = []
-        if self.auth_admin_password == "admin":
-            errors.append("AUTH_ADMIN_PASSWORD must be changed for production")
         if self.auth_expose_reset_token:
             errors.append("AUTH_EXPOSE_RESET_TOKEN must be false for production")
         if not self.auth_cookie_secure:

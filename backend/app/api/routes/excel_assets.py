@@ -11,19 +11,24 @@ from app.api.dependencies import (
 )
 from app.api.schemas import (
     ActiveExcelFileResponse,
+    ArchivedExcelFileResponse,
+    ArchiveExcelFileResponse,
     CheckFileNameRequest,
     CheckFileNameResponse,
     CreateUploadTaskResponse,
-    DeleteExcelFileResponse,
     ExcelArtifactResponse,
     ExcelFileResponse,
     ExcelFileVersionResponse,
     ExcelSheetResponse,
+    ListArchivedExcelFilesResponse,
     ListExcelArtifactsResponse,
     ListExcelFilesResponse,
     ListExcelSheetsResponse,
     ListExcelVersionsResponse,
+    PurgeExcelFileRequest,
+    PurgeExcelFileResponse,
     RenameExcelFileRequest,
+    RestoreExcelFileRequest,
     RowLookupResponse,
     RowMappingResponse,
     SetExcelFileVisibilityRequest,
@@ -168,6 +173,24 @@ def list_excel_files(
     )
 
 
+@router.get("/files/archived", response_model=ListArchivedExcelFilesResponse)
+def list_archived_excel_files(
+    service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
+) -> ListArchivedExcelFilesResponse:
+    return ListArchivedExcelFilesResponse(
+        files=[
+            ArchivedExcelFileResponse(
+                file_id=file.file_id,
+                display_name=file.archived_display_name or file.display_name,
+                archived_at=file.deleted_at or file.updated_at,
+                purge_eligible_at=file.purge_after or file.updated_at,
+            )
+            for file in service.list_archived_files()
+        ]
+    )
+
+
 @router.get("/files/{file_id}", response_model=ExcelFileResponse)
 def get_excel_file(
     file_id: str,
@@ -202,23 +225,77 @@ def set_excel_file_visibility(
     )
 
 
-@router.delete("/files/{file_id}", response_model=DeleteExcelFileResponse)
+@router.delete("/files/{file_id}", response_model=ArchiveExcelFileResponse)
 def delete_excel_file(
     file_id: str,
     service: ExcelAssetServiceDependency,
     _admin: AdminDependency,
     confirm_delete: Annotated[bool, Query()] = False,
-) -> DeleteExcelFileResponse:
-    result = service.delete_file(file_id, confirm_delete=confirm_delete)
-    return DeleteExcelFileResponse(
+) -> ArchiveExcelFileResponse:
+    result = service.archive_file(file_id, confirm_delete=confirm_delete)
+    return ArchiveExcelFileResponse(
         file_id=result.file_id,
         display_name=result.display_name,
-        deleted_versions=result.deleted_versions,
-        deleted_sheets=result.deleted_sheets,
-        deleted_artifacts=result.deleted_artifacts,
-        deleted_row_mappings=result.deleted_row_mappings,
-        deleted_summaries=result.deleted_summaries,
-        deleted_chat_session_documents=result.deleted_chat_session_documents,
+        disposition=result.disposition,
+        data_retained=result.data_retained,
+        archived_at=result.archived_at,
+        purge_eligible_at=result.purge_eligible_at,
+    )
+
+
+@router.post("/files/{file_id}/restore", response_model=ExcelFileResponse)
+def restore_excel_file(
+    file_id: str,
+    request: RestoreExcelFileRequest,
+    service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
+) -> ExcelFileResponse:
+    return _to_file_response(
+        service.restore_file(file_id, display_name=request.display_name)
+    )
+
+
+@router.post("/files/{file_id}/purge", response_model=PurgeExcelFileResponse)
+def purge_excel_file(
+    file_id: str,
+    request: PurgeExcelFileRequest,
+    service: ExcelAssetServiceDependency,
+    admin: AdminDependency,
+) -> PurgeExcelFileResponse:
+    result = service.purge_file(
+        file_id,
+        confirmation_display_name=request.confirmation_display_name,
+        requested_by=admin.user_id,
+        force=request.force,
+    )
+    return PurgeExcelFileResponse(
+        file_id=result.file_id,
+        job_id=result.job.job_id,
+        status=result.job.status,
+        attempt_count=result.job.attempt_count,
+        deleted_counts=result.job.counts,
+        error_message=result.job.error_message,
+        requested_at=result.job.created_at,
+        completed_at=result.job.completed_at,
+    )
+
+
+@router.get("/files/purge-jobs/{job_id}", response_model=PurgeExcelFileResponse)
+def get_excel_purge_job(
+    job_id: str,
+    service: ExcelAssetServiceDependency,
+    _admin: AdminDependency,
+) -> PurgeExcelFileResponse:
+    job = service.get_purge_job(job_id)
+    return PurgeExcelFileResponse(
+        file_id=job.file_id,
+        job_id=job.job_id,
+        status=job.status,
+        attempt_count=job.attempt_count,
+        deleted_counts=job.counts,
+        error_message=job.error_message,
+        requested_at=job.created_at,
+        completed_at=job.completed_at,
     )
 
 

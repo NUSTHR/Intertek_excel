@@ -1,14 +1,17 @@
 import type {
   ActiveExcelFileResponse,
+  ArchiveExcelFileResponse,
+  ArchivedExcelFile,
   CreateUploadTaskResponse,
-  DeleteExcelFileResponse,
   ExcelFile,
   ExcelFileVersion,
   ExcelSheet,
+  ListArchivedExcelFilesResponse,
   ListExcelArtifactsResponse,
   ListExcelFilesResponse,
   ListExcelSheetsResponse,
   ListExcelVersionsResponse,
+  PurgeExcelFileResponse,
   RowLookupResponse,
   SheetPreviewResponse,
   SheetSearchResponse,
@@ -111,15 +114,68 @@ export async function setExcelFileVisibility(
 export async function deleteExcelFile(
   fileId: string,
   confirmDelete = false,
-): Promise<DeleteExcelFileResponse> {
+): Promise<ArchiveExcelFileResponse> {
   const params = new URLSearchParams({
     confirm_delete: String(confirmDelete),
   })
-  return requestJson<DeleteExcelFileResponse>(
+  return requestJson<ArchiveExcelFileResponse>(
     `/api/excel/files/${fileId}?${params.toString()}`,
     {
       method: 'DELETE',
     },
+    defaultRequestOptions,
+  )
+}
+
+export async function restoreExcelFile(
+  fileId: string,
+  displayName?: string,
+): Promise<ExcelFile> {
+  return requestJson<ExcelFile>(
+    `/api/excel/files/${encodeURIComponent(fileId)}/restore`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: displayName }),
+    },
+    defaultRequestOptions,
+  )
+}
+
+export async function listArchivedExcelFiles(): Promise<ArchivedExcelFile[]> {
+  const response = await requestJson<ListArchivedExcelFilesResponse>(
+    '/api/excel/files/archived',
+    { method: 'GET' },
+    defaultRequestOptions,
+  )
+  return response.files
+}
+
+export async function purgeExcelFile(
+  fileId: string,
+  confirmationDisplayName: string,
+  force = false,
+): Promise<PurgeExcelFileResponse> {
+  return requestJson<PurgeExcelFileResponse>(
+    `/api/excel/files/${encodeURIComponent(fileId)}/purge`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirmation_display_name: confirmationDisplayName,
+        force,
+      }),
+    },
+    defaultRequestOptions,
+  )
+}
+
+export async function getExcelPurgeJob(
+  jobId: string,
+): Promise<PurgeExcelFileResponse> {
+  return requestJson<PurgeExcelFileResponse>(
+    `/api/excel/files/purge-jobs/${encodeURIComponent(jobId)}`,
+    { method: 'GET' },
     defaultRequestOptions,
   )
 }

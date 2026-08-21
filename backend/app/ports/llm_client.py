@@ -76,12 +76,29 @@ class PdfAnswerGenerator(Protocol):
         self,
         question: str,
         chunks: list[dict],
+        document_manifest: dict[str, object] | None = None,
         previous_turns: list[ChatTurn] | None = None,
         model: str | None = None,
         provider: str | None = None,
         enable_deep_thinking: bool = False,
         cancellation_checker: CancellationChecker | None = None,
     ) -> DraftChatAnswer:
+        ...
+
+
+class PdfAnswerGroundingVerifier(Protocol):
+    def verify_and_repair_pdf_answer(
+        self,
+        *,
+        question: str,
+        chunks: list[dict],
+        document_manifest: dict[str, object],
+        draft_answer: DraftChatAnswer,
+        model: str | None = None,
+        provider: str | None = None,
+        cancellation_checker: CancellationChecker | None = None,
+    ) -> DraftChatAnswer | None:
+        """Return a grounded answer or ``None`` after one failed repair attempt."""
         ...
 
 

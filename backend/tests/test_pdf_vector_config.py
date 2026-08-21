@@ -56,7 +56,6 @@ def test_production_rejects_runtime_qdrant_bootstrap() -> None:
     with pytest.raises(RuntimeError, match="PDF_QDRANT_AUTO_BOOTSTRAP"):
         _enabled_settings(
             app_env="production",
-            auth_admin_password="strong-password",
             auth_expose_reset_token=False,
             auth_cookie_secure=True,
             app_cors_origins="https://workspace.example.com",
@@ -91,3 +90,17 @@ def test_answer_context_limits_must_be_positive_even_when_vector_search_is_off()
             _env_file=None,
             pdf_answer_max_context_tokens=0,
         ).validate_runtime_safety()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pdf_routing_max_request_characters": 0},
+        {"pdf_routing_max_request_characters": 9_000},
+        {"pdf_routing_max_batch_documents": 0},
+        {"pdf_routing_max_batch_documents": 21},
+    ],
+)
+def test_pdf_routing_limits_must_be_safe(overrides: dict[str, int]) -> None:
+    with pytest.raises(RuntimeError, match="invalid PDF routing configuration"):
+        Settings(_env_file=None, **overrides).validate_runtime_safety()

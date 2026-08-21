@@ -71,7 +71,6 @@ class PdfKnowledgeService:
             llm_preferences=llm_preferences,
         )
         upload_records = PdfUploadRecordBuilder(
-            repository=repository,
             storage_root=resolved_storage_root,
         )
         parser_registry = PdfParserProfileRegistry(

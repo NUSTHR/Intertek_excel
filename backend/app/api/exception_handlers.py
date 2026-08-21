@@ -15,6 +15,7 @@ from app.core.errors import (
     ChatRequestCancelled,
     ChatRequestInProgress,
     ChatSessionRevisionConflict,
+    ExcelFileLifecycleConflict,
     FileDeleteConfirmationRequiredError,
     FileNameConflictError,
     InvalidExcelFileError,
@@ -48,6 +49,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         FileDeleteConfirmationRequiredError,
         handle_file_delete_confirmation_required,
+    )
+    app.add_exception_handler(
+        ExcelFileLifecycleConflict,
+        handle_excel_file_lifecycle_conflict,
     )
     app.add_exception_handler(InvalidLlmModelError, handle_invalid_llm_model)
     app.add_exception_handler(ChatRequestCancelled, handle_chat_request_cancelled)
@@ -134,6 +139,21 @@ async def handle_file_delete_confirmation_required(
             "display_name": exc.display_name,
             "file_id": exc.file_id,
             "requires_confirmation": True,
+        },
+    )
+
+
+async def handle_excel_file_lifecycle_conflict(
+    _request: Request,
+    exc: ExcelFileLifecycleConflict,
+) -> JSONResponse:
+    return _json_response(
+        HTTPStatus.CONFLICT,
+        {
+            "detail": str(exc),
+            "code": exc.code,
+            "retryable": exc.retryable,
+            "file_id": exc.file_id,
         },
     )
 

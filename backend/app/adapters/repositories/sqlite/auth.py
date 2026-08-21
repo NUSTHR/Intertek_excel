@@ -39,6 +39,56 @@ class SQLiteAuthRepository:
                 ),
             )
 
+    def create_user_with_session_if_email_available(
+        self,
+        user: UserAccount,
+        session: AuthSession,
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO user_accounts
+                  (
+                    user_id, email, password_hash, role, is_active,
+                    created_at, updated_at, last_login_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(email) DO NOTHING
+                RETURNING user_id
+                """,
+                (
+                    user.user_id,
+                    user.email,
+                    user.password_hash,
+                    user.role.value,
+                    1 if user.is_active else 0,
+                    user.created_at,
+                    user.updated_at,
+                    user.last_login_at,
+                ),
+            )
+            if cursor.fetchone() is None:
+                return False
+            connection.execute(
+                """
+                INSERT INTO auth_sessions
+                  (
+                    session_id, user_id, session_token_hash,
+                    created_at, expires_at, revoked_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.session_id,
+                    session.user_id,
+                    session.session_token_hash,
+                    session.created_at,
+                    session.expires_at,
+                    session.revoked_at,
+                ),
+            )
+        return True
+
     def get_user(self, user_id: str) -> UserAccount | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -52,6 +102,78 @@ class SQLiteAuthRepository:
             row = connection.execute(
                 "SELECT * FROM user_accounts WHERE email = ?",
                 (email,),
+            ).fetchone()
+        return _to_user(row)
+
+    def ensure_builtin_admin(self, user: UserAccount) -> UserAccount:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_accounts
+                  (
+                    user_id, email, password_hash, role, is_active,
+                    created_at, updated_at, last_login_at
+                  )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(email) DO NOTHING
+                """,
+                (
+                    user.user_id,
+                    user.email,
+                    user.password_hash,
+                    user.role.value,
+                    1 if user.is_active else 0,
+                    user.created_at,
+                    user.updated_at,
+                    user.last_login_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM user_accounts WHERE email = ?",
+                (user.email,),
+            ).fetchone()
+        resolved = _to_user(row)
+        if resolved is None:
+            raise RuntimeError("failed to ensure built-in administrator")
+        return resolved
+
+    def synchronize_builtin_admin(
+        self,
+        *,
+        user_id: str,
+        password_hash: str,
+        updated_at: str,
+    ) -> UserAccount | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE user_accounts
+                SET password_hash = ?, is_active = 1, updated_at = ?
+                WHERE user_id = ? AND role = ?
+                """,
+                (password_hash, updated_at, user_id, UserRole.ADMIN.value),
+            )
+            if cursor.rowcount != 1:
+                return None
+            connection.execute(
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL
+                """,
+                (updated_at, user_id),
+            )
+            connection.execute(
+                """
+                UPDATE password_reset_tokens
+                SET used_at = ?
+                WHERE user_id = ? AND used_at IS NULL
+                """,
+                (updated_at, user_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM user_accounts WHERE user_id = ?",
+                (user_id,),
             ).fetchone()
         return _to_user(row)
 
@@ -172,52 +294,74 @@ class SQLiteAuthRepository:
                 ),
             )
 
-    def get_password_reset_token_by_hash(
+    def consume_password_reset_token(
         self,
+        *,
         token_hash: str,
-    ) -> tuple[PasswordResetToken, UserAccount] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                  password_reset_tokens.reset_token_id,
-                  password_reset_tokens.user_id AS reset_user_id,
-                  password_reset_tokens.token_hash,
-                  password_reset_tokens.created_at AS reset_created_at,
-                  password_reset_tokens.expires_at,
-                  password_reset_tokens.used_at,
-                  user_accounts.user_id,
-                  user_accounts.email,
-                  user_accounts.password_hash,
-                  user_accounts.role,
-                  user_accounts.is_active,
-                  user_accounts.created_at AS user_created_at,
-                  user_accounts.updated_at AS user_updated_at,
-                  user_accounts.last_login_at
-                FROM password_reset_tokens
-                JOIN user_accounts ON user_accounts.user_id = password_reset_tokens.user_id
-                WHERE password_reset_tokens.token_hash = ?
-                """,
-                (token_hash,),
-            ).fetchone()
-        if row is None:
-            return None
-        return _to_password_reset_token(row), _to_joined_user(row)
-
-    def mark_password_reset_token_used(
-        self,
-        reset_token_id: str,
+        password_hash: str,
         used_at: str,
-    ) -> None:
+        protected_email: str,
+    ) -> UserAccount | None:
         with self._connect() as connection:
-            connection.execute(
+            # The connection uses an IMMEDIATE transaction. The conditional update is
+            # the consume fence: concurrent callers cannot both claim the same token.
+            cursor = connection.execute(
                 """
                 UPDATE password_reset_tokens
                 SET used_at = ?
-                WHERE reset_token_id = ?
+                WHERE token_hash = ?
+                  AND used_at IS NULL
+                  AND expires_at > ?
+                  AND EXISTS (
+                    SELECT 1
+                    FROM user_accounts
+                    WHERE user_accounts.user_id = password_reset_tokens.user_id
+                      AND user_accounts.is_active = 1
+                      AND user_accounts.email <> ?
+                  )
                 """,
-                (used_at, reset_token_id),
+                (used_at, token_hash, used_at, protected_email),
             )
+            if cursor.rowcount != 1:
+                return None
+            reset_row = connection.execute(
+                """
+                SELECT user_id
+                FROM password_reset_tokens
+                WHERE token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+            if reset_row is None:
+                raise RuntimeError("consumed password reset token disappeared")
+            user_id = str(reset_row["user_id"])
+            updated = connection.execute(
+                """
+                UPDATE user_accounts
+                SET password_hash = ?, updated_at = ?
+                WHERE user_id = ? AND is_active = 1
+                """,
+                (password_hash, used_at, user_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("password reset user became unavailable")
+            connection.execute(
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL
+                """,
+                (used_at, user_id),
+            )
+            row = connection.execute(
+                """
+                SELECT *
+                FROM user_accounts
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        return _to_user(row)
 
     def get_login_rate_limit_retry_after(
         self,

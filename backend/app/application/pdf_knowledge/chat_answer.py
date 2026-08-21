@@ -297,7 +297,9 @@ def _build_citations(
                 chunk_index=chunk.chunk_index,
                 page_label=chunk.page_label,
                 title=chunk.title,
-                quote=draft_quotes.get(item_evidence_id) or item.excerpt,
+                # Quotes are server-derived evidence. Model-produced quote text is
+                # deliberately ignored because it is not an authoritative source.
+                quote=item.excerpt,
             )
         )
     return citations, citation_ids

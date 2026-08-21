@@ -96,6 +96,7 @@ def get_excel_asset_service() -> ExcelAssetService:
         repository=get_excel_repository(),
         storage=FilesystemExcelArtifactStorage(settings.storage_root),
         workbook_reader=OpenpyxlWorkbookReader(),
+        archive_retention_days=settings.excel_archive_retention_days,
     )
 
 
@@ -339,6 +340,7 @@ def get_pdf_chat_service() -> PdfChatService:
     settings = get_settings()
     return PdfChatService(
         llm_client=get_llm_client(),
+        answer_grounding_verifier=get_llm_client(),
         sessions=get_excel_repository(),
         document_ranking=(
             get_pdf_document_ranking_service()
@@ -394,8 +396,6 @@ def get_auth_service() -> AuthService:
     settings = get_settings()
     service = AuthService(
         repository=get_excel_repository(),
-        admin_email=settings.auth_admin_email,
-        admin_password=settings.auth_admin_password,
         session_ttl_hours=settings.auth_session_ttl_hours,
         password_reset_ttl_minutes=settings.auth_password_reset_ttl_minutes,
         password_hash_iterations=settings.auth_password_hash_iterations,
@@ -475,6 +475,10 @@ def get_llm_client() -> LlmClient:
             answer_model=settings.llm_answer_model,
             timeout_seconds=settings.llm_request_timeout_seconds,
             summary_max_profile_rows=settings.llm_summary_max_profile_rows,
+            pdf_routing_max_request_characters=(
+                settings.pdf_routing_max_request_characters
+            ),
+            pdf_routing_max_batch_documents=settings.pdf_routing_max_batch_documents,
         ),
         extra_providers=_configured_llm_providers(settings),
         default_providers={

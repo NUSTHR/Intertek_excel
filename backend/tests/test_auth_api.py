@@ -1,5 +1,8 @@
+import sqlite3
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,9 +25,14 @@ from app.application.chat.service import ChatService
 from app.application.document_summaries.service import DocumentSummaryService
 from app.application.excel_assets.service import ExcelAssetService
 from app.application.llm_preferences import WorkspaceLlmPreferenceService
-from app.core.auth import normalize_email
+from app.core.auth import expires_at_iso, hash_token, normalize_email
 from app.core.config import Settings, get_settings
-from app.core.errors import AuthenticationError, RateLimitError
+from app.core.errors import (
+    AuthenticationError,
+    PasswordResetTokenError,
+    RateLimitError,
+    UserAlreadyExistsError,
+)
 from app.main import app
 
 
@@ -59,8 +67,6 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     )
     auth = AuthService(
         repository=repository,
-        admin_email="admin@qq.com",
-        admin_password="admin",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
@@ -235,6 +241,9 @@ def test_register_login_me_logout_and_password_reset(client: TestClient) -> None
     assert reset_response.status_code == 200
     assert reset_response.json()["user"]["email"] == "reset@example.com"
 
+    revoked_session_response = client.get("/api/auth/me", headers=auth_header)
+    assert revoked_session_response.status_code == 401
+
     old_login_response = client.post(
         "/api/auth/login",
         json={"email": "reset@example.com", "password": "old-pass-123"},
@@ -246,6 +255,168 @@ def test_register_login_me_logout_and_password_reset(client: TestClient) -> None
     assert logout_response.status_code == 204
     logged_out_me_response = client.get("/api/auth/me", headers=new_auth_header)
     assert logged_out_me_response.status_code == 401
+
+
+def test_password_reset_token_is_consumed_atomically_under_concurrency(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    service = AuthService(
+        repository=repository,
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+    )
+    service.initialize()
+    original_auth = service.register("concurrent-reset@example.com", "old-pass-123")
+    request = service.request_password_reset("concurrent-reset@example.com")
+    assert request.reset_token is not None
+
+    barrier = Barrier(2)
+
+    def reset(password: str) -> tuple[str, str]:
+        barrier.wait()
+        try:
+            service.reset_password(request.reset_token or "", password)
+        except PasswordResetTokenError:
+            return "rejected", password
+        return "success", password
+
+    passwords = ["new-pass-456", "new-pass-789"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(reset, passwords))
+
+    assert [status for status, _password in outcomes].count("success") == 1
+    assert [status for status, _password in outcomes].count("rejected") == 1
+    winning_password = next(
+        password for status, password in outcomes if status == "success"
+    )
+    assert service.login("concurrent-reset@example.com", winning_password).user.email == (
+        "concurrent-reset@example.com"
+    )
+    with pytest.raises(AuthenticationError, match="session expired"):
+        service.get_user_for_token(original_auth.access_token)
+
+
+def test_member_registration_is_atomic_under_concurrency(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    service = AuthService(
+        repository=repository,
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+    )
+    service.initialize()
+    contender_count = 12
+    barrier = Barrier(contender_count)
+
+    def register(contender: int) -> tuple[str, str | None]:
+        barrier.wait()
+        try:
+            result = service.register(
+                "  Concurrent.Member@Example.COM  ",
+                f"member-pass-{contender:03d}",
+            )
+        except UserAlreadyExistsError:
+            return "conflict", None
+        return "created", result.access_token
+
+    with ThreadPoolExecutor(max_workers=contender_count) as executor:
+        outcomes = list(executor.map(register, range(contender_count)))
+
+    assert [status for status, _token in outcomes].count("created") == 1
+    assert [status for status, _token in outcomes].count("conflict") == contender_count - 1
+    winning_token = next(token for status, token in outcomes if status == "created")
+    assert winning_token is not None
+    assert service.get_user_for_token(winning_token).email == (
+        "concurrent.member@example.com"
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        user_row = connection.execute(
+            "SELECT user_id FROM user_accounts WHERE email = ?",
+            ("concurrent.member@example.com",),
+        ).fetchone()
+        assert user_row is not None
+        user_count = connection.execute(
+            "SELECT COUNT(*) FROM user_accounts WHERE email = ?",
+            ("concurrent.member@example.com",),
+        ).fetchone()[0]
+        session_count = connection.execute(
+            "SELECT COUNT(*) FROM auth_sessions WHERE user_id = ?",
+            (user_row[0],),
+        ).fetchone()[0]
+    assert user_count == 1
+    assert session_count == 1
+
+
+def test_registration_rolls_back_user_when_initial_session_insert_fails(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    service = AuthService(
+        repository=repository,
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+    )
+    service.initialize()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_initial_auth_session
+            BEFORE INSERT ON auth_sessions
+            BEGIN
+              SELECT RAISE(ABORT, 'injected session insert failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected session insert failure"):
+        service.register("rollback-register@example.com", "member-pass-123")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM user_accounts WHERE email = ?",
+            ("rollback-register@example.com",),
+        ).fetchone()[0] == 0
+
+
+def test_password_reset_transaction_rolls_back_token_when_password_update_fails(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    service = AuthService(
+        repository=repository,
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+    )
+    service.initialize()
+    service.register("rollback-reset@example.com", "old-pass-123")
+    request = service.request_password_reset("rollback-reset@example.com")
+    assert request.reset_token is not None
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_password_reset_update
+            BEFORE UPDATE OF password_hash ON user_accounts
+            BEGIN
+              SELECT RAISE(ABORT, 'injected password update failure');
+            END
+            """
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="injected password update failure"):
+        service.reset_password(request.reset_token, "new-pass-456")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TRIGGER fail_password_reset_update")
+
+    reset = service.reset_password(request.reset_token, "new-pass-456")
+    assert reset.user.email == "rollback-reset@example.com"
 
 
 def test_browser_session_uses_http_only_cookie_and_csrf(client: TestClient) -> None:
@@ -314,39 +485,120 @@ def test_login_success_resets_failed_attempt_counter(client: TestClient) -> None
     assert successful_response.status_code == 200
 
 
-def test_initialize_synchronizes_configured_admin_password(tmp_path: Path) -> None:
+def test_initialize_restores_fixed_admin_password_and_active_state(tmp_path: Path) -> None:
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
     initial_service = AuthService(
         repository=repository,
-        admin_email="admin@qq.com",
-        admin_password="temporary-admin-password",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
     )
     initial_service.initialize()
+    initial_auth = initial_service.login("admin@qq.com", "admin")
+
+    with sqlite3.connect(tmp_path / "excel.sqlite3") as connection:
+        connection.execute(
+            """
+            UPDATE user_accounts
+            SET password_hash = 'invalid-hash', is_active = 0
+            WHERE email = 'admin@qq.com'
+            """
+        )
 
     synchronized_service = AuthService(
         repository=repository,
-        admin_email="admin@qq.com",
-        admin_password="admin",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
     )
     synchronized_service.initialize()
 
-    with pytest.raises(AuthenticationError, match="invalid email or password"):
-        synchronized_service.login("admin@qq.com", "temporary-admin-password")
     assert synchronized_service.login("admin@qq.com", "admin").user.role.value == "admin"
+    with pytest.raises(AuthenticationError, match="session expired"):
+        synchronized_service.get_user_for_token(initial_auth.access_token)
+
+
+def test_fixed_admin_initialization_is_idempotent_under_concurrency(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
+    repository.initialize()
+    barrier = Barrier(2)
+
+    def initialize_admin() -> str:
+        service = AuthService(
+            repository=repository,
+            session_ttl_hours=24,
+            password_reset_ttl_minutes=30,
+            password_hash_iterations=1_000,
+        )
+        barrier.wait()
+        return service.ensure_admin_user().user_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        user_ids = list(executor.map(lambda _index: initialize_admin(), range(2)))
+
+    assert len(set(user_ids)) == 1
+    with sqlite3.connect(tmp_path / "excel.sqlite3") as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM user_accounts WHERE email = 'admin@qq.com'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_fixed_admin_cannot_enter_password_reset_flow(client: TestClient) -> None:
+    forgot_response = client.post(
+        "/api/auth/password/forgot",
+        json={"email": "admin@qq.com"},
+    )
+
+    assert forgot_response.status_code == 200
+    assert forgot_response.json() == {
+        "email": "admin@qq.com",
+        "reset_token": None,
+        "expires_at": None,
+    }
+    assert _login(client, "admin@qq.com", "admin")
+
+
+def test_stale_fixed_admin_reset_token_cannot_change_password(tmp_path: Path) -> None:
+    database_path = tmp_path / "excel.sqlite3"
+    repository = SQLiteExcelAssetRepository(database_path)
+    service = AuthService(
+        repository=repository,
+        session_ttl_hours=24,
+        password_reset_ttl_minutes=30,
+        password_hash_iterations=1_000,
+    )
+    service.initialize()
+    admin = repository.get_user_by_email("admin@qq.com")
+    assert admin is not None
+    token = "stale-fixed-admin-reset-token"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO password_reset_tokens
+              (reset_token_id, user_id, token_hash, created_at, expires_at, used_at)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                "reset_stale_admin",
+                admin.user_id,
+                hash_token(token),
+                admin.created_at,
+                expires_at_iso(minutes=30),
+            ),
+        )
+
+    with pytest.raises(PasswordResetTokenError, match="invalid or expired"):
+        service.reset_password(token, "new-admin-password")
+    assert service.login("admin@qq.com", "admin").user.role.value == "admin"
 
 
 def test_login_rate_limit_is_shared_through_repository(tmp_path: Path) -> None:
     repository = SQLiteExcelAssetRepository(tmp_path / "excel.sqlite3")
     first_service = AuthService(
         repository=repository,
-        admin_email="admin@qq.com",
-        admin_password="admin",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
@@ -358,8 +610,6 @@ def test_login_rate_limit_is_shared_through_repository(tmp_path: Path) -> None:
     )
     second_service = AuthService(
         repository=repository,
-        admin_email="admin@qq.com",
-        admin_password="admin",
         session_ttl_hours=24,
         password_reset_ttl_minutes=30,
         password_hash_iterations=1_000,
